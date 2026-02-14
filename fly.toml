@@ -1,0 +1,19 @@
+app = "twitch-notifier-bot"
+primary_region = "iad"
+
+[build]
+  builder = "paketobuildpacks/builder:base"
+
+[env]
+  CHECK_INTERVAL_SECONDS = "90"
+
+# This ensures the database file persists across deploys
+[[mounts]]
+  source = "twitch_bot_data"
+  destination = "/data"
+
+[deploy]
+  release_command = "python -c 'from database import Database; Database(\"/data/twitch_bot.db\")'"
+
+# Discord bot doesn't need HTTP, so we don't expose ports
+# This saves resources
