@@ -1,2 +1,43 @@
-fly.toml
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
 .venv
+
+# Database
+*.db
+*.db-journal
+
+# Environment
+.env
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+README.md
+TESTING.md
+DEPLOYMENT.md
+ARCHITECTURE.md
+GETTING_STARTED.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
