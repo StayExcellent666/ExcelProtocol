@@ -416,6 +416,90 @@ async def bot_stats(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.tree.command(name="testnotification", description="Send a test stream notification to see what it looks like")
+async def test_notification(interaction: discord.Interaction):
+    """Send a test notification to preview the embed design"""
+    # Check if user has manage guild permission
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need 'Manage Server' permission to use this command.",
+            ephemeral=True
+        )
+        return
+    
+    # Get the notification channel
+    channel_id = bot.db.get_notification_channel(interaction.guild_id)
+    if not channel_id:
+        channel_id = interaction.channel_id
+    
+    channel = bot.get_channel(channel_id)
+    
+    if not channel:
+        await interaction.response.send_message(
+            "❌ Notification channel not found. Use `/setchannel` first.",
+            ephemeral=True
+        )
+        return
+    
+    # Create a fake stream data object
+    fake_stream = {
+        'user_name': 'TestStreamer',
+        'user_login': 'teststreamer',
+        'title': 'This is a test notification! Playing some epic games 🎮',
+        'game_name': 'Valorant',
+        'viewer_count': 1337,
+        'thumbnail_url': 'https://static-cdn.jtvnw.net/previews-ttv/live_user_teststreamer-{width}x{height}.jpg',
+        'profile_image_url': 'https://static-cdn.jtvnw.net/jtv_user_pictures/default_profile_image-300x300.png'
+    }
+    
+    # Create the same embed as real notifications
+    embed = discord.Embed(
+        title=fake_stream['title'],
+        url=f"https://twitch.tv/{fake_stream['user_login']}",
+        description=f"**{fake_stream['user_name']}** is now live!",
+        color=0x9146FF,  # Twitch purple
+        timestamp=datetime.utcnow()
+    )
+    
+    embed.set_author(
+        name=fake_stream['user_name'],
+        url=f"https://twitch.tv/{fake_stream['user_login']}",
+        icon_url=fake_stream.get('profile_image_url', '')
+    )
+    
+    embed.add_field(
+        name="Game",
+        value=fake_stream['game_name'] or "No category",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="Viewers",
+        value=str(fake_stream['viewer_count']),
+        inline=True
+    )
+    
+    # Use stream thumbnail
+    thumbnail_url = fake_stream['thumbnail_url'].replace('{width}', '440').replace('{height}', '248')
+    embed.set_image(url=thumbnail_url)
+    
+    embed.set_footer(
+        text="🧪 TEST NOTIFICATION - This is a preview",
+        icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png"
+    )
+    
+    try:
+        await channel.send(embed=embed)
+        await interaction.response.send_message(
+            f"✅ Test notification sent to {channel.mention}!",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Failed to send test notification: {str(e)}",
+            ephemeral=True
+        )
+        
 # Run the bot
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
