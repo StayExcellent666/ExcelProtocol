@@ -80,6 +80,18 @@ class TwitchNotifierBot(discord.Client):
                     if streamer_name in self.live_streamers:
                         continue
                     
+                    # Check if stream just started (within the last 5 minutes)
+                    # This prevents re-notifying about old streams after bot restart
+                    stream_start = datetime.strptime(stream['started_at'], '%Y-%m-%dT%H:%M:%SZ')
+                    time_since_start = datetime.utcnow() - stream_start
+                    
+                    # Only notify if stream started recently (within 5 minutes)
+                    # This accounts for bot restarts and prevents spam
+                    if time_since_start.total_seconds() > 300:  # 5 minutes = 300 seconds
+                        logger.info(f"Skipping {streamer_name} - stream started {int(time_since_start.total_seconds()/60)} minutes ago")
+                        self.live_streamers.add(streamer_name)  # Still mark as seen
+                        continue
+                    
                     # Mark as notified
                     self.live_streamers.add(streamer_name)
                     
