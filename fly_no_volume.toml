@@ -1,0 +1,12 @@
+app = "excelprotocol"  # Your app name
+
+[build]
+
+[env]
+  CHECK_INTERVAL_SECONDS = "90"
+
+# Commenting out volume for now - database will be in container
+# We'll add persistent storage after first successful deploy
+# [[mounts]]
+#   source = "twitch_bot_data"
+#   destination = "/data"
