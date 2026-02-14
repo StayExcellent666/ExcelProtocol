@@ -41,6 +41,20 @@ class Database:
             )
         ''')
         
+        # Add embed_color column if it doesn't exist (migration)
+        cursor.execute('''
+            SELECT COUNT(*) FROM pragma_table_info('server_settings') 
+            WHERE name='embed_color'
+        ''')
+        has_color_column = cursor.fetchone()[0] > 0
+        
+        if not has_color_column:
+            cursor.execute('''
+                ALTER TABLE server_settings 
+                ADD COLUMN embed_color INTEGER DEFAULT 0x9146FF
+            ''')
+            logger.info("Added embed_color column to server_settings")
+        
         # Table for monitored streamers
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS monitored_streamers (
@@ -194,6 +208,39 @@ class Database:
         conn.close()
         
         return row[0] if row else None
+    
+    def set_embed_color(self, guild_id: int, color: int):
+        """Set the embed color for a server (as hex integer)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO server_settings (guild_id, notification_channel_id, embed_color)
+            VALUES (?, 0, ?)
+            ON CONFLICT(guild_id) 
+            DO UPDATE SET embed_color = ?
+        ''', (guild_id, color, color))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Set embed color for guild {guild_id} to {hex(color)}")
+    
+    def get_embed_color(self, guild_id: int) -> int:
+        """Get the embed color for a server (returns hex integer)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT embed_color
+            FROM server_settings
+            WHERE guild_id = ?
+        ''', (guild_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        # Return custom color or default Twitch purple
+        return row[0] if row and row[0] else 0x9146FF
     
     def cleanup_guild(self, guild_id: int):
         """Remove all data for a guild (called when bot is removed from server)"""
