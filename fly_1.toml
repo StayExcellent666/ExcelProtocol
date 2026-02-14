@@ -1,0 +1,10 @@
+app = "your-app-name"  # Change this to your actual app name
+
+[build]
+
+[env]
+  CHECK_INTERVAL_SECONDS = "90"
+
+[[mounts]]
+  source = "twitch_bot_data"
+  destination = "/data"
