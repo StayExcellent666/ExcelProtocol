@@ -499,6 +499,126 @@ async def test_notification(interaction: discord.Interaction):
             f"❌ Failed to send test notification: {str(e)}",
             ephemeral=True
         )
+
+@bot.tree.command(name="importfile", description="Import multiple streamers from a text file")
+@app_commands.describe(file="Text file with one streamer name per line")
+async def import_file(interaction: discord.Interaction, file: discord.Attachment):
+    """Import streamers from a text file (one per line)"""
+    # Check permissions
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need 'Manage Server' permission to use this command.",
+            ephemeral=True
+        )
+        return
+    
+    # Check if it's a text file
+    if not file.filename.endswith('.txt'):
+        await interaction.response.send_message(
+            "❌ Please upload a .txt file with one streamer name per line.",
+            ephemeral=True
+        )
+        return
+    
+    # Defer response since this might take a while
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # Download and read the file
+        file_content = await file.read()
+        text = file_content.decode('utf-8')
+        
+        # Split by lines and clean up
+        streamer_names = [
+            line.strip().lower() 
+            for line in text.split('\n') 
+            if line.strip() and not line.strip().startswith('#')
+        ]
+        
+        if not streamer_names:
+            await interaction.followup.send(
+                "❌ No streamer names found in the file.",
+                ephemeral=True
+            )
+            return
+        
+        # Get notification channel
+        channel_id = bot.db.get_notification_channel(interaction.guild_id)
+        if not channel_id:
+            channel_id = interaction.channel_id
+            bot.db.set_notification_channel(interaction.guild_id, channel_id)
+        
+        # Track results
+        successful = []
+        failed = []
+        already_added = []
+        
+        # Process each streamer
+        for streamer_name in streamer_names:
+            # Verify streamer exists on Twitch
+            user_info = await bot.twitch.get_user(streamer_name)
+            
+            if not user_info:
+                failed.append(streamer_name)
+                continue
+            
+            # Try to add to database
+            success = bot.db.add_streamer(
+                interaction.guild_id, 
+                user_info['login'], 
+                channel_id
+            )
+            
+            if success:
+                successful.append(user_info['display_name'])
+            else:
+                already_added.append(user_info['display_name'])
+        
+        # Build response message
+        response_parts = []
+        
+        if successful:
+            response_parts.append(
+                f"✅ **Successfully added {len(successful)} streamer(s):**\n" +
+                ", ".join(successful)
+            )
+        
+        if already_added:
+            response_parts.append(
+                f"ℹ️ **Already monitoring {len(already_added)} streamer(s):**\n" +
+                ", ".join(already_added)
+            )
+        
+        if failed:
+            response_parts.append(
+                f"❌ **Failed to add {len(failed)} streamer(s)** (not found on Twitch):\n" +
+                ", ".join(failed)
+            )
+        
+        # Add summary
+        summary = f"\n📊 **Summary:** {len(successful)} added, {len(already_added)} already existed, {len(failed)} failed"
+        response_parts.append(summary)
+        
+        # Send response
+        final_response = "\n\n".join(response_parts)
+        
+        # Discord has a 2000 character limit, so truncate if needed
+        if len(final_response) > 1900:
+            final_response = final_response[:1900] + "\n\n... (response truncated)"
+        
+        await interaction.followup.send(final_response, ephemeral=True)
+        
+    except UnicodeDecodeError:
+        await interaction.followup.send(
+            "❌ Could not read file. Please make sure it's a plain text (.txt) file.",
+            ephemeral=True
+        )
+    except Exception as e:
+        logger.error(f"Error importing streamers from file: {e}", exc_info=True)
+        await interaction.followup.send(
+            f"❌ An error occurred while importing: {str(e)}",
+            ephemeral=True
+        )
         
 # Run the bot
 if __name__ == "__main__":
