@@ -257,10 +257,11 @@ async def list_streamers(interaction: discord.Interaction):
         return
     
     # Create embed
+    embed_color = bot.db.get_embed_color(interaction.guild_id)
     embed = discord.Embed(
         title="📺 Monitored Streamers",
         description=f"Watching {len(streamers)} streamer(s) in this server",
-        color=0x9146FF
+        color=embed_color
     )
     
     channel_id = bot.db.get_notification_channel(interaction.guild_id)
@@ -271,12 +272,40 @@ async def list_streamers(interaction: discord.Interaction):
             inline=False
         )
     
-    streamer_list = "\n".join([f"• [{s['streamer_name']}](https://twitch.tv/{s['streamer_name']})" for s in streamers])
-    embed.add_field(
-        name="Streamers",
-        value=streamer_list,
-        inline=False
-    )
+    # Split streamers into chunks to avoid 1024 character limit per field
+    streamer_links = [f"• [{s['streamer_name']}](https://twitch.tv/{s['streamer_name']})" for s in streamers]
+    
+    # Build fields with max 1000 characters each (safe margin)
+    current_field = []
+    current_length = 0
+    field_num = 1
+    
+    for link in streamer_links:
+        link_length = len(link) + 1  # +1 for newline
+        
+        if current_length + link_length > 1000 and current_field:
+            # Add current field and start a new one
+            field_name = "Streamers" if field_num == 1 else f"Streamers (continued {field_num})"
+            embed.add_field(
+                name=field_name,
+                value="\n".join(current_field),
+                inline=False
+            )
+            current_field = [link]
+            current_length = link_length
+            field_num += 1
+        else:
+            current_field.append(link)
+            current_length += link_length
+    
+    # Add the last field
+    if current_field:
+        field_name = "Streamers" if field_num == 1 else f"Streamers (continued {field_num})"
+        embed.add_field(
+            name=field_name,
+            value="\n".join(current_field),
+            inline=False
+        )
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
