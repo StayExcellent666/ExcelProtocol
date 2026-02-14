@@ -119,12 +119,15 @@ class TwitchNotifierBot(discord.Client):
                 logger.warning(f"Channel {server_data['channel_id']} not found")
                 return
             
+            # Get custom color for this server (or default)
+            embed_color = self.db.get_embed_color(server_data['guild_id'])
+            
             # Create embed notification
             embed = discord.Embed(
                 title=stream['title'],
                 url=f"https://twitch.tv/{stream['user_login']}",
                 description=f"**{stream['user_name']}** is now live!",
-                color=0x9146FF,  # Twitch purple
+                color=embed_color,  # Use custom or default color
                 timestamp=datetime.utcnow()
             )
             
@@ -152,7 +155,16 @@ class TwitchNotifierBot(discord.Client):
             
             embed.set_footer(text="Twitch", icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png")
             
-            await channel.send(embed=embed)
+            # Create Watch Stream button
+            view = discord.ui.View()
+            view.add_item(discord.ui.Button(
+                label="Watch Stream",
+                url=f"https://twitch.tv/{stream['user_login']}",
+                style=discord.ButtonStyle.link,
+                emoji="🔴"
+            ))
+            
+            await channel.send(embed=embed, view=view)
             logger.info(f"Sent notification for {stream['user_name']} to {channel.guild.name}")
         
         except Exception as e:
@@ -483,13 +495,26 @@ async def test_notification(interaction: discord.Interaction):
     thumbnail_url = fake_stream['thumbnail_url'].replace('{width}', '440').replace('{height}', '248')
     embed.set_image(url=thumbnail_url)
     
+    # Get custom color for this server
+    test_color = bot.db.get_embed_color(interaction.guild_id)
+    embed.color = test_color
+    
     embed.set_footer(
         text="🧪 TEST NOTIFICATION - This is a preview",
         icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png"
     )
     
+    # Create Watch Stream button
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(
+        label="Watch Stream",
+        url=f"https://twitch.tv/{fake_stream['user_login']}",
+        style=discord.ButtonStyle.link,
+        emoji="🔴"
+    ))
+    
     try:
-        await channel.send(embed=embed)
+        await channel.send(embed=embed, view=view)
         await interaction.response.send_message(
             f"✅ Test notification sent to {channel.mention}!",
             ephemeral=True
@@ -619,7 +644,88 @@ async def import_file(interaction: discord.Interaction, file: discord.Attachment
             f"❌ An error occurred while importing: {str(e)}",
             ephemeral=True
         )
-        
+
+@bot.tree.command(name="color", description="Set the embed color for stream notifications")
+@app_commands.describe(color="Hex color code (e.g., #9146FF, #FF0000, #00FF00)")
+async def set_color(interaction: discord.Interaction, color: str):
+    """Set custom embed color for notifications"""
+    # Check permissions
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need 'Manage Server' permission to use this command.",
+            ephemeral=True
+        )
+        return
+    
+    # Clean up the color input
+    color = color.strip()
+    if color.startswith('#'):
+        color = color[1:]
+    
+    # Validate hex color
+    if len(color) != 6:
+        await interaction.response.send_message(
+            "❌ Invalid color format. Please use 6-digit hex code (e.g., `#9146FF` or `9146FF`)",
+            ephemeral=True
+        )
+        return
+    
+    try:
+        # Convert hex string to integer
+        color_int = int(color, 16)
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Invalid hex color. Use only 0-9 and A-F characters (e.g., `#9146FF`)",
+            ephemeral=True
+        )
+        return
+    
+    # Save to database
+    bot.db.set_embed_color(interaction.guild_id, color_int)
+    
+    # Create preview embed
+    preview_embed = discord.Embed(
+        title="Color Updated!",
+        description=f"Stream notifications will now use this color.",
+        color=color_int
+    )
+    
+    preview_embed.add_field(
+        name="Hex Code",
+        value=f"`#{color.upper()}`",
+        inline=True
+    )
+    
+    preview_embed.add_field(
+        name="Preview",
+        value="This is how your notifications will look!",
+        inline=True
+    )
+    
+    await interaction.response.send_message(embed=preview_embed, ephemeral=True)
+
+@bot.tree.command(name="resetcolor", description="Reset embed color to default Twitch purple")
+async def reset_color(interaction: discord.Interaction):
+    """Reset notification color to default"""
+    # Check permissions
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need 'Manage Server' permission to use this command.",
+            ephemeral=True
+        )
+        return
+    
+    # Reset to Twitch purple
+    bot.db.set_embed_color(interaction.guild_id, 0x9146FF)
+    
+    embed = discord.Embed(
+        title="✅ Color Reset",
+        description="Stream notifications will now use the default Twitch purple.",
+        color=0x9146FF
+    )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # Run the bot
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
