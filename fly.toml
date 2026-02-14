@@ -1,12 +1,13 @@
-app = "excelprotocol"  # Your app name
+app = "twitch-notifier-bot"
+primary_region = "iad"
 
-[build]
+# This ensures the database file persists across deploys
+[[mounts]]
+  source = "twitch_bot_data"
+  destination = "/data"
 
-[env]
-  CHECK_INTERVAL_SECONDS = "90"
+[deploy]
+  release_command = "python -c 'from database import Database; Database(\"/data/twitch_bot.db\")'"
 
-# Commenting out volume for now - database will be in container
-# We'll add persistent storage after first successful deploy
-# [[mounts]]
-#   source = "twitch_bot_data"
-#   destination = "/data"
+# Discord bot doesn't need HTTP, so we don't expose ports
+# This saves resources
