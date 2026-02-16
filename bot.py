@@ -1031,7 +1031,7 @@ async def cleanup_set(
             f"✅ **Cleanup configured for {channel.mention}**\n\n"
             f"• **Interval:** {hours} hours ({days} day{'s' if days != 1 else ''})\n"
             f"• **Keep pinned:** {'Yes' if keep_pinned else 'No'}\n\n"
-            f"Messages older than {hours} hours will be deleted automatically every hour.",
+            f"Messages older than {hours} hours will be deleted automatically every 6 hours.",
             ephemeral=True
         )
     else:
