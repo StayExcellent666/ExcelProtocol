@@ -34,6 +34,9 @@ class TwitchNotifierBot(discord.Client):
         
         # Track bot start time for uptime calculation
         self.start_time = datetime.utcnow()
+        
+        # Track cleanup statistics
+        self.cleanup_stats = {'last_run': None, 'total_deleted': 0}
     
     async def setup_hook(self):
         """Called when bot is starting up"""
@@ -49,6 +52,20 @@ class TwitchNotifierBot(discord.Client):
         if not self.check_streams.is_running():
             self.check_streams.start()
             logger.info("Stream checking loop started")
+        
+        # Start the cleanup loop
+        if not self.cleanup_channels.is_running():
+            self.cleanup_channels.start()
+            logger.info("Channel cleanup loop started")
+    
+    async def on_guild_remove(self, guild):
+        """Called when bot is removed from a server - clean up data"""
+        logger.info(f"Bot removed from guild: {guild.name} (ID: {guild.id})")
+        
+        # Clean up all data for this guild
+        self.db.cleanup_guild(guild.id)
+        
+        logger.info(f"Cleaned up all data for guild {guild.id}")
     
     @tasks.loop(seconds=CHECK_INTERVAL_SECONDS)
     async def check_streams(self):
@@ -234,6 +251,104 @@ class TwitchNotifierBot(discord.Client):
         
         except Exception as e:
             logger.error(f"Error in delete_offline_notifications: {e}", exc_info=True)
+    
+    @tasks.loop(hours=1)
+    async def cleanup_channels(self):
+        """Periodically clean up configured channels"""
+        try:
+            configs = self.db.get_all_cleanup_configs()
+            
+            if not configs:
+                logger.debug("No cleanup configs to process")
+                return
+            
+            logger.info(f"Running cleanup for {len(configs)} channel(s)...")
+            total_deleted = 0
+            
+            for config in configs:
+                deleted = await self.cleanup_channel(
+                    config['guild_id'],
+                    config['channel_id'],
+                    config['interval_hours'],
+                    config['keep_pinned']
+                )
+                total_deleted += deleted
+            
+            self.cleanup_stats['last_run'] = datetime.utcnow()
+            self.cleanup_stats['total_deleted'] += total_deleted
+            logger.info(f"Cleanup complete: {total_deleted} messages deleted")
+        
+        except Exception as e:
+            logger.error(f"Error in cleanup loop: {e}", exc_info=True)
+    
+    @cleanup_channels.before_loop
+    async def before_cleanup_channels(self):
+        """Wait until bot is ready before starting cleanup loop"""
+        await self.wait_until_ready()
+    
+    async def cleanup_channel(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool) -> int:
+        """Clean up old messages in a channel"""
+        try:
+            channel = self.get_channel(channel_id)
+            
+            if not channel:
+                logger.warning(f"Channel {channel_id} not found for cleanup")
+                return 0
+            
+            # Check bot permissions
+            permissions = channel.permissions_for(channel.guild.me)
+            if not permissions.manage_messages or not permissions.read_message_history:
+                logger.error(f"Missing permissions for cleanup in channel {channel_id}")
+                return 0
+            
+            # Calculate cutoff time
+            cutoff_time = datetime.utcnow() - timedelta(hours=interval_hours)
+            
+            # Fetch messages older than cutoff
+            messages_to_delete = []
+            async for message in channel.history(limit=1000, before=cutoff_time):
+                # Skip if we want to keep pinned messages and this is pinned
+                if keep_pinned and message.pinned:
+                    continue
+                messages_to_delete.append(message)
+            
+            if not messages_to_delete:
+                logger.debug(f"No messages to delete in channel {channel_id}")
+                return 0
+            
+            # Discord allows bulk delete for messages less than 14 days old
+            deleted_count = 0
+            now = datetime.utcnow()
+            bulk_delete = [m for m in messages_to_delete if (now - m.created_at).days < 14]
+            individual_delete = [m for m in messages_to_delete if (now - m.created_at).days >= 14]
+            
+            # Bulk delete (100 at a time)
+            for i in range(0, len(bulk_delete), 100):
+                batch = bulk_delete[i:i+100]
+                await channel.delete_messages(batch)
+                deleted_count += len(batch)
+            
+            # Individual delete for old messages
+            for message in individual_delete:
+                try:
+                    await message.delete()
+                    deleted_count += 1
+                except discord.NotFound:
+                    pass
+                except Exception as e:
+                    logger.error(f"Error deleting message: {e}")
+            
+            if deleted_count > 0:
+                logger.info(f"Deleted {deleted_count} messages from {channel.name} (guild {guild_id})")
+            
+            return deleted_count
+        
+        except discord.Forbidden:
+            logger.error(f"No permission to delete messages in channel {channel_id}")
+            return 0
+        except Exception as e:
+            logger.error(f"Error cleaning up channel {channel_id}: {e}", exc_info=True)
+            return 0
 
 # Initialize bot
 bot = TwitchNotifierBot()
@@ -862,6 +977,173 @@ async def auto_delete(interaction: discord.Interaction, enabled: bool):
         )
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="cleanupset", description="Configure automatic message cleanup for a channel")
+@app_commands.describe(
+    channel="Channel to clean up",
+    hours="Delete messages older than this many hours (minimum 12)",
+    keep_pinned="Keep pinned messages (default: Yes)"
+)
+async def cleanup_set(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    hours: int,
+    keep_pinned: bool = True
+):
+    """Set up automatic cleanup for a channel"""
+    # Check permissions
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need 'Manage Server' permission to use this command.",
+            ephemeral=True
+        )
+        return
+    
+    # Validate hours
+    if hours < 12:
+        await interaction.response.send_message(
+            "❌ Interval must be at least 12 hours.",
+            ephemeral=True
+        )
+        return
+    
+    # Check bot permissions in the channel
+    permissions = channel.permissions_for(channel.guild.me)
+    if not permissions.manage_messages or not permissions.read_message_history:
+        await interaction.response.send_message(
+            f"❌ I don't have the required permissions in {channel.mention}!\n"
+            f"I need: **Manage Messages** and **Read Message History**",
+            ephemeral=True
+        )
+        return
+    
+    # Save config
+    success = bot.db.add_cleanup_config(
+        interaction.guild_id,
+        channel.id,
+        hours,
+        keep_pinned
+    )
+    
+    if success:
+        days = hours // 24
+        await interaction.response.send_message(
+            f"✅ **Cleanup configured for {channel.mention}**\n\n"
+            f"• **Interval:** {hours} hours ({days} day{'s' if days != 1 else ''})\n"
+            f"• **Keep pinned:** {'Yes' if keep_pinned else 'No'}\n\n"
+            f"Messages older than {hours} hours will be deleted automatically every hour.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "❌ Failed to save configuration. Please try again.",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="cleanuplist", description="List all configured cleanup channels")
+async def cleanup_list(interaction: discord.Interaction):
+    """Show all cleanup configurations for this server"""
+    configs = bot.db.get_guild_cleanup_configs(interaction.guild_id)
+    
+    if not configs:
+        await interaction.response.send_message(
+            "📋 No cleanup configurations found for this server.\n"
+            "Use `/cleanupset` to set one up!",
+            ephemeral=True
+        )
+        return
+    
+    embed = discord.Embed(
+        title="🗑️ Configured Cleanup Channels",
+        description=f"Auto-cleanup is active in {len(configs)} channel(s)",
+        color=0x00FF00
+    )
+    
+    for config in configs:
+        channel_obj = bot.get_channel(config['channel_id'])
+        channel_name = channel_obj.mention if channel_obj else f"Unknown Channel ({config['channel_id']})"
+        hours = config['interval_hours']
+        days = hours // 24
+        
+        embed.add_field(
+            name=channel_name,
+            value=f"• **Interval:** {hours}h ({days} day{'s' if days != 1 else ''})\n"
+                  f"• **Keep pinned:** {'Yes' if config['keep_pinned'] else 'No'}",
+            inline=False
+        )
+    
+    if bot.cleanup_stats['last_run']:
+        embed.set_footer(text=f"Last cleanup: {bot.cleanup_stats['last_run'].strftime('%Y-%m-%d %H:%M UTC')}")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="cleanupremove", description="Remove cleanup configuration from a channel")
+@app_commands.describe(channel="Channel to remove cleanup from")
+async def cleanup_remove(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Remove cleanup config"""
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need 'Manage Server' permission to use this command.",
+            ephemeral=True
+        )
+        return
+    
+    success = bot.db.remove_cleanup_config(interaction.guild_id, channel.id)
+    
+    if success:
+        await interaction.response.send_message(
+            f"✅ Removed cleanup configuration for {channel.mention}",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ No cleanup configuration found for {channel.mention}",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="cleanuptest", description="Preview what would be deleted (doesn't actually delete)")
+@app_commands.describe(channel="Channel to test cleanup on")
+async def cleanup_test(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Test cleanup without actually deleting"""
+    config = bot.db.get_cleanup_config(interaction.guild_id, channel.id)
+    
+    if not config:
+        await interaction.response.send_message(
+            f"❌ No cleanup configuration found for {channel.mention}\n"
+            f"Use `/cleanupset` first.",
+            ephemeral=True
+        )
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    # Count messages that would be deleted
+    cutoff_time = datetime.utcnow() - timedelta(hours=config['interval_hours'])
+    count = 0
+    
+    try:
+        async for message in channel.history(limit=1000, before=cutoff_time):
+            if config['keep_pinned'] and message.pinned:
+                continue
+            count += 1
+    except discord.Forbidden:
+        await interaction.followup.send(
+            f"❌ I don't have permission to read message history in {channel.mention}",
+            ephemeral=True
+        )
+        return
+    
+    hours = config['interval_hours']
+    days = hours // 24
+    
+    await interaction.followup.send(
+        f"🧪 **Test Results for {channel.mention}**\n\n"
+        f"**Messages that would be deleted:** {count}\n"
+        f"(Checked last 1000 messages older than {hours} hours / {days} day{'s' if days != 1 else ''})\n\n"
+        f"**Keep pinned messages:** {'Yes' if config['keep_pinned'] else 'No'}\n\n"
+        f"ℹ️ This is a preview only - no messages were deleted.",
+        ephemeral=True
+    )
 
 # Run the bot
 if __name__ == "__main__":

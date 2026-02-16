@@ -88,6 +88,25 @@ class Database:
             ON notification_messages(guild_id, streamer_name)
         ''')
         
+        # Create table for channel cleanup configurations
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cleanup_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                interval_hours INTEGER NOT NULL,
+                keep_pinned INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, channel_id)
+            )
+        ''')
+        
+        # Index for faster lookups
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_cleanup_guild 
+            ON cleanup_configs(guild_id)
+        ''')
+        
         # Table for monitored streamers
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS monitored_streamers (
@@ -357,6 +376,117 @@ class Database:
         
         logger.info(f"Deleted {deleted} notification records for {streamer_name} in guild {guild_id}")
     
+    def add_cleanup_config(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool = True) -> bool:
+        """Add or update cleanup configuration for a channel"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO cleanup_configs (guild_id, channel_id, interval_hours, keep_pinned)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, channel_id)
+                DO UPDATE SET interval_hours = ?, keep_pinned = ?
+            ''', (guild_id, channel_id, interval_hours, 1 if keep_pinned else 0, interval_hours, 1 if keep_pinned else 0))
+            
+            conn.commit()
+            logger.info(f"Added cleanup config for channel {channel_id} in guild {guild_id}: {interval_hours}h")
+            return True
+        except Exception as e:
+            logger.error(f"Error adding cleanup config: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def remove_cleanup_config(self, guild_id: int, channel_id: int) -> bool:
+        """Remove cleanup configuration for a channel"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            DELETE FROM cleanup_configs
+            WHERE guild_id = ? AND channel_id = ?
+        ''', (guild_id, channel_id))
+        
+        removed = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        
+        if removed:
+            logger.info(f"Removed cleanup config for channel {channel_id} in guild {guild_id}")
+        
+        return removed
+    
+    def get_guild_cleanup_configs(self, guild_id: int) -> List[Dict]:
+        """Get all cleanup configurations for a guild"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT channel_id, interval_hours, keep_pinned, created_at
+            FROM cleanup_configs
+            WHERE guild_id = ?
+            ORDER BY channel_id
+        ''', (guild_id,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [
+            {
+                'channel_id': row[0],
+                'interval_hours': row[1],
+                'keep_pinned': bool(row[2]),
+                'created_at': row[3]
+            }
+            for row in rows
+        ]
+    
+    def get_all_cleanup_configs(self) -> List[Dict]:
+        """Get all cleanup configurations across all guilds"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT guild_id, channel_id, interval_hours, keep_pinned
+            FROM cleanup_configs
+            ORDER BY guild_id, channel_id
+        ''')
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [
+            {
+                'guild_id': row[0],
+                'channel_id': row[1],
+                'interval_hours': row[2],
+                'keep_pinned': bool(row[3])
+            }
+            for row in rows
+        ]
+    
+    def get_cleanup_config(self, guild_id: int, channel_id: int) -> Optional[Dict]:
+        """Get cleanup configuration for a specific channel"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT interval_hours, keep_pinned
+            FROM cleanup_configs
+            WHERE guild_id = ? AND channel_id = ?
+        ''', (guild_id, channel_id))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'interval_hours': row[0],
+                'keep_pinned': bool(row[1])
+            }
+        return None
+    
     def cleanup_guild(self, guild_id: int):
         """Remove all data for a guild (called when bot is removed from server)"""
         conn = self.get_connection()
@@ -364,6 +494,8 @@ class Database:
         
         cursor.execute('DELETE FROM monitored_streamers WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM server_settings WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM notification_messages WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM cleanup_configs WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()
