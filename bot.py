@@ -113,6 +113,9 @@ class TwitchNotifierBot(discord.Client):
                     if streamer in self.live_streamers and streamer not in live_names:
                         self.live_streamers.remove(streamer)
                         logger.info(f"{streamer} went offline")
+                        
+                        # Delete notification messages if auto-delete is enabled
+                        await self.delete_offline_notifications(streamer)
         
         except Exception as e:
             logger.error(f"Error in check_streams loop: {e}", exc_info=True)
@@ -176,11 +179,61 @@ class TwitchNotifierBot(discord.Client):
                 emoji="🔴"
             ))
             
-            await channel.send(embed=embed, view=view)
+            # Send the notification
+            message = await channel.send(embed=embed, view=view)
             logger.info(f"Sent notification for {stream['user_name']} to {channel.guild.name}")
+            
+            # Save message ID if auto-delete is enabled
+            if self.db.get_auto_delete(server_data['guild_id']):
+                self.db.save_notification_message(
+                    server_data['guild_id'],
+                    stream['user_login'],
+                    server_data['channel_id'],
+                    message.id
+                )
         
         except Exception as e:
             logger.error(f"Error sending notification: {e}", exc_info=True)
+    
+    async def delete_offline_notifications(self, streamer_name: str):
+        """Delete notification messages when streamer goes offline"""
+        try:
+            # Get all servers monitoring this streamer
+            all_streamers = self.db.get_all_streamers()
+            monitoring_servers = [
+                s for s in all_streamers 
+                if s['streamer_name'].lower() == streamer_name.lower()
+            ]
+            
+            for server_data in monitoring_servers:
+                guild_id = server_data['guild_id']
+                
+                # Check if auto-delete is enabled for this server
+                if not self.db.get_auto_delete(guild_id):
+                    continue
+                
+                # Get all notification messages for this streamer
+                messages = self.db.get_notification_messages(guild_id, streamer_name)
+                
+                for msg_data in messages:
+                    try:
+                        channel = self.get_channel(msg_data['channel_id'])
+                        if channel:
+                            message = await channel.fetch_message(msg_data['message_id'])
+                            await message.delete()
+                            logger.info(f"Deleted notification {msg_data['message_id']} for {streamer_name}")
+                    except discord.NotFound:
+                        logger.warning(f"Message {msg_data['message_id']} not found (already deleted?)")
+                    except discord.Forbidden:
+                        logger.error(f"No permission to delete message {msg_data['message_id']}")
+                    except Exception as e:
+                        logger.error(f"Error deleting message: {e}")
+                
+                # Clean up database records
+                self.db.delete_notification_messages(guild_id, streamer_name)
+        
+        except Exception as e:
+            logger.error(f"Error in delete_offline_notifications: {e}", exc_info=True)
 
 # Initialize bot
 bot = TwitchNotifierBot()
@@ -764,6 +817,49 @@ async def reset_color(interaction: discord.Interaction):
         description="Stream notifications will now use the default Twitch purple.",
         color=0x9146FF
     )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="autodelete", description="Toggle auto-deletion of notifications when streams end")
+@app_commands.describe(enabled="Enable or disable auto-delete")
+async def auto_delete(interaction: discord.Interaction, enabled: bool):
+    """Toggle automatic deletion of notifications when streamers go offline"""
+    # Check permissions
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need 'Manage Server' permission to use this command.",
+            ephemeral=True
+        )
+        return
+    
+    # Save setting
+    bot.db.set_auto_delete(interaction.guild_id, enabled)
+    
+    # Create response embed
+    embed = discord.Embed(
+        title="🗑️ Auto-Delete Enabled" if enabled else "📌 Auto-Delete Disabled",
+        description=(
+            "Notifications will be **automatically deleted** when streams end." if enabled else
+            "Notifications will **stay in the channel** after streams end."
+        ),
+        color=0x00FF00 if enabled else 0xFF0000
+    )
+    
+    if enabled:
+        embed.add_field(
+            name="How it works",
+            value="• Stream goes live → Notification sent\n"
+                  "• Stream ends → Notification deleted\n"
+                  "• Keeps your channel clean!",
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="How it works",
+            value="• Notifications stay in the channel permanently\n"
+                  "• Useful for keeping a history of streams",
+            inline=False
+        )
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 

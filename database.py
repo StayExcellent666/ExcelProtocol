@@ -55,6 +55,39 @@ class Database:
             ''')
             logger.info("Added embed_color column to server_settings")
         
+        # Add auto_delete_notifications column if it doesn't exist (migration)
+        cursor.execute('''
+            SELECT COUNT(*) FROM pragma_table_info('server_settings') 
+            WHERE name='auto_delete_notifications'
+        ''')
+        has_auto_delete_column = cursor.fetchone()[0] > 0
+        
+        if not has_auto_delete_column:
+            cursor.execute('''
+                ALTER TABLE server_settings 
+                ADD COLUMN auto_delete_notifications INTEGER DEFAULT 0
+            ''')
+            logger.info("Added auto_delete_notifications column to server_settings")
+        
+        # Create table for storing notification message IDs
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS notification_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                streamer_name TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, streamer_name, message_id)
+            )
+        ''')
+        
+        # Index for faster lookups
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_notification_guild_streamer 
+            ON notification_messages(guild_id, streamer_name)
+        ''')
+        
         # Table for monitored streamers
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS monitored_streamers (
@@ -241,6 +274,88 @@ class Database:
         
         # Return custom color or default Twitch purple
         return row[0] if row and row[0] else 0x9146FF
+    
+    def set_auto_delete(self, guild_id: int, enabled: bool):
+        """Enable or disable auto-delete for a server"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO server_settings (guild_id, notification_channel_id, auto_delete_notifications)
+            VALUES (?, 0, ?)
+            ON CONFLICT(guild_id) 
+            DO UPDATE SET auto_delete_notifications = ?
+        ''', (guild_id, 1 if enabled else 0, 1 if enabled else 0))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Set auto-delete for guild {guild_id} to {enabled}")
+    
+    def get_auto_delete(self, guild_id: int) -> bool:
+        """Check if auto-delete is enabled for a server"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT auto_delete_notifications
+            FROM server_settings
+            WHERE guild_id = ?
+        ''', (guild_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        return bool(row[0]) if row else False
+    
+    def save_notification_message(self, guild_id: int, streamer_name: str, channel_id: int, message_id: int):
+        """Save a notification message ID for later deletion"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO notification_messages (guild_id, streamer_name, channel_id, message_id)
+                VALUES (?, ?, ?, ?)
+            ''', (guild_id, streamer_name.lower(), channel_id, message_id))
+            
+            conn.commit()
+            logger.info(f"Saved notification message {message_id} for {streamer_name} in guild {guild_id}")
+        except sqlite3.IntegrityError:
+            logger.warning(f"Message {message_id} already saved")
+        finally:
+            conn.close()
+    
+    def get_notification_messages(self, guild_id: int, streamer_name: str) -> List[Dict]:
+        """Get all notification messages for a streamer in a guild"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT channel_id, message_id
+            FROM notification_messages
+            WHERE guild_id = ? AND streamer_name = ?
+        ''', (guild_id, streamer_name.lower()))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        return [{'channel_id': row[0], 'message_id': row[1]} for row in rows]
+    
+    def delete_notification_messages(self, guild_id: int, streamer_name: str):
+        """Remove notification message records after deletion"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            DELETE FROM notification_messages
+            WHERE guild_id = ? AND streamer_name = ?
+        ''', (guild_id, streamer_name.lower()))
+        
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"Deleted {deleted} notification records for {streamer_name} in guild {guild_id}")
     
     def cleanup_guild(self, guild_id: int):
         """Remove all data for a guild (called when bot is removed from server)"""
