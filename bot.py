@@ -252,7 +252,7 @@ class TwitchNotifierBot(discord.Client):
         except Exception as e:
             logger.error(f"Error in delete_offline_notifications: {e}", exc_info=True)
     
-    @tasks.loop(hours=1)
+    @tasks.loop(hours=6)
     async def cleanup_channels(self):
         """Periodically clean up configured channels"""
         try:
