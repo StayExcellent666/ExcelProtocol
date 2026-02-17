@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timedelta
 from database import Database
 from twitch_api import TwitchAPI
-from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS
+from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID
 
 # Set up logging
 logging.basicConfig(
@@ -37,6 +37,10 @@ class TwitchNotifierBot(discord.Client):
         
         # Track cleanup statistics
         self.cleanup_stats = {'last_run': None, 'total_deleted': 0}
+        
+        # Track errors for DM alerts (rate limiting)
+        self.error_alerts_sent = {}  # {error_key: timestamp}
+        self.alert_cooldown = 3600  # Don't spam same error within 1 hour
     
     async def setup_hook(self):
         """Called when bot is starting up"""
@@ -136,6 +140,15 @@ class TwitchNotifierBot(discord.Client):
         
         except Exception as e:
             logger.error(f"Error in check_streams loop: {e}", exc_info=True)
+            
+            # Send alert for critical stream checking failures
+            await self.send_owner_alert(
+                "Stream Check Failed",
+                f"**Critical error in stream checking loop!**\n\n"
+                f"Error: `{str(e)[:200]}`\n\n"
+                f"This might mean Twitch API is down or there's a code bug.\n"
+                f"Stream notifications may not be working."
+            )
     
     @check_streams.before_loop
     async def before_check_streams(self):
@@ -149,6 +162,16 @@ class TwitchNotifierBot(discord.Client):
             
             if not channel:
                 logger.warning(f"Channel {server_data['channel_id']} not found")
+                
+                # Send alert to owner
+                await self.send_owner_alert(
+                    "Channel Not Found",
+                    f"**Notification channel not found!**\n\n"
+                    f"Channel ID: `{server_data['channel_id']}`\n"
+                    f"This usually means the channel was deleted.\n\n"
+                    f"**Action needed:** Run `/setchannel` in the server to fix this.",
+                    guild_id=server_data['guild_id']
+                )
                 return
             
             # Get custom color for this server (or default)
@@ -252,7 +275,68 @@ class TwitchNotifierBot(discord.Client):
         except Exception as e:
             logger.error(f"Error in delete_offline_notifications: {e}", exc_info=True)
     
-    @tasks.loop(hours=6)
+    async def send_owner_alert(self, error_type: str, details: str, guild_id: int = None):
+        """Send DM alert to bot owner about critical errors"""
+        try:
+            # Check if we already sent this alert recently (rate limiting)
+            error_key = f"{error_type}:{guild_id or 'global'}"
+            current_time = datetime.utcnow()
+            
+            if error_key in self.error_alerts_sent:
+                last_sent = self.error_alerts_sent[error_key]
+                time_diff = (current_time - last_sent).total_seconds()
+                
+                if time_diff < self.alert_cooldown:
+                    logger.debug(f"Skipping alert for {error_key} - cooldown active")
+                    return
+            
+            # Get owner user
+            if BOT_OWNER_ID == 0:
+                logger.warning("BOT_OWNER_ID not set - cannot send alert DM")
+                return
+            
+            owner = await self.fetch_user(BOT_OWNER_ID)
+            if not owner:
+                logger.error(f"Could not fetch owner user {BOT_OWNER_ID}")
+                return
+            
+            # Get guild name if available
+            guild_name = "Unknown"
+            if guild_id:
+                guild = self.get_guild(guild_id)
+                if guild:
+                    guild_name = guild.name
+            
+            # Create alert embed
+            embed = discord.Embed(
+                title=f"🚨 Bot Error Alert: {error_type}",
+                description=details,
+                color=0xFF0000,
+                timestamp=current_time
+            )
+            
+            if guild_id:
+                embed.add_field(
+                    name="Server",
+                    value=f"{guild_name}\nID: `{guild_id}`",
+                    inline=False
+                )
+            
+            embed.set_footer(text="ExcelProtocol Error Monitor")
+            
+            # Send DM
+            await owner.send(embed=embed)
+            
+            # Mark as sent
+            self.error_alerts_sent[error_key] = current_time
+            logger.info(f"Sent error alert to owner: {error_type}")
+        
+        except discord.Forbidden:
+            logger.error("Cannot send DM to owner - DMs may be disabled")
+        except Exception as e:
+            logger.error(f"Error sending owner alert: {e}", exc_info=True)
+    
+    @tasks.loop(hours=1)
     async def cleanup_channels(self):
         """Periodically clean up configured channels"""
         try:
@@ -280,6 +364,14 @@ class TwitchNotifierBot(discord.Client):
         
         except Exception as e:
             logger.error(f"Error in cleanup loop: {e}", exc_info=True)
+            
+            # Send alert for cleanup failures
+            await self.send_owner_alert(
+                "Cleanup Failed",
+                f"**Error in channel cleanup loop!**\n\n"
+                f"Error: `{str(e)[:200]}`\n\n"
+                f"Automatic message cleanup may not be working."
+            )
     
     @cleanup_channels.before_loop
     async def before_cleanup_channels(self):
@@ -299,6 +391,17 @@ class TwitchNotifierBot(discord.Client):
             permissions = channel.permissions_for(channel.guild.me)
             if not permissions.manage_messages or not permissions.read_message_history:
                 logger.error(f"Missing permissions for cleanup in channel {channel_id}")
+                
+                # Send alert to owner
+                await self.send_owner_alert(
+                    "Missing Permissions",
+                    f"**Bot is missing permissions for channel cleanup!**\n\n"
+                    f"Channel: {channel.mention}\n"
+                    f"Server: {channel.guild.name}\n\n"
+                    f"**Missing:** Manage Messages or Read Message History\n\n"
+                    f"**Action needed:** Grant bot the 'Manage Messages' permission in this channel or server.",
+                    guild_id=guild_id
+                )
                 return 0
             
             # Calculate cutoff time
@@ -1031,7 +1134,7 @@ async def cleanup_set(
             f"✅ **Cleanup configured for {channel.mention}**\n\n"
             f"• **Interval:** {hours} hours ({days} day{'s' if days != 1 else ''})\n"
             f"• **Keep pinned:** {'Yes' if keep_pinned else 'No'}\n\n"
-            f"Messages older than {hours} hours will be deleted automatically every 6 hours.",
+            f"Messages older than {hours} hours will be deleted automatically every hour.",
             ephemeral=True
         )
     else:
@@ -1144,6 +1247,164 @@ async def cleanup_test(interaction: discord.Interaction, channel: discord.TextCh
         f"ℹ️ This is a preview only - no messages were deleted.",
         ephemeral=True
     )
+
+@bot.tree.command(name="botinfo", description="Show bot statistics and server information")
+async def bot_info(interaction: discord.Interaction):
+    """Display bot stats including server count and configurations"""
+    # Owner-only command
+    if interaction.user.id != BOT_OWNER_ID:
+        await interaction.response.send_message(
+            "❌ This command is restricted to the bot owner.",
+            ephemeral=True
+        )
+        return
+    
+    # Get all servers bot is in
+    guild_count = len(bot.guilds)
+    
+    # Get total streamers being monitored
+    all_streamers = bot.db.get_all_streamers()
+    unique_streamers = len(set(s['streamer_name'] for s in all_streamers))
+    total_configs = len(all_streamers)
+    
+    # Get cleanup configs
+    cleanup_configs = bot.db.get_all_cleanup_configs()
+    
+    # Create embed
+    embed = discord.Embed(
+        title="🤖 Bot Information",
+        color=0x9146FF
+    )
+    
+    embed.add_field(
+        name="📊 Servers",
+        value=f"{guild_count} server{'s' if guild_count != 1 else ''}",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="📺 Unique Streamers",
+        value=f"{unique_streamers} being monitored",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="🔔 Total Configs",
+        value=f"{total_configs} across all servers",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="🗑️ Cleanup Channels",
+        value=f"{len(cleanup_configs)} configured",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="💾 Memory Usage",
+        value=f"{round(psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024, 1)} MB",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="⏱️ Uptime",
+        value=f"{(datetime.utcnow() - bot.start_time).days} days",
+        inline=True
+    )
+    
+    # List servers
+    server_list = "\n".join([f"• {guild.name} ({guild.id})" for guild in bot.guilds])
+    if len(server_list) > 1024:
+        server_list = server_list[:1020] + "..."
+    
+    embed.add_field(
+        name="🏠 Servers",
+        value=server_list or "None",
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="serverdetails", description="Show detailed info for a specific server")
+@app_commands.describe(server_id="Server ID to check (leave empty for current server)")
+async def server_details(interaction: discord.Interaction, server_id: str = None):
+    """Show streamers and configs for a specific server"""
+    # Owner-only command
+    if interaction.user.id != BOT_OWNER_ID:
+        await interaction.response.send_message(
+            "❌ This command is restricted to the bot owner.",
+            ephemeral=True
+        )
+        return
+    
+    # Use current server if no ID provided
+    guild_id = int(server_id) if server_id else interaction.guild_id
+    
+    # Get guild info
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        await interaction.response.send_message(
+            f"❌ Server with ID {guild_id} not found or bot is not in that server.",
+            ephemeral=True
+        )
+        return
+    
+    # Get streamers for this guild
+    streamers = bot.db.get_server_streamers(guild_id)
+    cleanup_configs = bot.db.get_guild_cleanup_configs(guild_id)
+    
+    embed = discord.Embed(
+        title=f"📋 Server Details: {guild.name}",
+        description=f"Server ID: `{guild_id}`",
+        color=0x9146FF
+    )
+    
+    # Notification channel
+    notif_channel_id = bot.db.get_notification_channel(guild_id)
+    notif_channel = bot.get_channel(notif_channel_id) if notif_channel_id else None
+    
+    embed.add_field(
+        name="🔔 Notification Channel",
+        value=notif_channel.mention if notif_channel else "Not set",
+        inline=False
+    )
+    
+    # Streamers
+    if streamers:
+        streamer_list = "\n".join([f"• {s['streamer_name']}" for s in streamers[:20]])
+        if len(streamers) > 20:
+            streamer_list += f"\n... and {len(streamers) - 20} more"
+        
+        embed.add_field(
+            name=f"📺 Monitored Streamers ({len(streamers)})",
+            value=streamer_list,
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="📺 Monitored Streamers",
+            value="None",
+            inline=False
+        )
+    
+    # Cleanup configs
+    if cleanup_configs:
+        cleanup_list = []
+        for config in cleanup_configs[:5]:
+            channel = bot.get_channel(config['channel_id'])
+            channel_name = channel.mention if channel else f"Unknown ({config['channel_id']})"
+            cleanup_list.append(f"• {channel_name}: {config['interval_hours']}h")
+        
+        if len(cleanup_configs) > 5:
+            cleanup_list.append(f"... and {len(cleanup_configs) - 5} more")
+        
+        embed.add_field(
+            name=f"🗑️ Cleanup Channels ({len(cleanup_configs)})",
+            value="\n".join(cleanup_list),
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Run the bot
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ TWITCH_CLIENT_SECRET = os.getenv('TWITCH_CLIENT_SECRET')
 
 # Bot Settings
 CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', '90'))  # Default: 90 seconds (1.5 minutes)
+BOT_OWNER_ID = int(os.getenv('BOT_OWNER_ID', '0'))  # Your Discord user ID for owner-only commands
 
 # Validate required environment variables
 if not DISCORD_TOKEN:
