@@ -241,9 +241,18 @@ class Database:
             DO UPDATE SET notification_channel_id = ?
         ''', (guild_id, channel_id, channel_id))
         
+        # Also update all streamers to use this channel
+        cursor.execute('''
+            UPDATE monitored_streamers
+            SET channel_id = ?
+            WHERE guild_id = ?
+        ''', (channel_id, guild_id))
+        
+        updated_streamers = cursor.rowcount
+        
         conn.commit()
         conn.close()
-        logger.info(f"Set notification channel for guild {guild_id} to {channel_id}")
+        logger.info(f"Set notification channel for guild {guild_id} to {channel_id} (updated {updated_streamers} streamers)")
     
     def get_notification_channel(self, guild_id: int) -> Optional[int]:
         """Get the notification channel for a server"""
