@@ -24,7 +24,7 @@ RUN apt-get purge -y gcc && \
     apt-get clean
 
 # Copy only necessary Python files
-COPY bot.py database.py twitch_api.py config.py ./
+COPY bot.py database.py twitch_api.py config.py twitch_bot.py twitch_chat_cog.py ./
 
 # Run the bot
 CMD ["python", "bot.py"]
