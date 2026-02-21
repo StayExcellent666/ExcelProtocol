@@ -12,13 +12,14 @@ COMMAND_LIMIT = 75
 
 
 class TwitchChatBot(commands.Bot):
-    def __init__(self, token: str, initial_channels: list, db: Database, twitch_api: TwitchAPI):
+    def __init__(self, token: str, initial_channels: list, db: Database, twitch_api: TwitchAPI, bot_id: str = None):
         super().__init__(
             token=token,
             prefix="!",
             initial_channels=initial_channels or [],
             client_id=TWITCH_CLIENT_ID,
             client_secret=TWITCH_CLIENT_SECRET,
+            bot_id=bot_id,
         )
         self.db = db
         self.twitch_api = twitch_api

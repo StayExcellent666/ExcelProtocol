@@ -53,11 +53,21 @@ class TwitchNotifierBot(discord.Client):
             # Get channels already registered so the bot joins them on startup
             registered_channels = [r['twitch_channel'] for r in self.db.get_all_twitch_channels()]
 
+            # Fetch bot account Twitch user ID (required by twitchio 3.x)
+            bot_user = await self.twitch.get_user(TWITCH_BOT_USERNAME)
+            if not bot_user:
+                logger.error(f'Could not fetch Twitch user info for {TWITCH_BOT_USERNAME}')
+                self.twitch_chat_bot = None
+                await self.tree.sync()
+                return
+            bot_id = bot_user['id']
+
             self.twitch_chat_bot = TwitchChatBot(
                 token=TWITCH_BOT_TOKEN,
                 initial_channels=registered_channels,
                 db=self.db,
-                twitch_api=self.twitch
+                twitch_api=self.twitch,
+                bot_id=bot_id
             )
             await twitch_chat_cog.setup(self, self.twitch_chat_bot)
             # Start twitchio as a background task — runs alongside discord.py
