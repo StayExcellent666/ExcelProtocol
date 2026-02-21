@@ -42,7 +42,7 @@ class TwitchChatBot(commands.Bot):
                 except Exception as e:
                     logger.error(f"Failed to join {channel_name}: {e}")
 
-    async def event_message(self, message: twitchio.Message):
+    async def event_message(self, message):
         """Handle incoming chat messages"""
         # Ignore messages sent by the bot itself
         if message.echo:
