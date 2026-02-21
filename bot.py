@@ -116,6 +116,10 @@ class TwitchNotifierBot(discord.Client):
                     # Mark as notified
                     self.live_streamers.add(streamer_name)
                     
+                    # Wait for Twitch to generate thumbnail (prevents grey placeholder)
+                    logger.info(f"Waiting 15 seconds for {streamer_name} thumbnail to generate...")
+                    await asyncio.sleep(15)
+                    
                     # Find all servers monitoring this streamer
                     monitoring_servers = [
                         s for s in streamers 
