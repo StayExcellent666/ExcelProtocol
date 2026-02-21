@@ -212,11 +212,15 @@ class TwitchChatBot(commands.Bot):
 
     async def join_channel(self, channel_name: str):
         channel_name = channel_name.lower()
-        connected_names = [c.name.lower() for c in self.connected_channels]
-        if channel_name not in connected_names:
+        try:
             await self.join_channels([channel_name])
             logger.info(f"Dynamically joined Twitch channel: {channel_name}")
+        except Exception as e:
+            logger.error(f"Error joining channel {channel_name}: {e}")
 
     async def leave_channel(self, channel_name: str):
-        await self.part_channels([channel_name.lower()])
-        logger.info(f"Left Twitch channel: {channel_name}")
+        try:
+            await self.part_channels([channel_name.lower()])
+            logger.info(f"Left Twitch channel: {channel_name}")
+        except Exception as e:
+            logger.error(f"Error leaving channel {channel_name}: {e}")
