@@ -130,6 +130,39 @@ class Database:
             ON monitored_streamers(streamer_name)
         ''')
         
+        # ----------------------------------------------------------------
+        # Twitch chat bot tables (new — existing tables untouched)
+        # ----------------------------------------------------------------
+
+        # Which Twitch channel each Discord guild is linked to
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS twitch_channels (
+                guild_id INTEGER PRIMARY KEY,
+                twitch_channel TEXT NOT NULL,
+                linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Custom chat commands per Twitch channel
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS twitch_commands (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                twitch_channel TEXT NOT NULL,
+                command_name TEXT NOT NULL,
+                response TEXT NOT NULL,
+                permission TEXT DEFAULT "everyone",
+                cooldown_seconds INTEGER DEFAULT 0,
+                use_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(twitch_channel, command_name)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_twitch_commands_channel
+            ON twitch_commands(twitch_channel)
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -496,6 +529,168 @@ class Database:
             }
         return None
     
+    # ------------------------------------------------------------------
+    # Twitch channel linking
+    # ------------------------------------------------------------------
+
+    def set_twitch_channel(self, guild_id: int, twitch_channel: str):
+        """Link a Discord guild to a Twitch channel"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO twitch_channels (guild_id, twitch_channel)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET twitch_channel = ?
+        ''', (guild_id, twitch_channel.lower(), twitch_channel.lower()))
+        conn.commit()
+        conn.close()
+
+    def get_twitch_channel(self, guild_id: int) -> Optional[Dict]:
+        """Get the Twitch channel linked to a Discord guild"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT guild_id, twitch_channel FROM twitch_channels WHERE guild_id = ?',
+            (guild_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {'guild_id': row[0], 'twitch_channel': row[1]}
+        return None
+
+    def remove_twitch_channel(self, guild_id: int):
+        """Unlink a Discord guild from its Twitch channel"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM twitch_channels WHERE guild_id = ?', (guild_id,))
+        conn.commit()
+        conn.close()
+
+    def get_all_twitch_channels(self) -> List[Dict]:
+        """Get all linked Twitch channels (used on bot startup to rejoin them)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT guild_id, twitch_channel FROM twitch_channels')
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'guild_id': r[0], 'twitch_channel': r[1]} for r in rows]
+
+    def get_guilds_for_twitch_channel(self, twitch_channel: str) -> List[Dict]:
+        """Get all Discord guilds linked to a specific Twitch channel"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT guild_id, twitch_channel FROM twitch_channels WHERE twitch_channel = ?',
+            (twitch_channel.lower(),)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'guild_id': r[0], 'twitch_channel': r[1]} for r in rows]
+
+    # ------------------------------------------------------------------
+    # Twitch custom commands
+    # ------------------------------------------------------------------
+
+    def add_twitch_command(
+        self,
+        twitch_channel: str,
+        command_name: str,
+        response: str,
+        permission: str = "everyone",
+        cooldown_seconds: int = 0
+    ) -> bool:
+        """Add or update a custom Twitch command. Returns True on success."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO twitch_commands
+                    (twitch_channel, command_name, response, permission, cooldown_seconds)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(twitch_channel, command_name)
+                DO UPDATE SET response = ?, permission = ?, cooldown_seconds = ?
+            ''', (
+                twitch_channel.lower(), command_name.lower(), response, permission, cooldown_seconds,
+                response, permission, cooldown_seconds
+            ))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding Twitch command: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def remove_twitch_command(self, twitch_channel: str, command_name: str) -> bool:
+        """Remove a custom command. Returns True if it existed."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'DELETE FROM twitch_commands WHERE twitch_channel = ? AND command_name = ?',
+            (twitch_channel.lower(), command_name.lower())
+        )
+        removed = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return removed
+
+    def get_twitch_command(self, twitch_channel: str, command_name: str) -> Optional[Dict]:
+        """Get a single command by name"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT command_name, response, permission, cooldown_seconds, use_count
+            FROM twitch_commands
+            WHERE twitch_channel = ? AND command_name = ?
+        ''', (twitch_channel.lower(), command_name.lower()))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {
+                'command_name': row[0],
+                'response': row[1],
+                'permission': row[2],
+                'cooldown_seconds': row[3],
+                'use_count': row[4]
+            }
+        return None
+
+    def get_twitch_commands(self, twitch_channel: str) -> List[Dict]:
+        """Get all commands for a Twitch channel"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT command_name, response, permission, cooldown_seconds, use_count
+            FROM twitch_commands
+            WHERE twitch_channel = ?
+            ORDER BY command_name
+        ''', (twitch_channel.lower(),))
+        rows = cursor.fetchall()
+        conn.close()
+        return [
+            {
+                'command_name': r[0],
+                'response': r[1],
+                'permission': r[2],
+                'cooldown_seconds': r[3],
+                'use_count': r[4]
+            }
+            for r in rows
+        ]
+
+    def increment_command_uses(self, twitch_channel: str, command_name: str):
+        """Increment the use counter for a command"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE twitch_commands
+            SET use_count = use_count + 1
+            WHERE twitch_channel = ? AND command_name = ?
+        ''', (twitch_channel.lower(), command_name.lower()))
+        conn.commit()
+        conn.close()
+
     def cleanup_guild(self, guild_id: int):
         """Remove all data for a guild (called when bot is removed from server)"""
         conn = self.get_connection()
@@ -505,6 +700,7 @@ class Database:
         cursor.execute('DELETE FROM server_settings WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM notification_messages WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM cleanup_configs WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM twitch_channels WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()

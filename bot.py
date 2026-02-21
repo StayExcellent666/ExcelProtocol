@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from database import Database
 from twitch_api import TwitchAPI
 from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID
+from config import TWITCH_BOT_USERNAME, TWITCH_BOT_TOKEN
 
 # Set up logging
 logging.basicConfig(
@@ -44,6 +45,28 @@ class TwitchNotifierBot(discord.Client):
     
     async def setup_hook(self):
         """Called when bot is starting up"""
+        # Load Twitch chat bot cog if credentials are configured
+        if TWITCH_BOT_USERNAME and TWITCH_BOT_TOKEN:
+            from twitch_bot import TwitchChatBot
+            import twitch_chat_cog
+
+            # Get channels already registered so the bot joins them on startup
+            registered_channels = [r['twitch_channel'] for r in self.db.get_all_twitch_channels()]
+
+            self.twitch_chat_bot = TwitchChatBot(
+                token=TWITCH_BOT_TOKEN,
+                initial_channels=registered_channels,
+                db=self.db,
+                twitch_api=self.twitch
+            )
+            await twitch_chat_cog.setup(self, self.twitch_chat_bot)
+            # Start twitchio as a background task — runs alongside discord.py
+            asyncio.create_task(self.twitch_chat_bot.start())
+            logger.info("Twitch chat bot started")
+        else:
+            self.twitch_chat_bot = None
+            logger.info("Twitch chat bot not configured (TWITCH_BOT_USERNAME / TWITCH_BOT_TOKEN not set)")
+
         await self.tree.sync()
         logger.info("Command tree synced")
     

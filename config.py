@@ -15,6 +15,12 @@ TWITCH_CLIENT_SECRET = os.getenv('TWITCH_CLIENT_SECRET')
 CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', '90'))  # Default: 90 seconds (1.5 minutes)
 BOT_OWNER_ID = int(os.getenv('BOT_OWNER_ID', '0'))  # Your Discord user ID for owner-only commands
 
+# Twitch Chat Bot (twitchio)
+# Create a separate Twitch account for the bot, then get its OAuth token at:
+# https://twitchapps.com/tmi/
+TWITCH_BOT_USERNAME = os.getenv('TWITCH_BOT_USERNAME')   # e.g. "ExcelProtocolBot"
+TWITCH_BOT_TOKEN = os.getenv('TWITCH_BOT_TOKEN')         # oauth:xxxxxxxxxxxxxxxxxxxxxxxxx
+
 # Validate required environment variables
 if not DISCORD_TOKEN:
     raise ValueError("DISCORD_TOKEN environment variable is required")
