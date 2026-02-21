@@ -45,36 +45,34 @@ class TwitchNotifierBot(discord.Client):
     
     async def setup_hook(self):
         """Called when bot is starting up"""
-        # Load Twitch chat bot cog if credentials are configured
+        # Load Twitch chat bot — wrapped in try/except so any failure here
+        # never takes down the Discord bot
+        self.twitch_chat_bot = None
         if TWITCH_BOT_USERNAME and TWITCH_BOT_TOKEN:
-            from twitch_bot import TwitchChatBot
-            import twitch_chat_cog
+            try:
+                from twitch_bot import TwitchChatBot
+                import twitch_chat_cog
 
-            # Get channels already registered so the bot joins them on startup
-            registered_channels = [r['twitch_channel'] for r in self.db.get_all_twitch_channels()]
+                registered_channels = [r['twitch_channel'] for r in self.db.get_all_twitch_channels()]
 
-            # Fetch bot account Twitch user ID (required by twitchio 3.x)
-            bot_user = await self.twitch.get_user(TWITCH_BOT_USERNAME)
-            if not bot_user:
-                logger.error(f'Could not fetch Twitch user info for {TWITCH_BOT_USERNAME}')
+                bot_user = await self.twitch.get_user(TWITCH_BOT_USERNAME)
+                if not bot_user:
+                    logger.error(f'Could not fetch Twitch user info for {TWITCH_BOT_USERNAME} - Twitch chat bot disabled')
+                else:
+                    bot_id = bot_user['id']
+                    self.twitch_chat_bot = TwitchChatBot(
+                        token=TWITCH_BOT_TOKEN,
+                        initial_channels=registered_channels,
+                        db=self.db,
+                        twitch_api=self.twitch
+                    )
+                    await twitch_chat_cog.setup(self, self.twitch_chat_bot)
+                    asyncio.create_task(self.twitch_chat_bot.start())
+                    logger.info("Twitch chat bot started")
+            except Exception as e:
+                logger.error(f"Twitch chat bot failed to start: {e} - Discord bot continuing normally")
                 self.twitch_chat_bot = None
-                await self.tree.sync()
-                return
-            bot_id = bot_user['id']
-
-            self.twitch_chat_bot = TwitchChatBot(
-                token=TWITCH_BOT_TOKEN,
-                initial_channels=registered_channels,
-                db=self.db,
-                twitch_api=self.twitch,
-                bot_id=bot_id
-            )
-            await twitch_chat_cog.setup(self, self.twitch_chat_bot)
-            # Start twitchio as a background task — runs alongside discord.py
-            asyncio.create_task(self.twitch_chat_bot.start())
-            logger.info("Twitch chat bot started")
         else:
-            self.twitch_chat_bot = None
             logger.info("Twitch chat bot not configured (TWITCH_BOT_USERNAME / TWITCH_BOT_TOKEN not set)")
 
         await self.tree.sync()

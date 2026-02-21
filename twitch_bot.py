@@ -1,10 +1,8 @@
-import twitchio
 from twitchio.ext import commands
 import logging
 from datetime import datetime
 from database import Database
 from twitch_api import TwitchAPI
-from config import TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +14,7 @@ class TwitchChatBot(commands.Bot):
         super().__init__(
             token=token,
             prefix="!",
-            initial_channels=initial_channels or [],
-            client_id=TWITCH_CLIENT_ID,
-            client_secret=TWITCH_CLIENT_SECRET,
-            bot_id=bot_id,
+            initial_channels=initial_channels or ["#placeholder"],
         )
         self.db = db
         self.twitch_api = twitch_api
@@ -175,7 +170,6 @@ class TwitchChatBot(commands.Bot):
                 return
 
         self.db.increment_command_uses(channel_name, command_name)
-
         response = self._replace_variables(
             cmd["response"],
             message.author.name,
@@ -211,9 +205,8 @@ class TwitchChatBot(commands.Bot):
         return True
 
     async def join_channel(self, channel_name: str):
-        channel_name = channel_name.lower()
         try:
-            await self.join_channels([channel_name])
+            await self.join_channels([channel_name.lower()])
             logger.info(f"Dynamically joined Twitch channel: {channel_name}")
         except Exception as e:
             logger.error(f"Error joining channel {channel_name}: {e}")
