@@ -131,6 +131,24 @@ class Database:
         ''')
         
         # ----------------------------------------------------------------
+        # Stream events for leaderboard (monthly, auto-cleaned)
+        # ----------------------------------------------------------------
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS stream_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                streamer_name TEXT NOT NULL,
+                went_live_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_stream_events_guild
+            ON stream_events(guild_id, streamer_name)
+        ''')
+
+        # ----------------------------------------------------------------
         # Twitch chat bot tables (new — existing tables untouched)
         # ----------------------------------------------------------------
 
@@ -529,6 +547,70 @@ class Database:
             }
         return None
     
+    # ------------------------------------------------------------------
+    # Stream events (leaderboard)
+    # ------------------------------------------------------------------
+
+    def log_stream_event(self, guild_id: int, streamer_name: str):
+        """Log a stream going live for leaderboard tracking"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO stream_events (guild_id, streamer_name) VALUES (?, ?)",
+            (guild_id, streamer_name.lower())
+        )
+        conn.commit()
+        conn.close()
+
+    def get_server_leaderboard(self, guild_id: int, limit: int = 10) -> list:
+        """Get top streamers for a server this month"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT streamer_name, COUNT(*) as stream_count
+            FROM stream_events
+            WHERE guild_id = ?
+              AND strftime('%Y-%m', went_live_at) = strftime('%Y-%m', 'now')
+            GROUP BY streamer_name
+            ORDER BY stream_count DESC
+            LIMIT ?
+        ''', (guild_id, limit))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'streamer_name': r[0], 'stream_count': r[1]} for r in rows]
+
+    def get_global_leaderboard(self, limit: int = 15) -> list:
+        """Get top streamers across all servers this month"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT streamer_name,
+                   COUNT(*) as total_streams,
+                   COUNT(DISTINCT guild_id) as server_count
+            FROM stream_events
+            WHERE strftime('%Y-%m', went_live_at) = strftime('%Y-%m', 'now')
+            GROUP BY streamer_name
+            ORDER BY total_streams DESC
+            LIMIT ?
+        ''', (limit,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'streamer_name': r[0], 'total_streams': r[1], 'server_count': r[2]} for r in rows]
+
+    def cleanup_stream_events(self):
+        """Delete all stream events from previous months"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            DELETE FROM stream_events
+            WHERE strftime('%Y-%m', went_live_at) != strftime('%Y-%m', 'now')
+        ''')
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        logger.info(f"Cleaned up {deleted} old stream events")
+        return deleted
+
     # ------------------------------------------------------------------
     # Twitch channel linking
     # ------------------------------------------------------------------

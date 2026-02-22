@@ -92,6 +92,11 @@ class TwitchNotifierBot(discord.Client):
         if not self.cleanup_channels.is_running():
             self.cleanup_channels.start()
             logger.info("Channel cleanup loop started")
+        
+        # Start monthly leaderboard cleanup loop
+        if not self.monthly_leaderboard_cleanup.is_running():
+            self.monthly_leaderboard_cleanup.start()
+            logger.info("Monthly leaderboard cleanup loop started")
     
     async def on_guild_remove(self, guild):
         """Called when bot is removed from a server - clean up data"""
@@ -266,6 +271,9 @@ class TwitchNotifierBot(discord.Client):
                     server_data['channel_id'],
                     message.id
                 )
+            
+            # Log stream event for leaderboard
+            self.db.log_stream_event(server_data['guild_id'], stream['user_login'])
         
         except Exception as e:
             logger.error(f"Error sending notification: {e}", exc_info=True)
@@ -411,6 +419,21 @@ class TwitchNotifierBot(discord.Client):
     @cleanup_channels.before_loop
     async def before_cleanup_channels(self):
         """Wait until bot is ready before starting cleanup loop"""
+        await self.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def monthly_leaderboard_cleanup(self):
+        """Check daily if it is the first of the month and clean old stream events"""
+        try:
+            now = datetime.utcnow()
+            if now.day == 1:
+                deleted = self.db.cleanup_stream_events()
+                logger.info(f"Monthly leaderboard reset: deleted {deleted} old stream events")
+        except Exception as e:
+            logger.error(f"Error in monthly leaderboard cleanup: {e}", exc_info=True)
+
+    @monthly_leaderboard_cleanup.before_loop
+    async def before_monthly_leaderboard_cleanup(self):
         await self.wait_until_ready()
     
     async def cleanup_channel(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool) -> int:
@@ -1577,6 +1600,74 @@ async def manual_notif(
             f"❌ Failed to send notification: {str(e)}",
             ephemeral=True
         )
+
+@bot.tree.command(name="leaderboard", description="Top streamers in this server this month")
+async def leaderboard(interaction: discord.Interaction):
+    """Show the monthly leaderboard for this server"""
+    rows = bot.db.get_server_leaderboard(interaction.guild_id, limit=10)
+    
+    now = datetime.utcnow()
+    month_name = now.strftime("%B %Y")
+    
+    embed = discord.Embed(
+        title=f"🏆 Streamer Leaderboard — {month_name}",
+        description=f"Most active streamers tracked in **{interaction.guild.name}** this month",
+        color=0x9146FF
+    )
+    
+    if not rows:
+        embed.add_field(name="No data yet", value="Stream events will appear here once monitored streamers go live this month.", inline=False)
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        lines = []
+        for i, row in enumerate(rows):
+            medal = medals[i] if i < 3 else f"{i+1}."
+            streams = row["stream_count"]
+            name = row["streamer_name"]
+            lines.append(f"{medal} [{name}](https://twitch.tv/{name}) — {streams} stream{'s' if streams != 1 else ''}")
+        embed.add_field(name="Rankings", value="\n".join(lines), inline=False)
+    
+    embed.set_footer(text="Resets on the 1st of each month")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="globalleaderboard", description="[Owner only] Top streamers across all servers this month")
+async def global_leaderboard(interaction: discord.Interaction):
+    """Owner-only global leaderboard across all servers"""
+    if interaction.user.id != BOT_OWNER_ID:
+        await interaction.response.send_message(
+            "❌ This command is restricted to the bot owner.",
+            ephemeral=True
+        )
+        return
+
+    rows = bot.db.get_global_leaderboard(limit=15)
+    
+    now = datetime.utcnow()
+    month_name = now.strftime("%B %Y")
+    
+    embed = discord.Embed(
+        title=f"🌍 Global Leaderboard — {month_name}",
+        description="Most active streamers across all servers this month",
+        color=0x9146FF
+    )
+    
+    if not rows:
+        embed.add_field(name="No data yet", value="No stream events recorded this month yet.", inline=False)
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        lines = []
+        for i, row in enumerate(rows):
+            medal = medals[i] if i < 3 else f"{i+1}."
+            name = row["streamer_name"]
+            streams = row["total_streams"]
+            servers = row["server_count"]
+            lines.append(f"{medal} [{name}](https://twitch.tv/{name}) — {streams} stream{'s' if streams != 1 else ''} across {servers} server{'s' if servers != 1 else ''}")
+        embed.add_field(name="Rankings", value="\n".join(lines), inline=False)
+    
+    embed.set_footer(text="Resets on the 1st of each month")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 # Run the bot
 if __name__ == "__main__":
