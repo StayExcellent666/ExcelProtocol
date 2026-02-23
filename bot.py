@@ -523,6 +523,8 @@ class TwitchNotifierBot(discord.Client):
 bot = TwitchNotifierBot()
 
 # Slash Commands
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="addstreamer", description="Add a Twitch streamer to monitor")
 @app_commands.describe(
     streamer="Twitch username to monitor",
@@ -572,6 +574,8 @@ async def add_streamer(interaction: discord.Interaction, streamer: str, channel:
             ephemeral=True
         )
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="removestreamer", description="Stop monitoring a Twitch streamer")
 @app_commands.describe(streamer="Twitch username to stop monitoring")
 async def remove_streamer(interaction: discord.Interaction, streamer: str):
@@ -662,6 +666,8 @@ async def list_streamers(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="setchannel", description="Set the channel for stream notifications")
 @app_commands.describe(channel="Channel where notifications will be sent")
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -810,6 +816,8 @@ async def bot_stats(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="testnotification", description="Send a test stream notification to see what it looks like")
 async def test_notification(interaction: discord.Interaction):
     """Send a test notification to preview the embed design"""
@@ -907,6 +915,8 @@ async def test_notification(interaction: discord.Interaction):
             ephemeral=True
         )
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="importfile", description="Import multiple streamers from a text file")
 @app_commands.describe(file="Text file with one streamer name per line")
 async def import_file(interaction: discord.Interaction, file: discord.Attachment):
@@ -1027,6 +1037,8 @@ async def import_file(interaction: discord.Interaction, file: discord.Attachment
             ephemeral=True
         )
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="color", description="Set the embed color for stream notifications")
 @app_commands.describe(color="Hex color code (e.g., #9146FF, #FF0000, #00FF00)")
 async def set_color(interaction: discord.Interaction, color: str):
@@ -1086,6 +1098,8 @@ async def set_color(interaction: discord.Interaction, color: str):
     
     await interaction.response.send_message(embed=preview_embed, ephemeral=True)
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="resetcolor", description="Reset embed color to default Twitch purple")
 async def reset_color(interaction: discord.Interaction):
     """Reset notification color to default"""
@@ -1108,6 +1122,8 @@ async def reset_color(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="autodelete", description="Toggle auto-deletion of notifications when streams end")
 @app_commands.describe(enabled="Enable or disable auto-delete")
 async def auto_delete(interaction: discord.Interaction, enabled: bool):
@@ -1151,6 +1167,8 @@ async def auto_delete(interaction: discord.Interaction, enabled: bool):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="cleanupset", description="Configure automatic message cleanup for a channel")
 @app_commands.describe(
     channel="Channel to clean up",
@@ -1250,6 +1268,8 @@ async def cleanup_list(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="cleanupremove", description="Remove cleanup configuration from a channel")
 @app_commands.describe(channel="Channel to remove cleanup from")
 async def cleanup_remove(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -1274,6 +1294,8 @@ async def cleanup_remove(interaction: discord.Interaction, channel: discord.Text
             ephemeral=True
         )
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="cleanuptest", description="Preview what would be deleted (doesn't actually delete)")
 @app_commands.describe(channel="Channel to test cleanup on")
 async def cleanup_test(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -1318,6 +1340,8 @@ async def cleanup_test(interaction: discord.Interaction, channel: discord.TextCh
         ephemeral=True
     )
 
+
+@app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="botinfo", description="Show bot statistics and server information")
 async def bot_info(interaction: discord.Interaction):
     """Display bot stats including server count and configurations"""
@@ -1395,6 +1419,8 @@ async def bot_info(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="serverdetails", description="Show detailed info for a specific server")
 @app_commands.describe(server_id="Server ID to check (leave empty for current server)")
 async def server_details(interaction: discord.Interaction, server_id: str = None):
@@ -1476,6 +1502,8 @@ async def server_details(interaction: discord.Interaction, server_id: str = None
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="manualnotif", description="Manually send a stream notification")
 @app_commands.describe(
     streamer="Twitch streamer username",
@@ -1643,6 +1671,8 @@ async def leaderboard(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+
+@app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="globalleaderboard", description="[Owner only] Top streamers across all servers this month")
 async def global_leaderboard(interaction: discord.Interaction):
     """Owner-only global leaderboard across all servers"""
@@ -1681,6 +1711,8 @@ async def global_leaderboard(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+
+@app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="dbstats", description="[Owner only] View database statistics")
 async def db_stats(interaction: discord.Interaction):
     """Owner-only: Show a summary of what is stored in the database"""
