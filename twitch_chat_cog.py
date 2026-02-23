@@ -14,6 +14,7 @@ async def setup(discord_bot, twitch_chat_bot):
     # ------------------------------------------------------------------
     # /twitch setchannel
     # ------------------------------------------------------------------
+    @app_commands.default_permissions(manage_guild=True)
     @discord_bot.tree.command(name="twitchset", description="Link this Discord server to your Twitch channel")
     @app_commands.describe(channel="Your Twitch channel name (e.g. ninja)")
     async def twitch_setchannel(interaction: discord.Interaction, channel: str):
@@ -43,6 +44,7 @@ async def setup(discord_bot, twitch_chat_bot):
     # ------------------------------------------------------------------
     # /twitchremove
     # ------------------------------------------------------------------
+    @app_commands.default_permissions(manage_guild=True)
     @discord_bot.tree.command(name="twitchremove", description="Unlink this server from its Twitch channel")
     async def twitch_removechannel(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
@@ -84,6 +86,7 @@ async def setup(discord_bot, twitch_chat_bot):
     # ------------------------------------------------------------------
     # /twitchstats (owner only)
     # ------------------------------------------------------------------
+    @app_commands.default_permissions(administrator=True)
     @discord_bot.tree.command(name="twitchstats", description="[Owner only] View all Twitch channels using the bot")
     async def twitch_stats(interaction: discord.Interaction):
         if interaction.user.id != BOT_OWNER_ID:
@@ -118,6 +121,7 @@ async def setup(discord_bot, twitch_chat_bot):
     # ------------------------------------------------------------------
     # /cmdadd
     # ------------------------------------------------------------------
+    @app_commands.default_permissions(manage_guild=True)
     @discord_bot.tree.command(name="cmdadd", description="Add a custom Twitch chat command")
     @app_commands.describe(
         command="Command name (include the ! e.g. !lurk)",
@@ -164,6 +168,7 @@ async def setup(discord_bot, twitch_chat_bot):
     # ------------------------------------------------------------------
     # /cmdremove
     # ------------------------------------------------------------------
+    @app_commands.default_permissions(manage_guild=True)
     @discord_bot.tree.command(name="cmdremove", description="Remove a custom Twitch chat command")
     @app_commands.describe(command="Command name to remove (e.g. !lurk)")
     async def cmd_remove(interaction: discord.Interaction, command: str):
@@ -189,6 +194,7 @@ async def setup(discord_bot, twitch_chat_bot):
     # ------------------------------------------------------------------
     # /cmdedit
     # ------------------------------------------------------------------
+    @app_commands.default_permissions(manage_guild=True)
     @discord_bot.tree.command(name="cmdedit", description="Edit an existing Twitch chat command")
     @app_commands.describe(
         command="Command to edit (e.g. !lurk)",
