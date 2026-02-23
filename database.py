@@ -148,6 +148,16 @@ class Database:
             ON stream_events(guild_id, streamer_name)
         ''')
 
+        # Global stream events — one row per stream session regardless of server count
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS global_stream_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                streamer_name TEXT NOT NULL,
+                went_live_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(streamer_name, date(went_live_at))
+            )
+        ''')
+
         # ----------------------------------------------------------------
         # Twitch chat bot tables (new — existing tables untouched)
         # ----------------------------------------------------------------
@@ -552,13 +562,22 @@ class Database:
     # ------------------------------------------------------------------
 
     def log_stream_event(self, guild_id: int, streamer_name: str):
-        """Log a stream going live for leaderboard tracking"""
+        """Log a stream going live. Per-server for server leaderboard, deduplicated globally."""
         conn = self.get_connection()
         cursor = conn.cursor()
+
+        # Per-server event (used for server leaderboard)
         cursor.execute(
             "INSERT INTO stream_events (guild_id, streamer_name) VALUES (?, ?)",
             (guild_id, streamer_name.lower())
         )
+
+        # Global event — one per stream session per day (UNIQUE constraint deduplicates)
+        cursor.execute('''
+            INSERT OR IGNORE INTO global_stream_events (streamer_name)
+            VALUES (?)
+        ''', (streamer_name.lower(),))
+
         conn.commit()
         conn.close()
 
@@ -580,16 +599,19 @@ class Database:
         return [{'streamer_name': r[0], 'stream_count': r[1]} for r in rows]
 
     def get_global_leaderboard(self, limit: int = 15) -> list:
-        """Get top streamers across all servers this month"""
+        """Get top streamers globally this month — counts unique stream sessions only"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT streamer_name,
+            SELECT g.streamer_name,
                    COUNT(*) as total_streams,
-                   COUNT(DISTINCT guild_id) as server_count
-            FROM stream_events
-            WHERE strftime('%Y-%m', went_live_at) = strftime('%Y-%m', 'now')
-            GROUP BY streamer_name
+                   COUNT(DISTINCT s.guild_id) as server_count
+            FROM global_stream_events g
+            LEFT JOIN stream_events s
+                ON s.streamer_name = g.streamer_name
+               AND strftime('%Y-%m', s.went_live_at) = strftime('%Y-%m', 'now')
+            WHERE strftime('%Y-%m', g.went_live_at) = strftime('%Y-%m', 'now')
+            GROUP BY g.streamer_name
             ORDER BY total_streams DESC
             LIMIT ?
         ''', (limit,))
@@ -605,11 +627,14 @@ class Database:
             DELETE FROM stream_events
             WHERE strftime('%Y-%m', went_live_at) != strftime('%Y-%m', 'now')
         ''')
-        deleted = cursor.rowcount
+        cursor.execute('''
+            DELETE FROM global_stream_events
+            WHERE strftime('%Y-%m', went_live_at) != strftime('%Y-%m', 'now')
+        ''')
         conn.commit()
         conn.close()
-        logger.info(f"Cleaned up {deleted} old stream events")
-        return deleted
+        logger.info("Cleaned up old stream events")
+        return 0
 
     # ------------------------------------------------------------------
     # Twitch channel linking
