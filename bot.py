@@ -1669,6 +1669,121 @@ async def global_leaderboard(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="dbstats", description="[Owner only] View database statistics")
+async def db_stats(interaction: discord.Interaction):
+    """Owner-only: Show a summary of what is stored in the database"""
+    if interaction.user.id != BOT_OWNER_ID:
+        await interaction.response.send_message(
+            "❌ This command is restricted to the bot owner.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    conn = bot.db.get_connection()
+    cursor = conn.cursor()
+
+    # Core tables
+    cursor.execute("SELECT COUNT(DISTINCT guild_id) FROM server_settings")
+    servers_configured = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(DISTINCT guild_id) FROM monitored_streamers")
+    servers_with_streamers = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM monitored_streamers")
+    total_streamer_rows = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(DISTINCT streamer_name) FROM monitored_streamers")
+    unique_streamers = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM notification_messages")
+    saved_notif_messages = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM cleanup_configs")
+    cleanup_configs = cursor.fetchone()[0]
+
+    # Leaderboard tables
+    cursor.execute("SELECT COUNT(*) FROM stream_events WHERE strftime('%Y-%m', went_live_at) = strftime('%Y-%m', 'now')")
+    stream_events_this_month = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM global_stream_events WHERE strftime('%Y-%m', went_live_at) = strftime('%Y-%m', 'now')")
+    global_events_this_month = cursor.fetchone()[0]
+
+    # Twitch chat bot tables
+    cursor.execute("SELECT COUNT(*) FROM twitch_channels")
+    twitch_channels = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM twitch_commands")
+    twitch_commands = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(DISTINCT twitch_channel) FROM twitch_commands")
+    channels_with_commands = cursor.fetchone()[0]
+
+    # Top 5 most monitored streamers
+    cursor.execute('''
+        SELECT streamer_name, COUNT(DISTINCT guild_id) as server_count
+        FROM monitored_streamers
+        GROUP BY streamer_name
+        ORDER BY server_count DESC
+        LIMIT 5
+    ''')
+    top_streamers = cursor.fetchall()
+
+    conn.close()
+
+    now = datetime.utcnow()
+    month_name = now.strftime("%B %Y")
+
+    embed = discord.Embed(
+        title="🗄️ Database Stats",
+        description=f"Live snapshot of what is stored — {now.strftime('%d %b %Y %H:%M')} UTC",
+        color=0x9146FF
+    )
+
+    embed.add_field(
+        name="📊 Servers",
+        value=(
+            f"Servers configured: **{servers_configured}**\nServers with streamers: **{servers_with_streamers}**\nTwitch chat channels linked: **{twitch_channels}**"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="📺 Streamers",
+        value=(
+            f"Total monitoring rows: **{total_streamer_rows}**\nUnique streamers: **{unique_streamers}**\nSaved notif messages: **{saved_notif_messages}**"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="🤖 Twitch Chat Bot",
+        value=(
+            f"Custom commands total: **{twitch_commands}**\nChannels with commands: **{channels_with_commands}**\nCleanup configs: **{cleanup_configs}**"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name=f"🏆 Leaderboard ({month_name})",
+        value=(
+            f"Server stream events: **{stream_events_this_month}**\nGlobal unique sessions: **{global_events_this_month}**"
+        ),
+        inline=True
+    )
+
+    if top_streamers:
+        top_lines = [f"• **{r[0]}** — {r[1]} server{'s' if r[1] != 1 else ''}" for r in top_streamers]
+        embed.add_field(
+            name="🔥 Most Tracked Streamers",
+            value="\n".join(top_lines),
+            inline=False
+        )
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # Run the bot
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
