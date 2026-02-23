@@ -38,6 +38,9 @@ GETTING_STARTED.md
 .DS_Store
 Thumbs.db
 
+# Documents
+*.docx
+
 # Logs
 *.log
 logs/
