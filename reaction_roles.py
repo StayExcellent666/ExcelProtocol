@@ -249,25 +249,30 @@ def _build_edit_role_view(user_id: int, guild: discord.Guild) -> discord.ui.View
             current = next((r for r in s["roles"] if r["role_id"] == role_id_to_edit), {})
 
             class EditLabelModal(discord.ui.Modal, title="Edit Role Label & Emoji"):
-                new_label = discord.ui.TextInput(label="Label", max_length=50, default=current.get("label", ""))
-                new_emoji = discord.ui.TextInput(
-                    label="Emoji (unicode or <:name:id>, leave blank to remove)",
-                    max_length=100,
-                    required=False,
-                    default=current.get("emoji") or ""
-                )
+                def __init__(self, cur):
+                    super().__init__()
+                    self.new_label = discord.ui.TextInput(label="Label", max_length=50, default=cur.get("label", ""))
+                    self.new_emoji = discord.ui.TextInput(
+                        label="Emoji (unicode or <:name:id>, blank to remove)",
+                        max_length=100,
+                        required=False,
+                        default=cur.get("emoji") or ""
+                    )
+                    self.add_item(self.new_label)
+                    self.add_item(self.new_emoji)
 
                 async def on_submit(inner_self, mi: discord.Interaction):
                     emoji_val = inner_self.new_emoji.value.strip() or None
-                    for r in s["roles"]:
+                    fresh_s = _sessions.get(mi.user.id, {})
+                    for r in fresh_s.get("roles", []):
                         if r["role_id"] == role_id_to_edit:
                             r["label"] = inner_self.new_label.value.strip()
                             r["emoji"] = emoji_val
-                    _sessions[mi.user.id] = s
+                    _sessions[mi.user.id] = fresh_s
                     emoji_preview = f" {emoji_val}" if emoji_val else ""
                     await mi.response.send_message(f"✅ Updated to{emoji_preview} **{inner_self.new_label.value.strip()}**. Use `/rr publish` to save.", ephemeral=True)
 
-            await si.response.send_modal(EditLabelModal())
+            await si.response.send_modal(EditLabelModal(current))
 
         select.callback = select_cb
         rv = discord.ui.View()
