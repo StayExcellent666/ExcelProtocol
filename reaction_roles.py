@@ -315,6 +315,7 @@ def _build_view(rr_entry: dict, bot) -> discord.ui.View:
 
     elif rr_type == "buttons":
         btn_style = _get_button_style(guild_id)
+        all_role_ids = [r["role_id"] for r in roles_data]
         for r in roles_data:
             button = discord.ui.Button(
                 label=r["label"],
@@ -323,8 +324,8 @@ def _build_view(rr_entry: dict, bot) -> discord.ui.View:
             )
             role_id = r["role_id"]
 
-            async def btn_callback(interaction: discord.Interaction, rid=role_id):
-                await _handle_button(interaction, rid, only_add)
+            async def btn_callback(interaction: discord.Interaction, rid=role_id, arids=all_role_ids, mr=max_roles):
+                await _handle_button(interaction, rid, only_add, arids, mr)
 
             button.callback = btn_callback
             view.add_item(button)
@@ -383,7 +384,7 @@ async def _handle_select(interaction: discord.Interaction, selected_values: list
         await interaction.response.send_message("❌ Something went wrong.", ephemeral=True)
 
 
-async def _handle_button(interaction: discord.Interaction, role_id: int, only_add: bool):
+async def _handle_button(interaction: discord.Interaction, role_id: int, only_add: bool, all_role_ids: list = None, max_roles: int = None):
     member = interaction.user
     guild = interaction.guild
     role = guild.get_role(role_id)
@@ -400,6 +401,15 @@ async def _handle_button(interaction: discord.Interaction, role_id: int, only_ad
                 await member.remove_roles(role, reason="Reaction role button")
                 await interaction.response.send_message(f"➖ Removed **{role.name}**.", ephemeral=True)
         else:
+            # Enforce max_roles for buttons
+            if max_roles and all_role_ids:
+                current_count = sum(1 for rid in all_role_ids if guild.get_role(rid) in member.roles)
+                if current_count >= max_roles:
+                    await interaction.response.send_message(
+                        f"❌ You can only have **{max_roles}** role{'s' if max_roles != 1 else ''} from this group.",
+                        ephemeral=True
+                    )
+                    return
             await member.add_roles(role, reason="Reaction role button")
             await interaction.response.send_message(f"✅ Added **{role.name}**.", ephemeral=True)
     except discord.Forbidden:
