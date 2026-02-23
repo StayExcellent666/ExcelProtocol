@@ -276,6 +276,15 @@ def _build_edit_role_view(user_id: int, guild: discord.Guild) -> discord.ui.View
 # ------------------------------------------------------------------
 
 async def _get_or_create_role(guild: discord.Guild, role_name: str) -> discord.Role:
+    # Handle Discord role mention format <@&ROLE_ID>
+    import re
+    mention_match = re.match(r'<@&(\d+)>', role_name.strip())
+    if mention_match:
+        role_id = int(mention_match.group(1))
+        role = guild.get_role(role_id)
+        if role:
+            return role
+
     clean = role_name.strip().lstrip("@")
     existing = discord.utils.get(guild.roles, name=clean)
     if existing:
@@ -445,7 +454,7 @@ async def setup(bot):
     await restore_views(bot)
 
     rr_group = app_commands.Group(name="rr", description="Reaction role management")
-    rr_group.default_member_permissions = discord.Permissions(manage_roles=True)
+    rr_group.default_permissions = discord.Permissions(manage_roles=True)
 
     # ------------------------------------------------------------------
     # /rr create
@@ -480,9 +489,10 @@ async def setup(bot):
     @rr_group.command(name="addrole", description="Add a role to your reaction role message")
     @app_commands.describe(
         label="The label shown on the button or dropdown option",
-        role="The role to assign (will be created if it doesn't exist)"
+        role="The role to assign (type a name to create a new one, or pick existing)",
+        new_role_name="Create a new role with this name instead of picking an existing one"
     )
-    async def rr_addrole(interaction: discord.Interaction, label: str, role: str):
+    async def rr_addrole(interaction: discord.Interaction, label: str, role: discord.Role = None, new_role_name: str = None):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
             return
@@ -496,9 +506,16 @@ async def setup(bot):
             await interaction.response.send_message("❌ Maximum 25 buttons per message.", ephemeral=True)
             return
 
+        if not role and not new_role_name:
+            await interaction.response.send_message("❌ Please either pick an existing role or provide a new role name.", ephemeral=True)
+            return
+
         await interaction.response.defer(ephemeral=True)
 
-        discord_role = await _get_or_create_role(interaction.guild, role)
+        if role:
+            discord_role = role
+        else:
+            discord_role = await _get_or_create_role(interaction.guild, new_role_name)
         session["roles"].append({"label": label, "role_id": discord_role.id})
 
         roles_so_far = "\n".join(
