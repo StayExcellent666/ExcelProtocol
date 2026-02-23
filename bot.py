@@ -487,7 +487,7 @@ class TwitchNotifierBot(discord.Client):
             
             # Discord allows bulk delete for messages less than 14 days old
             deleted_count = 0
-            now = datetime.utcnow()
+            now = discord.utils.utcnow()
             bulk_delete = [m for m in messages_to_delete if (now - m.created_at).days < 14]
             individual_delete = [m for m in messages_to_delete if (now - m.created_at).days >= 14]
             
