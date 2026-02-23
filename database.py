@@ -153,8 +153,9 @@ class Database:
             CREATE TABLE IF NOT EXISTS global_stream_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 streamer_name TEXT NOT NULL,
+                stream_date TEXT NOT NULL DEFAULT (date('now')),
                 went_live_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(streamer_name, date(went_live_at))
+                UNIQUE(streamer_name, stream_date)
             )
         ''')
 
@@ -574,8 +575,8 @@ class Database:
 
         # Global event — one per stream session per day (UNIQUE constraint deduplicates)
         cursor.execute('''
-            INSERT OR IGNORE INTO global_stream_events (streamer_name)
-            VALUES (?)
+            INSERT OR IGNORE INTO global_stream_events (streamer_name, stream_date)
+            VALUES (?, date('now'))
         ''', (streamer_name.lower(),))
 
         conn.commit()
