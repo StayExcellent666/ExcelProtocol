@@ -253,7 +253,7 @@ def _build_edit_role_view(user_id: int, guild: discord.Guild) -> discord.ui.View
                     super().__init__()
                     self.new_label = discord.ui.TextInput(label="Label", max_length=50, default=cur.get("label", ""))
                     self.new_emoji = discord.ui.TextInput(
-                        label="Emoji (unicode or <:name:id>, blank to remove)",
+                        label="Emoji (unicode or <:name:id>)",
                         max_length=100,
                         required=False,
                         default=cur.get("emoji") or ""
@@ -646,6 +646,44 @@ async def setup(bot):
             return
 
         await interaction.response.send_modal(EditSettingsModal(entry, message_id))
+
+    # ------------------------------------------------------------------
+    # /rr sort
+    # ------------------------------------------------------------------
+    @rr_group.command(name="sort", description="Sort reaction role options alphabetically by label")
+    @app_commands.describe(message_id="The ID of the reaction role message to sort")
+    async def rr_sort(interaction: discord.Interaction, message_id: str):
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
+            return
+
+        data = _load_data()
+        entry = data.get(message_id)
+
+        if not entry or entry["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message("❌ Reaction role message not found in this server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        entry["roles"] = sorted(entry["roles"], key=lambda r: r["label"].lower())
+        data[message_id] = entry
+        _save_data(data)
+
+        embed = discord.Embed(title=entry["title"], color=_get_embed_color(entry["guild_id"]))
+        view = _build_view(entry, bot)
+
+        try:
+            channel = bot.get_channel(entry["channel_id"])
+            msg = await channel.fetch_message(int(message_id))
+            await msg.edit(embed=embed, view=view)
+            bot.add_view(view, message_id=int(message_id))
+            await interaction.followup.send("✅ Roles sorted alphabetically!", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Could not find the original message.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error sorting RR message: {e}", exc_info=True)
+            await interaction.followup.send("❌ Something went wrong.", ephemeral=True)
 
     # ------------------------------------------------------------------
     # /rr delete
