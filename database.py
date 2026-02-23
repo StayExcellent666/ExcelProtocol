@@ -363,7 +363,7 @@ class Database:
         conn.close()
         
         # Return custom color or default Twitch purple
-        return row[0] if row and row[0] else 0x9146FF
+        return row[0] if row and row[0] else 0x00FFFF
     
     def set_auto_delete(self, guild_id: int, enabled: bool):
         """Enable or disable auto-delete for a server"""
