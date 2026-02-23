@@ -6,11 +6,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Path to store reaction role data on the Fly.io volume
 RR_DATA_PATH = "/data/reaction_roles.json"
 
-# Temporary store for in-progress /rr create sessions
-# {user_id: {guild_id, channel_id, title, type, only_add, max_roles, roles: [{label, role_id}]}}
+# {user_id: {guild_id, channel_id, title, type, only_add, max_roles, roles, editing_message_id}}
 _sessions: dict[int, dict] = {}
 
 
@@ -19,7 +17,6 @@ _sessions: dict[int, dict] = {}
 # ------------------------------------------------------------------
 
 def _load_data() -> dict:
-    """Load reaction role data from disk"""
     if os.path.exists(RR_DATA_PATH):
         try:
             with open(RR_DATA_PATH, "r") as f:
@@ -30,18 +27,190 @@ def _load_data() -> dict:
 
 
 def _save_data(data: dict):
-    """Save reaction role data to disk"""
     os.makedirs(os.path.dirname(RR_DATA_PATH), exist_ok=True)
     with open(RR_DATA_PATH, "w") as f:
         json.dump(data, f, indent=2)
 
 
 # ------------------------------------------------------------------
+# Modals
+# ------------------------------------------------------------------
+
+class CreateSettingsModal(discord.ui.Modal, title="Create Reaction Role"):
+    rr_title = discord.ui.TextInput(
+        label="Title",
+        placeholder="e.g. Choose the games you play",
+        max_length=100
+    )
+    only_add = discord.ui.TextInput(
+        label="Only Add? (true/false)",
+        placeholder="false",
+        default="false",
+        max_length=5,
+        required=False
+    )
+    max_roles = discord.ui.TextInput(
+        label="Max roles a user can pick (0 = unlimited)",
+        placeholder="0",
+        default="0",
+        max_length=2,
+        required=False
+    )
+
+    def __init__(self, bot):
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction):
+        only_add_val = self.only_add.value.strip().lower() == "true"
+        try:
+            max_val = int(self.max_roles.value.strip())
+            max_val = max_val if max_val > 0 else None
+        except ValueError:
+            max_val = None
+
+        _sessions[interaction.user.id] = {
+            "guild_id": interaction.guild_id,
+            "channel_id": interaction.channel_id,
+            "title": self.rr_title.value.strip(),
+            "type": "dropdown",  # default, user picks next
+            "only_add": only_add_val,
+            "max_roles": max_val,
+            "roles": [],
+            "editing_message_id": None
+        }
+
+        # Ask for type
+        view = discord.ui.View()
+        dropdown_btn = discord.ui.Button(label="Dropdown", style=discord.ButtonStyle.primary, emoji="📋")
+        buttons_btn = discord.ui.Button(label="Buttons", style=discord.ButtonStyle.secondary, emoji="🔘")
+
+        async def set_dropdown(i: discord.Interaction):
+            _sessions[interaction.user.id]["type"] = "dropdown"
+            await i.response.edit_message(
+                content=f"✅ **Session started!**\n**Title:** {self.rr_title.value}\n**Type:** Dropdown | **Only Add:** {only_add_val} | **Max:** {max_val or 'unlimited'}\n\nNow use `/rr addrole` to add roles, then `/rr publish` when ready.",
+                view=None
+            )
+
+        async def set_buttons(i: discord.Interaction):
+            _sessions[interaction.user.id]["type"] = "buttons"
+            await i.response.edit_message(
+                content=f"✅ **Session started!**\n**Title:** {self.rr_title.value}\n**Type:** Buttons | **Only Add:** {only_add_val} | **Max:** {max_val or 'unlimited'}\n\nNow use `/rr addrole` to add roles, then `/rr publish` when ready.",
+                view=None
+            )
+
+        dropdown_btn.callback = set_dropdown
+        buttons_btn.callback = set_buttons
+        view.add_item(dropdown_btn)
+        view.add_item(buttons_btn)
+
+        await interaction.response.send_message(
+            f"✅ Settings saved! Now choose the selector type:",
+            view=view,
+            ephemeral=True
+        )
+
+
+class EditSettingsModal(discord.ui.Modal, title="Edit Reaction Role"):
+    rr_title = discord.ui.TextInput(label="Title", max_length=100)
+    only_add = discord.ui.TextInput(
+        label="Only Add? (true/false)",
+        max_length=5,
+        required=False
+    )
+    max_roles = discord.ui.TextInput(
+        label="Max roles a user can pick (0 = unlimited)",
+        max_length=2,
+        required=False
+    )
+
+    def __init__(self, entry: dict, message_id: str, bot):
+        super().__init__()
+        self.bot = bot
+        self.message_id = message_id
+        self.entry = entry
+        # Pre-fill with current values
+        self.rr_title.default = entry.get("title", "")
+        self.only_add.default = str(entry.get("only_add", False)).lower()
+        self.max_roles.default = str(entry.get("max_roles") or 0)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        only_add_val = self.only_add.value.strip().lower() == "true"
+        try:
+            max_val = int(self.max_roles.value.strip())
+            max_val = max_val if max_val > 0 else None
+        except ValueError:
+            max_val = self.entry.get("max_roles")
+
+        updated = {
+            **self.entry,
+            "title": self.rr_title.value.strip(),
+            "only_add": only_add_val,
+            "max_roles": max_val,
+            "editing_message_id": self.message_id
+        }
+        _sessions[interaction.user.id] = updated
+
+        roles_list = "\n".join(
+            f"• **{r['label']}** → {interaction.guild.get_role(r['role_id']).name if interaction.guild.get_role(r['role_id']) else 'deleted role'}"
+            for r in updated["roles"]
+        ) or "No roles yet."
+
+        view = _build_edit_role_view(interaction.user.id)
+
+        await interaction.response.send_message(
+            f"✅ **Settings updated!**\n"
+            f"**Title:** {updated['title']} | **Only Add:** {only_add_val} | **Max:** {max_val or 'unlimited'}\n\n"
+            f"**Current roles:**\n{roles_list}\n\n"
+            f"Use the buttons below to add/remove roles, then `/rr publish` to save.",
+            view=view,
+            ephemeral=True
+        )
+
+
+# ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
 
+def _build_edit_role_view(user_id: int) -> discord.ui.View:
+    """Build the Add/Remove role buttons for edit flow"""
+    view = discord.ui.View()
+    add_btn = discord.ui.Button(label="Add Role", style=discord.ButtonStyle.success)
+    remove_btn = discord.ui.Button(label="Remove Role", style=discord.ButtonStyle.danger)
+
+    async def add_callback(i: discord.Interaction):
+        await i.response.send_message("Use `/rr addrole` to add a role, then `/rr publish` to save.", ephemeral=True)
+
+    async def remove_callback(i: discord.Interaction):
+        session = _sessions.get(user_id, {})
+        roles = session.get("roles", [])
+        if not roles:
+            await i.response.send_message("No roles to remove.", ephemeral=True)
+            return
+
+        options = [discord.SelectOption(label=r["label"], value=str(r["role_id"])) for r in roles]
+        select = discord.ui.Select(placeholder="Select role to remove", options=options)
+
+        async def select_cb(si: discord.Interaction):
+            role_id_to_remove = int(select.values[0])
+            s = _sessions.get(si.user.id, {})
+            s["roles"] = [r for r in s["roles"] if r["role_id"] != role_id_to_remove]
+            _sessions[si.user.id] = s
+            await si.response.send_message("✅ Role removed. Use `/rr publish` to save.", ephemeral=True)
+
+        select.callback = select_cb
+        rv = discord.ui.View()
+        rv.add_item(select)
+        await i.response.send_message("Select the role to remove:", view=rv, ephemeral=True)
+
+    add_btn.callback = add_callback
+    remove_btn.callback = remove_callback
+    view.add_item(add_btn)
+    view.add_item(remove_btn)
+    return view
+
+
 async def _get_or_create_role(guild: discord.Guild, role_name: str) -> discord.Role:
-    """Return existing role or create it if it doesn't exist"""
     clean = role_name.strip().lstrip("@")
     existing = discord.utils.get(guild.roles, name=clean)
     if existing:
@@ -52,7 +221,6 @@ async def _get_or_create_role(guild: discord.Guild, role_name: str) -> discord.R
 
 
 def _build_view(rr_entry: dict, bot) -> discord.ui.View:
-    """Build a discord.ui.View from a stored reaction role entry"""
     rr_type = rr_entry.get("type", "dropdown")
     only_add = rr_entry.get("only_add", False)
     max_roles = rr_entry.get("max_roles", None)
@@ -61,13 +229,10 @@ def _build_view(rr_entry: dict, bot) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
 
     if rr_type == "dropdown":
-        options = []
-        for r in roles_data:
-            options.append(discord.SelectOption(
-                label=r["label"],
-                value=str(r["role_id"])
-            ))
-
+        options = [
+            discord.SelectOption(label=r["label"], value=str(r["role_id"]))
+            for r in roles_data
+        ]
         select = discord.ui.Select(
             placeholder="Make a selection",
             min_values=0,
@@ -89,7 +254,6 @@ def _build_view(rr_entry: dict, bot) -> discord.ui.View:
                 style=discord.ButtonStyle.primary,
                 custom_id=f"rr_btn_{rr_entry['message_id']}_{r['role_id']}"
             )
-
             role_id = r["role_id"]
 
             async def btn_callback(interaction: discord.Interaction, rid=role_id):
@@ -102,11 +266,9 @@ def _build_view(rr_entry: dict, bot) -> discord.ui.View:
 
 
 async def _handle_select(interaction: discord.Interaction, selected_values: list, roles_data: list, only_add: bool, max_roles):
-    """Handle dropdown role assignment"""
     member = interaction.user
     guild = interaction.guild
     all_role_ids = [r["role_id"] for r in roles_data]
-
     selected_ids = [int(v) for v in selected_values]
 
     try:
@@ -129,14 +291,11 @@ async def _handle_select(interaction: discord.Interaction, selected_values: list
         if roles_to_remove:
             await member.remove_roles(*roles_to_remove, reason="Reaction role deselection")
 
-        added = [r.name for r in roles_to_add]
-        removed = [r.name for r in roles_to_remove]
-
         lines = []
-        if added:
-            lines.append(f"✅ Added: {', '.join(added)}")
-        if removed:
-            lines.append(f"➖ Removed: {', '.join(removed)}")
+        if roles_to_add:
+            lines.append(f"✅ Added: {', '.join(r.name for r in roles_to_add)}")
+        if roles_to_remove:
+            lines.append(f"➖ Removed: {', '.join(r.name for r in roles_to_remove)}")
         if not lines:
             lines.append("No changes made.")
 
@@ -150,7 +309,6 @@ async def _handle_select(interaction: discord.Interaction, selected_values: list
 
 
 async def _handle_button(interaction: discord.Interaction, role_id: int, only_add: bool):
-    """Handle button role toggle"""
     member = interaction.user
     guild = interaction.guild
     role = guild.get_role(role_id)
@@ -181,7 +339,6 @@ async def _handle_button(interaction: discord.Interaction, role_id: int, only_ad
 # ------------------------------------------------------------------
 
 async def restore_views(bot):
-    """Re-attach views to existing reaction role messages on startup"""
     data = _load_data()
     for message_id, entry in data.items():
         try:
@@ -193,7 +350,7 @@ async def restore_views(bot):
 
 
 # ------------------------------------------------------------------
-# Setup — registers all slash commands
+# Setup
 # ------------------------------------------------------------------
 
 async def setup(bot):
@@ -205,43 +362,33 @@ async def setup(bot):
     # /rr create
     # ------------------------------------------------------------------
     @rr_group.command(name="create", description="Start creating a new reaction role message")
-    @app_commands.describe(
-        title="The message shown above the selector",
-        type="Dropdown or buttons",
-        only_add="If true, users can only gain roles, not remove them",
-        max_roles="Max number of roles a user can select at once (dropdown only)"
-    )
-    @app_commands.choices(type=[
-        app_commands.Choice(name="Dropdown", value="dropdown"),
-        app_commands.Choice(name="Buttons", value="buttons"),
-    ])
-    async def rr_create(interaction: discord.Interaction, title: str, type: str = "dropdown", only_add: bool = False, max_roles: int = None):
+    async def rr_create(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
             return
+        if interaction.user.id in _sessions:
+            await interaction.response.send_message(
+                "❌ You already have an active session. Use `/rr cancel` to cancel it first.",
+                ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(CreateSettingsModal(bot))
 
-        _sessions[interaction.user.id] = {
-            "guild_id": interaction.guild_id,
-            "channel_id": interaction.channel_id,
-            "title": title,
-            "type": type,
-            "only_add": only_add,
-            "max_roles": max_roles,
-            "roles": []
-        }
-
-        await interaction.response.send_message(
-            f"✅ Session started!\n"
-            f"**Title:** {title}\n"
-            f"**Type:** {type} | **Only Add:** {only_add} | **Max:** {max_roles or 'unlimited'}\n\n"
-            f"Now use `/rr addrole` to add roles, then `/rr publish` when ready.",
-            ephemeral=True
-        )
+    # ------------------------------------------------------------------
+    # /rr cancel
+    # ------------------------------------------------------------------
+    @rr_group.command(name="cancel", description="Cancel your current reaction role session")
+    async def rr_cancel(interaction: discord.Interaction):
+        if interaction.user.id in _sessions:
+            del _sessions[interaction.user.id]
+            await interaction.response.send_message("✅ Session cancelled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ No active session to cancel.", ephemeral=True)
 
     # ------------------------------------------------------------------
     # /rr addrole
     # ------------------------------------------------------------------
-    @rr_group.command(name="addrole", description="Add a role to your reaction role message (run after /rr create)")
+    @rr_group.command(name="addrole", description="Add a role to your reaction role message")
     @app_commands.describe(
         label="The label shown on the button or dropdown option",
         role="The role to assign (will be created if it doesn't exist)"
@@ -265,7 +412,10 @@ async def setup(bot):
         discord_role = await _get_or_create_role(interaction.guild, role)
         session["roles"].append({"label": label, "role_id": discord_role.id})
 
-        roles_so_far = "\n".join(f"• **{r['label']}** → {interaction.guild.get_role(r['role_id']).name}" for r in session["roles"])
+        roles_so_far = "\n".join(
+            f"• **{r['label']}** → {interaction.guild.get_role(r['role_id']).name}"
+            for r in session["roles"]
+        )
 
         await interaction.followup.send(
             f"✅ Added **{label}** → `{discord_role.name}`\n\n"
@@ -294,32 +444,44 @@ async def setup(bot):
 
         await interaction.response.defer(ephemeral=True)
 
-        embed = discord.Embed(
-            title=session["title"],
-            color=0x9146FF
-        )
+        embed = discord.Embed(title=session["title"], color=0x9146FF)
+        editing_id = session.get("editing_message_id")
 
-        # Build a temporary entry to generate the view (we need message_id after sending)
-        temp_entry = {**session, "message_id": 0}
-        view = _build_view(temp_entry, bot)
+        if editing_id:
+            # Update existing message
+            data = _load_data()
+            entry = {**session, "message_id": int(editing_id)}
+            view = _build_view(entry, bot)
 
-        message = await interaction.channel.send(embed=embed, view=view)
+            try:
+                channel = bot.get_channel(session["channel_id"])
+                msg = await channel.fetch_message(int(editing_id))
+                await msg.edit(embed=embed, view=view)
+                bot.add_view(view, message_id=int(editing_id))
+                data[str(editing_id)] = entry
+                _save_data(data)
+                del _sessions[interaction.user.id]
+                await interaction.followup.send(f"✅ Reaction role message updated!", ephemeral=True)
+            except Exception as e:
+                logger.error(f"Error updating message: {e}")
+                await interaction.followup.send("❌ Could not find or edit the original message.", ephemeral=True)
+        else:
+            # Post new message
+            temp_entry = {**session, "message_id": 0}
+            view = _build_view(temp_entry, bot)
+            message = await interaction.channel.send(embed=embed, view=view)
 
-        # Now save with real message_id and rebuild view with correct custom_ids
-        entry = {**session, "message_id": message.id}
-        view = _build_view(entry, bot)
-        await message.edit(view=view)
-        bot.add_view(view, message_id=message.id)
+            entry = {**session, "message_id": message.id}
+            view = _build_view(entry, bot)
+            await message.edit(view=view)
+            bot.add_view(view, message_id=message.id)
 
-        # Save to disk
-        data = _load_data()
-        data[str(message.id)] = entry
-        _save_data(data)
+            data = _load_data()
+            data[str(message.id)] = entry
+            _save_data(data)
 
-        # Clear session
-        del _sessions[interaction.user.id]
-
-        await interaction.followup.send(f"✅ Reaction role message posted! Message ID: `{message.id}`", ephemeral=True)
+            del _sessions[interaction.user.id]
+            await interaction.followup.send(f"✅ Reaction role message posted! Message ID: `{message.id}`", ephemeral=True)
 
     # ------------------------------------------------------------------
     # /rr edit
@@ -338,58 +500,7 @@ async def setup(bot):
             await interaction.response.send_message("❌ Reaction role message not found in this server.", ephemeral=True)
             return
 
-        # Load into session for editing
-        _sessions[interaction.user.id] = {**entry}
-
-        roles_list = "\n".join(
-            f"• **{r['label']}** → {interaction.guild.get_role(r['role_id']).name if interaction.guild.get_role(r['role_id']) else 'deleted role'}"
-            for r in entry["roles"]
-        )
-
-        view = discord.ui.View()
-
-        add_btn = discord.ui.Button(label="Add Role", style=discord.ButtonStyle.success)
-        remove_btn = discord.ui.Button(label="Remove Role", style=discord.ButtonStyle.danger)
-
-        async def add_callback(i: discord.Interaction):
-            await i.response.send_message("Use `/rr addrole` to add a role, then `/rr publish` to save changes.", ephemeral=True)
-
-        async def remove_callback(i: discord.Interaction):
-            if not entry["roles"]:
-                await i.response.send_message("No roles to remove.", ephemeral=True)
-                return
-
-            options = [
-                discord.SelectOption(label=r["label"], value=str(r["role_id"]))
-                for r in entry["roles"]
-            ]
-            select = discord.ui.Select(placeholder="Select role to remove", options=options)
-
-            async def select_cb(si: discord.Interaction):
-                role_id_to_remove = int(select.values[0])
-                session = _sessions.get(si.user.id, {})
-                session["roles"] = [r for r in session["roles"] if r["role_id"] != role_id_to_remove]
-                _sessions[si.user.id] = session
-                await si.response.send_message("✅ Role removed from session. Use `/rr publish` to save.", ephemeral=True)
-
-            select.callback = select_cb
-            remove_view = discord.ui.View()
-            remove_view.add_item(select)
-            await i.response.send_message("Select the role to remove:", view=remove_view, ephemeral=True)
-
-        add_btn.callback = add_callback
-        remove_btn.callback = remove_callback
-        view.add_item(add_btn)
-        view.add_item(remove_btn)
-
-        await interaction.response.send_message(
-            f"**Editing reaction role message `{message_id}`**\n\n"
-            f"**Title:** {entry['title']}\n"
-            f"**Current roles:**\n{roles_list}\n\n"
-            f"Add or remove roles below, then run `/rr publish` to update the message.",
-            view=view,
-            ephemeral=True
-        )
+        await interaction.response.send_modal(EditSettingsModal(entry, message_id, bot))
 
     # ------------------------------------------------------------------
     # /rr delete
@@ -410,7 +521,6 @@ async def setup(bot):
 
         await interaction.response.defer(ephemeral=True)
 
-        # Try to delete the actual Discord message
         try:
             channel = bot.get_channel(entry["channel_id"])
             if channel:
@@ -421,7 +531,6 @@ async def setup(bot):
 
         del data[message_id]
         _save_data(data)
-
         await interaction.followup.send("✅ Reaction role message deleted.", ephemeral=True)
 
     # ------------------------------------------------------------------
@@ -444,11 +553,11 @@ async def setup(bot):
 
         for mid, entry in server_entries.items():
             channel = bot.get_channel(entry["channel_id"])
-            channel_name = f"<#{entry['channel_id']}>" if channel else "unknown channel"
+            channel_mention = f"<#{entry['channel_id']}>" if channel else "unknown channel"
             role_names = ", ".join(r["label"] for r in entry["roles"])
             embed.add_field(
                 name=f"{entry['title']} (ID: {mid})",
-                value=f"Channel: {channel_name}\nType: {entry['type']} | Roles: {role_names}",
+                value=f"Channel: {channel_mention}\nType: {entry['type']} | Roles: {role_names}",
                 inline=False
             )
 
