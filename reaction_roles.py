@@ -245,15 +245,27 @@ def _build_edit_role_view(user_id: int, guild: discord.Guild) -> discord.ui.View
             role_id_to_edit = int(select.values[0])
             s = _sessions.get(si.user.id, {})
 
-            class EditLabelModal(discord.ui.Modal, title="Edit Role Label"):
-                new_label = discord.ui.TextInput(label="New Label", max_length=50)
+            # Pre-fill current values
+            current = next((r for r in s["roles"] if r["role_id"] == role_id_to_edit), {})
+
+            class EditLabelModal(discord.ui.Modal, title="Edit Role Label & Emoji"):
+                new_label = discord.ui.TextInput(label="Label", max_length=50, default=current.get("label", ""))
+                new_emoji = discord.ui.TextInput(
+                    label="Emoji (unicode or <:name:id>, leave blank to remove)",
+                    max_length=100,
+                    required=False,
+                    default=current.get("emoji") or ""
+                )
 
                 async def on_submit(inner_self, mi: discord.Interaction):
+                    emoji_val = inner_self.new_emoji.value.strip() or None
                     for r in s["roles"]:
                         if r["role_id"] == role_id_to_edit:
                             r["label"] = inner_self.new_label.value.strip()
+                            r["emoji"] = emoji_val
                     _sessions[mi.user.id] = s
-                    await mi.response.send_message(f"✅ Label updated to **{inner_self.new_label.value.strip()}**. Use `/rr publish` to save.", ephemeral=True)
+                    emoji_preview = f" {emoji_val}" if emoji_val else ""
+                    await mi.response.send_message(f"✅ Updated to{emoji_preview} **{inner_self.new_label.value.strip()}**. Use `/rr publish` to save.", ephemeral=True)
 
             await si.response.send_modal(EditLabelModal())
 
@@ -305,7 +317,7 @@ def _build_view(rr_entry: dict, bot) -> discord.ui.View:
 
     if rr_type == "dropdown":
         options = [
-            discord.SelectOption(label=r["label"], value=str(r["role_id"]))
+            discord.SelectOption(label=r["label"], value=str(r["role_id"]), emoji=r.get("emoji") or None)
             for r in roles_data
         ]
         select = discord.ui.Select(
@@ -329,6 +341,7 @@ def _build_view(rr_entry: dict, bot) -> discord.ui.View:
             button = discord.ui.Button(
                 label=r["label"],
                 style=btn_style,
+                emoji=r.get("emoji") or None,
                 custom_id=f"rr_btn_{rr_entry['message_id']}_{r['role_id']}"
             )
             role_id = r["role_id"]
@@ -489,10 +502,11 @@ async def setup(bot):
     @rr_group.command(name="addrole", description="Add a role to your reaction role message")
     @app_commands.describe(
         label="The label shown on the button or dropdown option",
-        role="The role to assign (type a name to create a new one, or pick existing)",
-        new_role_name="Create a new role with this name instead of picking an existing one"
+        role="Pick an existing role to assign",
+        new_role_name="Or type a new role name to create it",
+        emoji="Optional emoji (unicode like 🎮 or custom like <:name:id>)"
     )
-    async def rr_addrole(interaction: discord.Interaction, label: str, role: discord.Role = None, new_role_name: str = None):
+    async def rr_addrole(interaction: discord.Interaction, label: str, role: discord.Role = None, new_role_name: str = None, emoji: str = None):
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
             return
@@ -516,7 +530,16 @@ async def setup(bot):
             discord_role = role
         else:
             discord_role = await _get_or_create_role(interaction.guild, new_role_name)
-        session["roles"].append({"label": label, "role_id": discord_role.id})
+        # Parse emoji — handle unicode and custom <:name:id> or <a:name:id>
+        parsed_emoji = None
+        if emoji:
+            emoji = emoji.strip()
+            if emoji.startswith("<:") or emoji.startswith("<a:"):
+                parsed_emoji = emoji  # store as-is, discord accepts this string
+            else:
+                parsed_emoji = emoji  # unicode emoji
+
+        session["roles"].append({"label": label, "role_id": discord_role.id, "emoji": parsed_emoji})
 
         roles_so_far = "\n".join(
             f"• **{r['label']}** → {interaction.guild.get_role(r['role_id']).name}"
