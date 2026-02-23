@@ -75,6 +75,14 @@ class TwitchNotifierBot(discord.Client):
         else:
             logger.info("Twitch chat bot not configured (TWITCH_BOT_USERNAME / TWITCH_BOT_TOKEN not set)")
 
+        # Load reaction roles
+        try:
+            import reaction_roles
+            await reaction_roles.setup(self)
+            logger.info("Reaction roles loaded")
+        except Exception as e:
+            logger.error(f"Reaction roles failed to load: {e} - continuing normally")
+
         await self.tree.sync()
         logger.info("Command tree synced")
     
