@@ -444,9 +444,7 @@ async def setup(bot):
 
     await restore_views(bot)
 
-    class RRGroup(app_commands.Group, name="rr", description="Reaction role management"):
-        pass
-    rr_group = RRGroup()
+    rr_group = app_commands.Group(name="rr", description="Reaction role management")
     rr_group.default_member_permissions = discord.Permissions(manage_roles=True)
 
     # ------------------------------------------------------------------
