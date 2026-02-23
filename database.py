@@ -114,11 +114,22 @@ class Database:
                 guild_id INTEGER NOT NULL,
                 streamer_name TEXT NOT NULL,
                 channel_id INTEGER NOT NULL,
+                custom_channel_id INTEGER DEFAULT NULL,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(guild_id, streamer_name)
             )
         ''')
         
+        # Migration: add custom_channel_id if it doesn't exist
+        try:
+            cursor.execute('''
+                ALTER TABLE monitored_streamers ADD COLUMN custom_channel_id INTEGER DEFAULT NULL
+            ''')
+            conn.commit()
+            logger.info("Migration: added custom_channel_id to monitored_streamers")
+        except Exception:
+            pass  # Column already exists
+
         # Index for faster lookups
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_guild_id 
@@ -196,9 +207,10 @@ class Database:
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
     
-    def add_streamer(self, guild_id: int, streamer_name: str, channel_id: int) -> bool:
+    def add_streamer(self, guild_id: int, streamer_name: str, channel_id: int, custom_channel_id: int = None) -> bool:
         """
-        Add a streamer to monitor for a guild
+        Add a streamer to monitor for a guild.
+        custom_channel_id: if set, this streamer always posts to this channel regardless of default.
         Returns True if added, False if already exists
         """
         conn = self.get_connection()
@@ -206,16 +218,15 @@ class Database:
         
         try:
             cursor.execute('''
-                INSERT INTO monitored_streamers (guild_id, streamer_name, channel_id)
-                VALUES (?, ?, ?)
-            ''', (guild_id, streamer_name.lower(), channel_id))
+                INSERT INTO monitored_streamers (guild_id, streamer_name, channel_id, custom_channel_id)
+                VALUES (?, ?, ?, ?)
+            ''', (guild_id, streamer_name.lower(), channel_id, custom_channel_id))
             
             conn.commit()
-            logger.info(f"Added streamer {streamer_name} for guild {guild_id}")
+            logger.info(f"Added streamer {streamer_name} for guild {guild_id} (custom channel: {custom_channel_id})")
             return True
         
         except sqlite3.IntegrityError:
-            # Already exists
             logger.info(f"Streamer {streamer_name} already monitored in guild {guild_id}")
             return False
         
@@ -303,11 +314,12 @@ class Database:
             DO UPDATE SET notification_channel_id = ?
         ''', (guild_id, channel_id, channel_id))
         
-        # Also update all streamers to use this channel
+        # Update only streamers without a custom channel
         cursor.execute('''
             UPDATE monitored_streamers
             SET channel_id = ?
             WHERE guild_id = ?
+            AND custom_channel_id IS NULL
         ''', (channel_id, guild_id))
         
         updated_streamers = cursor.rowcount

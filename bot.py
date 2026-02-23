@@ -524,42 +524,46 @@ bot = TwitchNotifierBot()
 
 # Slash Commands
 @bot.tree.command(name="addstreamer", description="Add a Twitch streamer to monitor")
-@app_commands.describe(streamer="Twitch username to monitor")
-async def add_streamer(interaction: discord.Interaction, streamer: str):
+@app_commands.describe(
+    streamer="Twitch username to monitor",
+    channel="Optional: post notifications to this channel instead of the default"
+)
+async def add_streamer(interaction: discord.Interaction, streamer: str, channel: discord.TextChannel = None):
     """Add a streamer to monitor in this server"""
-    # Check if user has manage guild permission
     if not interaction.user.guild_permissions.manage_guild:
         await interaction.response.send_message(
             "❌ You need 'Manage Server' permission to use this command.",
             ephemeral=True
         )
         return
-    
-    # Get the notification channel (use current channel if not set)
-    channel_id = bot.db.get_notification_channel(interaction.guild_id)
-    if not channel_id:
-        channel_id = interaction.channel_id
-        bot.db.set_notification_channel(interaction.guild_id, channel_id)
-    
-    # Verify streamer exists on Twitch
+
+    # Determine which channel to use
+    if channel:
+        channel_id = channel.id
+    else:
+        channel_id = bot.db.get_notification_channel(interaction.guild_id)
+        if not channel_id:
+            channel_id = interaction.channel_id
+            bot.db.set_notification_channel(interaction.guild_id, channel_id)
+
     await interaction.response.defer(ephemeral=True)
-    
+
     user_info = await bot.twitch.get_user(streamer)
-    
+
     if not user_info:
         await interaction.followup.send(
             f"❌ Twitch user '{streamer}' not found. Please check the spelling.",
             ephemeral=True
         )
         return
-    
-    # Add to database
-    success = bot.db.add_streamer(interaction.guild_id, user_info['login'], channel_id)
-    
+
+    success = bot.db.add_streamer(interaction.guild_id, user_info['login'], channel_id, custom_channel_id=channel.id if channel else None)
+
     if success:
+        custom = " (custom channel)" if channel else ""
         await interaction.followup.send(
-            f"✅ Now monitoring **{user_info['display_name']}** (twitch.tv/{user_info['login']})\n"
-            f"Notifications will be sent to <#{channel_id}>",
+            f"✅ Now monitoring **{user_info['display_name']}** (twitch.tv/{user_info['login']})\nNotifications will be sent to <#{channel_id}>{custom}",
+
             ephemeral=True
         )
     else:
