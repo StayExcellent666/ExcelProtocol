@@ -203,6 +203,23 @@ class Database:
             ON twitch_commands(twitch_channel)
         ''')
 
+        # Notification log (30 day retention)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS notification_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                streamer_name TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'sent',
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_notif_log_guild
+            ON notification_log(guild_id, streamer_name)
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -618,11 +635,12 @@ class Database:
         cursor.execute('''
             SELECT g.streamer_name,
                    COUNT(*) as total_streams,
-                   COUNT(DISTINCT s.guild_id) as server_count
+                   (SELECT COUNT(DISTINCT s.guild_id)
+                    FROM stream_events s
+                    WHERE s.streamer_name = g.streamer_name
+                    AND strftime('%Y-%m', s.went_live_at) = strftime('%Y-%m', 'now')
+                   ) as server_count
             FROM global_stream_events g
-            LEFT JOIN stream_events s
-                ON s.streamer_name = g.streamer_name
-               AND strftime('%Y-%m', s.went_live_at) = strftime('%Y-%m', 'now')
             WHERE strftime('%Y-%m', g.went_live_at) = strftime('%Y-%m', 'now')
             GROUP BY g.streamer_name
             ORDER BY total_streams DESC
@@ -631,6 +649,47 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [{'streamer_name': r[0], 'total_streams': r[1], 'server_count': r[2]} for r in rows]
+
+    def log_notification(self, guild_id: int, streamer_name: str, channel_id: int, status: str = 'sent'):
+        """Log a notification attempt"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO notification_log (guild_id, streamer_name, channel_id, status)
+            VALUES (?, ?, ?, ?)
+        ''', (guild_id, streamer_name.lower(), channel_id, status))
+        conn.commit()
+        conn.close()
+
+    def get_notification_log(self, guild_id: int, streamer_name: str, limit: int = 10) -> list:
+        """Get recent notification log for a streamer in a guild"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT streamer_name, channel_id, status, sent_at
+            FROM notification_log
+            WHERE guild_id = ? AND streamer_name = ?
+            ORDER BY sent_at DESC
+            LIMIT ?
+        ''', (guild_id, streamer_name.lower(), limit))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'streamer_name': r[0], 'channel_id': r[1], 'status': r[2], 'sent_at': r[3]} for r in rows]
+
+    def trim_notification_log(self, days: int = 30):
+        """Delete notification log entries older than X days"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            DELETE FROM notification_log
+            WHERE sent_at < datetime('now', ? || ' days')
+        ''', (f'-{days}',))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if deleted:
+            logger.info(f"Trimmed {deleted} old notification log entries")
+        return deleted
 
     def cleanup_stream_events(self):
         """Delete all stream events from previous months"""

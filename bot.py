@@ -282,9 +282,16 @@ class TwitchNotifierBot(discord.Client):
             
             # Log stream event for leaderboard
             self.db.log_stream_event(server_data['guild_id'], stream['user_login'])
-        
+
+            # Log notification for history
+            self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data['channel_id'], 'sent')
+
         except Exception as e:
             logger.error(f"Error sending notification: {e}", exc_info=True)
+            try:
+                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('channel_id', 0), 'failed')
+            except Exception:
+                pass
     
     async def delete_offline_notifications(self, streamer_name: str):
         """Delete notification messages when streamer goes offline"""
@@ -437,6 +444,8 @@ class TwitchNotifierBot(discord.Client):
             if now.day == 1:
                 deleted = self.db.cleanup_stream_events()
                 logger.info(f"Monthly leaderboard reset: deleted {deleted} old stream events")
+            # Trim notification log daily (keep 30 days)
+            self.db.trim_notification_log(days=30)
         except Exception as e:
             logger.error(f"Error in monthly leaderboard cleanup: {e}", exc_info=True)
 
@@ -1640,6 +1649,38 @@ async def manual_notif(
             f"❌ Failed to send notification: {str(e)}",
             ephemeral=True
         )
+
+@app_commands.default_permissions(manage_guild=True)
+@bot.tree.command(name="notiflog", description="Check notification history for a streamer")
+@app_commands.describe(
+    streamer="Twitch username to check",
+    limit="Number of entries to show (default 10, max 25)"
+)
+async def notif_log(interaction: discord.Interaction, streamer: str, limit: int = 10):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message("❌ You need 'Manage Server' permission.", ephemeral=True)
+        return
+
+    limit = max(1, min(limit, 25))
+    streamer = streamer.lower().strip().lstrip("@")
+    logs = bot.db.get_notification_log(interaction.guild_id, streamer, limit)
+
+    embed_color = bot.db.get_embed_color(interaction.guild_id)
+    embed = discord.Embed(title=f"📋 Notification Log — {streamer}", color=embed_color)
+
+    if not logs:
+        embed.description = f"No notification history found for **{streamer}** in the last 30 days."
+    else:
+        lines_out = []
+        for entry in logs:
+            channel = bot.get_channel(entry['channel_id'])
+            channel_str = f"<#{entry['channel_id']}>" if channel else f"`#{entry['channel_id']}`"
+            status_emoji = "✅" if entry['status'] == 'sent' else "❌"
+            lines_out.append(f"{status_emoji} `{entry['sent_at']}` → {channel_str}")
+        embed.description = "\n".join(lines_out)
+        embed.set_footer(text=f"Showing last {len(logs)} entries | 30 day retention")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="leaderboard", description="Top streamers in this server this month")
 async def leaderboard(interaction: discord.Interaction):
