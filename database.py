@@ -300,7 +300,7 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT streamer_name, channel_id, added_at
+            SELECT streamer_name, channel_id, added_at, custom_channel_id
             FROM monitored_streamers
             WHERE guild_id = ?
             ORDER BY streamer_name
@@ -313,7 +313,8 @@ class Database:
             {
                 'streamer_name': row[0],
                 'channel_id': row[1],
-                'added_at': row[2]
+                'added_at': row[2],
+                'custom_channel_id': row[3]
             }
             for row in rows
         ]

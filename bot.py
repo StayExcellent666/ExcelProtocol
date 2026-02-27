@@ -654,7 +654,12 @@ async def list_streamers(interaction: discord.Interaction):
         )
     
     # Split streamers into chunks to avoid 1024 character limit per field
-    streamer_links = [f"• [{s['streamer_name']}](https://twitch.tv/{s['streamer_name']})" for s in streamers]
+    streamer_links = []
+    for s in streamers:
+        line = f"• [{s['streamer_name']}](https://twitch.tv/{s['streamer_name']})"
+        if s.get('custom_channel_id'):
+            line += f" → <#{s['custom_channel_id']}>"
+        streamer_links.append(line)
     
     # Build fields with max 1000 characters each (safe margin)
     current_field = []
