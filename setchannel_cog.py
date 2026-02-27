@@ -129,11 +129,11 @@ class SetChannelView(discord.ui.View):
 
 
 async def setup(discord_bot):
-    @app_commands.default_permissions(manage_guild=True)
     @discord_bot.tree.command(
         name="setchannel",
         description="Configure notification channels (stream alerts, birthdays, and more)",
     )
+    @app_commands.default_permissions(manage_guild=True)
     async def setchannel(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message(
