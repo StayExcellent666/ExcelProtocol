@@ -85,13 +85,15 @@ class TwitchNotifierBot(discord.Client):
 
         # Load setchannel and birthday cogs
         try:
-            await self.load_extension("setchannel_cog")
+            import setchannel_cog
+            await setchannel_cog.setup(self)
             logger.info("SetChannel cog loaded")
         except Exception as e:
             logger.error(f"SetChannel cog failed to load: {e} - continuing normally")
 
         try:
-            await self.load_extension("birthday_cog")
+            import birthday_cog
+            await birthday_cog.setup(self)
             logger.info("Birthday cog loaded")
         except Exception as e:
             logger.error(f"Birthday cog failed to load: {e} - continuing normally")

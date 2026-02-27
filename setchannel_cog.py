@@ -1,6 +1,5 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
 import logging
 
 logger = logging.getLogger(__name__)
@@ -129,16 +128,13 @@ class SetChannelView(discord.ui.View):
         self.add_item(ChannelTypeSelect(db))
 
 
-class SetChannelCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @app_commands.command(
+async def setup(discord_bot):
+    @app_commands.default_permissions(manage_guild=True)
+    @discord_bot.tree.command(
         name="setchannel",
         description="Configure notification channels (stream alerts, birthdays, and more)",
     )
-    @app_commands.default_permissions(manage_guild=True)
-    async def setchannel(self, interaction: discord.Interaction):
+    async def setchannel(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message(
                 "❌ You need 'Manage Server' permission to use this command.",
@@ -146,13 +142,9 @@ class SetChannelCog(commands.Cog):
             )
             return
 
-        view = SetChannelView(self.bot.db)
+        view = SetChannelView(discord_bot.db)
         await interaction.response.send_message(
             "Which channel would you like to configure?",
             view=view,
             ephemeral=True,
         )
-
-
-async def setup(bot):
-    await bot.add_cog(SetChannelCog(bot))
