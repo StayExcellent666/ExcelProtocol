@@ -1,5 +1,5 @@
 # ExcelProtocol
-
+since 21 Feb 2026
 A Discord bot for monitoring Twitch streamers and managing your community, with a built-in Twitch chat bot.
 
 ---
