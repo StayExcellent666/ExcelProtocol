@@ -24,7 +24,6 @@ class TwitchNotifierBot(discord.Client):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
-        intents.members = True
         
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
@@ -1750,7 +1749,23 @@ async def global_leaderboard(interaction: discord.Interaction):
             streams = row["total_streams"]
             servers = row["server_count"]
             lines.append(f"{medal} [{name}](https://twitch.tv/{name}) — {streams} stream{'s' if streams != 1 else ''} across {servers} server{'s' if servers != 1 else ''}")
-        embed.add_field(name="Rankings", value="\n".join(lines), inline=False)
+
+        # Split into fields if over 1024 char limit
+        current_field = []
+        current_length = 0
+        field_num = 1
+        for line in lines:
+            line_length = len(line) + 1
+            if current_length + line_length > 1000 and current_field:
+                embed.add_field(name="Rankings" if field_num == 1 else f"Rankings (continued {field_num})", value="\n".join(current_field), inline=False)
+                current_field = [line]
+                current_length = line_length
+                field_num += 1
+            else:
+                current_field.append(line)
+                current_length += line_length
+        if current_field:
+            embed.add_field(name="Rankings" if field_num == 1 else f"Rankings (continued {field_num})", value="\n".join(current_field), inline=False)
     
     embed.set_footer(text="Resets on the 1st of each month")
     await interaction.response.send_message(embed=embed, ephemeral=True)
