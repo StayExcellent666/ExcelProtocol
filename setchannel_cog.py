@@ -17,19 +17,11 @@ CHANNEL_TYPES = {
     },
     "birthdays": {
         "label": "🎂 Birthday Announcements",
-        "description": "Where birthday messages are posted at midnight",
+        "description": "Where birthday messages are posted at 6am UTC",
         "get": lambda db, guild_id: db.get_birthday_channel(guild_id),
         "set": lambda db, guild_id, channel_id: db.set_birthday_channel(guild_id, channel_id),
         "success_msg": "✅ Birthday announcements will now be sent to {channel}.",
     },
-    # Future example — just uncomment and fill in:
-    # "welcome": {
-    #     "label": "👋 Welcome Messages",
-    #     "description": "Where new member greetings are posted",
-    #     "get": lambda db, guild_id: db.get_welcome_channel(guild_id),
-    #     "set": lambda db, guild_id, channel_id: db.set_welcome_channel(guild_id, channel_id),
-    #     "success_msg": "✅ Welcome messages will now be sent to {channel}.",
-    # },
 }
 
 
@@ -55,7 +47,6 @@ class ChannelTypeSelect(discord.ui.Select):
         selected_key = self.values[0]
         config = CHANNEL_TYPES[selected_key]
 
-        # Show current channel if already set
         current_id = config["get"](self.db, interaction.guild_id)
         current_str = f"<#{current_id}>" if current_id else "Not set"
 
@@ -78,20 +69,13 @@ class ChannelPickerView(discord.ui.View):
         self.config = config
         self.add_item(ChannelSelect(db, type_key, config))
 
-        back_btn = discord.ui.Button(
-            label="← Back",
-            style=discord.ButtonStyle.secondary,
-            row=1,
-        )
+        back_btn = discord.ui.Button(label="← Back", style=discord.ButtonStyle.secondary, row=1)
         back_btn.callback = self.go_back
         self.add_item(back_btn)
 
     async def go_back(self, interaction: discord.Interaction):
         view = SetChannelView(self.db)
-        await interaction.response.edit_message(
-            content="Which channel would you like to configure?",
-            view=view,
-        )
+        await interaction.response.edit_message(content="Which channel would you like to configure?", view=view)
 
 
 class ChannelSelect(discord.ui.ChannelSelect):
@@ -109,17 +93,12 @@ class ChannelSelect(discord.ui.ChannelSelect):
     async def callback(self, interaction: discord.Interaction):
         channel = self.values[0]
         self.config["set"](self.db, interaction.guild_id, channel.id)
-
         success = self.config["success_msg"].format(channel=channel.mention)
         await interaction.response.edit_message(
             content=f"{success}\n\nRun `/setchannel` again to configure another channel.",
             view=None,
         )
-        logger.info(
-            f"[setchannel] {self.type_key} set to #{channel.name} "
-            f"(ID: {channel.id}) in guild {interaction.guild_id} "
-            f"by {interaction.user} ({interaction.user.id})"
-        )
+        logger.info(f"[setchannel] {self.type_key} set to #{channel.name} (ID: {channel.id}) in guild {interaction.guild_id} by {interaction.user}")
 
 
 class SetChannelView(discord.ui.View):
@@ -129,22 +108,14 @@ class SetChannelView(discord.ui.View):
 
 
 async def setup(discord_bot):
-    @discord_bot.tree.command(
-        name="setchannel",
-        description="Configure notification channels (stream alerts, birthdays, and more)",
-    )
     @app_commands.default_permissions(manage_guild=True)
+    @discord_bot.tree.command(name="setchannel", description="Configure notification channels (stream alerts, birthdays, and more)")
     async def setchannel(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message(
-                "❌ You need 'Manage Server' permission to use this command.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("❌ You need 'Manage Server' permission to use this command.", ephemeral=True)
             return
 
         view = SetChannelView(discord_bot.db)
-        await interaction.response.send_message(
-            "Which channel would you like to configure?",
-            view=view,
-            ephemeral=True,
-        )
+        await interaction.response.send_message("Which channel would you like to configure?", view=view, ephemeral=True)
+
+    logger.info("SetChannel command registered")

@@ -44,7 +44,7 @@ class BirthdaySetModal(discord.ui.Modal, title="Set Birthday"):
 
 
 class BirthdayChecker:
-    """Handles the birthday check loop. Not a Cog — works with plain discord.Client."""
+    """Handles the birthday check loop. Works with plain discord.Client."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -53,9 +53,6 @@ class BirthdayChecker:
 
     def start(self):
         self._loop.start()
-
-    def stop(self):
-        self._loop.cancel()
 
     @tasks.loop(hours=1)
     async def _loop(self):
@@ -67,7 +64,6 @@ class BirthdayChecker:
     @_loop.before_loop
     async def _before_loop(self):
         await self.bot.wait_until_ready()
-        # Startup catch-up: if bot restarts during the 6am window, send immediately
         now = datetime.utcnow()
         today = now.date()
         if now.hour == 6 and self._last_birthday_date != today:
@@ -108,9 +104,6 @@ def _is_mod_or_admin(member: discord.Member) -> bool:
 
 
 async def setup(discord_bot):
-    """Register birthday commands directly on the bot tree, same pattern as other cogs."""
-
-    # Start the birthday checker loop
     checker = BirthdayChecker(discord_bot)
     checker.start()
 
