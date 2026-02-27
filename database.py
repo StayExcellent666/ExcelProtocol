@@ -220,6 +220,28 @@ class Database:
             ON notification_log(guild_id, streamer_name)
         ''')
 
+        # ----------------------------------------------------------------
+        # Birthday tables
+        # ----------------------------------------------------------------
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS birthdays (
+                guild_id INTEGER NOT NULL,
+                user_id  INTEGER NOT NULL,
+                day      INTEGER NOT NULL,
+                month    INTEGER NOT NULL,
+                year     INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS birthday_channels (
+                guild_id   INTEGER PRIMARY KEY,
+                channel_id INTEGER NOT NULL
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -880,7 +902,78 @@ class Database:
         cursor.execute('DELETE FROM notification_messages WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM cleanup_configs WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM twitch_channels WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM birthdays WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM birthday_channels WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()
         logger.info(f"Cleaned up data for guild {guild_id}")
+
+    # ------------------------------------------------------------------
+    # Birthday methods
+    # ------------------------------------------------------------------
+
+    def set_birthday(self, guild_id: int, user_id: int, day: int, month: int, year: int):
+        """Set or update a user's birthday for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO birthdays (guild_id, user_id, day, month, year)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                day   = excluded.day,
+                month = excluded.month,
+                year  = excluded.year
+        ''', (guild_id, user_id, day, month, year))
+        conn.commit()
+        conn.close()
+
+    def remove_birthday(self, guild_id: int, user_id: int):
+        """Remove a user's birthday for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM birthdays WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
+        conn.commit()
+        conn.close()
+
+    def get_all_birthdays(self, guild_id: int) -> list:
+        """Return all birthday entries for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, day, month, year FROM birthdays WHERE guild_id = ?', (guild_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'user_id': r[0], 'day': r[1], 'month': r[2], 'year': r[3]} for r in rows]
+
+    def get_birthdays_on(self, guild_id: int, month: int, day: int) -> list:
+        """Return all birthday entries for a specific day in a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT user_id, day, month, year FROM birthdays WHERE guild_id = ? AND month = ? AND day = ?',
+            (guild_id, month, day)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'user_id': r[0], 'day': r[1], 'month': r[2], 'year': r[3]} for r in rows]
+
+    def set_birthday_channel(self, guild_id: int, channel_id: int):
+        """Set the birthday announcement channel for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO birthday_channels (guild_id, channel_id)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id
+        ''', (guild_id, channel_id))
+        conn.commit()
+        conn.close()
+
+    def get_birthday_channel(self, guild_id: int):
+        """Get the birthday announcement channel for a guild. Returns None if not set."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT channel_id FROM birthday_channels WHERE guild_id = ?', (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None

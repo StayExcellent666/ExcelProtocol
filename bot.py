@@ -83,6 +83,19 @@ class TwitchNotifierBot(discord.Client):
         except Exception as e:
             logger.error(f"Reaction roles failed to load: {e} - continuing normally")
 
+        # Load setchannel and birthday cogs
+        try:
+            await self.load_extension("setchannel_cog")
+            logger.info("SetChannel cog loaded")
+        except Exception as e:
+            logger.error(f"SetChannel cog failed to load: {e} - continuing normally")
+
+        try:
+            await self.load_extension("birthday_cog")
+            logger.info("Birthday cog loaded")
+        except Exception as e:
+            logger.error(f"Birthday cog failed to load: {e} - continuing normally")
+
         await self.tree.sync()
         logger.info("Command tree synced")
     
@@ -676,24 +689,7 @@ async def list_streamers(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@app_commands.default_permissions(manage_guild=True)
-@bot.tree.command(name="setchannel", description="Set the channel for stream notifications")
-@app_commands.describe(channel="Channel where notifications will be sent")
-async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    """Set the notification channel for this server"""
-    if not interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message(
-            "❌ You need 'Manage Server' permission to use this command.",
-            ephemeral=True
-        )
-        return
-    
-    bot.db.set_notification_channel(interaction.guild_id, channel.id)
-    
-    await interaction.response.send_message(
-        f"✅ Stream notifications will now be sent to {channel.mention}",
-        ephemeral=True
-    )
+
 
 @bot.tree.command(name="live", description="Check which monitored streamers are currently live")
 async def check_live(interaction: discord.Interaction):
