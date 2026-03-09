@@ -218,25 +218,101 @@ class TwitchNotifierBot(discord.Client):
         """Wait until bot is ready before starting the loop"""
         await self.wait_until_ready()
     
+    async def alert_permission_issue(self, guild: discord.Guild, channel_id: int, issue: str):
+        """DM the guild owner and bot owner when a permission issue is detected."""
+        guild_owner = guild.owner
+        owner_notified = False
+
+        # Rate limit guild owner DM to once per hour per guild, same as send_owner_alert
+        error_key = f"perm_issue:{guild.id}"
+        current_time = datetime.utcnow()
+        if error_key in self.error_alerts_sent:
+            time_diff = (current_time - self.error_alerts_sent[error_key]).total_seconds()
+            if time_diff < self.alert_cooldown:
+                logger.debug(f"Skipping guild owner DM for {guild.name} — cooldown active")
+                return
+        self.error_alerts_sent[error_key] = current_time
+
+        admin_embed = discord.Embed(
+            title="⚠️ ExcelProtocol Permission Issue",
+            description=(
+                f"ExcelProtocol is having trouble sending notifications in **{guild.name}**.\n\n"
+                f"**Issue:** {issue}\n\n"
+                f"**Channel:** <#{channel_id}>\n\n"
+                f"Please make sure ExcelProtocol has **Send Messages** and **Embed Links** "
+                f"permissions in that channel, then use `/setchannel` to reconfirm it.\n\n"
+                f"If you need help, contact the bot owner on Discord: `stayexcellent`\n\n"
+                f"⏱️ *This alert is sent at most once per hour to avoid spam.*"
+            ),
+            color=0xFF0000
+        )
+        admin_embed.set_footer(text="ExcelProtocol — Notification System")
+
+        # DM guild owner
+        if guild_owner:
+            try:
+                await guild_owner.send(embed=admin_embed)
+                logger.info(f"Sent permission issue DM to guild owner {guild_owner} in {guild.name}")
+                owner_notified = True
+            except discord.Forbidden:
+                logger.warning(f"Could not DM guild owner {guild_owner} in {guild.name} — DMs disabled")
+                owner_notified = False
+            except Exception as e:
+                logger.error(f"Error DMing guild owner: {e}")
+                owner_notified = False
+
+        # DM bot owner — include whether guild owner was reached
+        owner_note = (
+            "Guild owner has been notified automatically."
+            if owner_notified else
+            "⚠️ Could not DM guild owner (DMs disabled) — you may need to reach out manually."
+        )
+
+        await self.send_owner_alert(
+            "Permission Issue",
+            f"**Bot cannot send notifications!**\n\n"
+            f"**Server:** {guild.name} (`{guild.id}`)\n"
+            f"**Channel:** <#{channel_id}>\n"
+            f"**Issue:** {issue}\n\n"
+            f"{owner_note}",
+            guild_id=guild.id
+        )
+
     async def send_notification(self, server_data, stream):
         """Send a notification embed to the configured channel"""
         try:
+            guild = self.get_guild(server_data['guild_id'])
             channel = self.get_channel(server_data['channel_id'])
-            
+
             if not channel:
                 logger.warning(f"Channel {server_data['channel_id']} not found")
-                
-                # Send alert to owner
-                await self.send_owner_alert(
-                    "Channel Not Found",
-                    f"**Notification channel not found!**\n\n"
-                    f"Channel ID: `{server_data['channel_id']}`\n"
-                    f"This usually means the channel was deleted.\n\n"
-                    f"**Action needed:** Run `/setchannel` in the server to fix this.",
-                    guild_id=server_data['guild_id']
-                )
+                if guild:
+                    await self.alert_permission_issue(
+                        guild,
+                        server_data['channel_id'],
+                        "Notification channel not found — it may have been deleted."
+                    )
+                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data['channel_id'], 'failed')
                 return
-            
+
+            # Check permissions before attempting to send
+            perms = channel.permissions_for(guild.me)
+            missing = []
+            if not perms.send_messages:
+                missing.append("Send Messages")
+            if not perms.embed_links:
+                missing.append("Embed Links")
+
+            if missing:
+                logger.warning(f"Missing permissions in #{channel.name} ({guild.name}): {', '.join(missing)}")
+                await self.alert_permission_issue(
+                    guild,
+                    channel.id,
+                    f"Missing permissions: **{', '.join(missing)}**"
+                )
+                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data['channel_id'], 'failed')
+                return
+
             # Get custom color for this server (or default)
             embed_color = self.db.get_embed_color(server_data['guild_id'])
             
@@ -245,7 +321,7 @@ class TwitchNotifierBot(discord.Client):
                 title=stream['title'],
                 url=f"https://twitch.tv/{stream['user_login']}",
                 description=f"**{stream['user_name']}** is now live!",
-                color=embed_color,  # Use custom or default color
+                color=embed_color,
                 timestamp=datetime.utcnow()
             )
             
@@ -300,6 +376,20 @@ class TwitchNotifierBot(discord.Client):
 
             # Log notification for history
             self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data['channel_id'], 'sent')
+
+        except discord.Forbidden:
+            logger.error(f"Forbidden sending notification in guild {server_data['guild_id']}")
+            guild = self.get_guild(server_data['guild_id'])
+            if guild:
+                await self.alert_permission_issue(
+                    guild,
+                    server_data['channel_id'],
+                    "Bot was denied permission to send messages (Forbidden error)."
+                )
+            try:
+                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('channel_id', 0), 'failed')
+            except Exception:
+                pass
 
         except Exception as e:
             logger.error(f"Error sending notification: {e}", exc_info=True)
@@ -1652,6 +1742,74 @@ async def manual_notif(
             f"❌ Failed to send notification: {str(e)}",
             ephemeral=True
         )
+
+
+@app_commands.default_permissions(manage_guild=True)
+@bot.tree.command(name="repostlive", description="Re-send notifications for all currently live monitored streamers")
+async def repost_live(interaction: discord.Interaction):
+    """Check all monitored streamers, send notifications for any currently live that haven't been notified yet."""
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need 'Manage Server' permission to use this command.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    streamers = bot.db.get_server_streamers(interaction.guild_id)
+    if not streamers:
+        await interaction.followup.send("📋 No streamers are being monitored in this server.", ephemeral=True)
+        return
+
+    streamer_names = [s['streamer_name'] for s in streamers]
+    live_streams = await bot.twitch.get_live_streams(streamer_names)
+
+    if not live_streams:
+        await interaction.followup.send("📴 None of your monitored streamers are currently live.", ephemeral=True)
+        return
+
+    # Get all server streamers as a lookup
+    streamer_lookup = {s['streamer_name'].lower(): s for s in streamers}
+
+    sent = []
+    skipped = []
+
+    for stream in live_streams:
+        streamer_name = stream['user_login'].lower()
+        server_data = streamer_lookup.get(streamer_name)
+        if not server_data:
+            continue
+
+        # Build server_data in the format send_notification expects
+        notif_data = {
+            'guild_id': interaction.guild_id,
+            'streamer_name': streamer_name,
+            'channel_id': server_data.get('custom_channel_id') or server_data['channel_id'],
+        }
+
+        # Fetch profile image
+        user_info = await bot.twitch.get_user(streamer_name)
+        if user_info:
+            stream['profile_image_url'] = user_info.get('profile_image_url', '')
+
+        await bot.send_notification(notif_data, stream)
+
+        # Also mark as live so polling loop doesn't double notify
+        bot.live_streamers.add(streamer_name)
+        sent.append(stream['user_name'])
+
+    if sent:
+        await interaction.followup.send(
+            f"✅ Re-sent notifications for **{len(sent)}** live streamer(s): {', '.join(sent)}",
+            ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            "ℹ️ No notifications were sent — check channel permissions with `/notiflog`.",
+            ephemeral=True
+        )
+
 
 @app_commands.default_permissions(manage_guild=True)
 @bot.tree.command(name="notiflog", description="Check notification history for a streamer")
