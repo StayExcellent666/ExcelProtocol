@@ -242,6 +242,29 @@ class Database:
             )
         ''')
 
+        # Add milestone_notifications column if it doesn't exist (migration)
+        cursor.execute('''
+            SELECT COUNT(*) FROM pragma_table_info('server_settings')
+            WHERE name='milestone_notifications'
+        ''')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('''
+                ALTER TABLE server_settings
+                ADD COLUMN milestone_notifications INTEGER DEFAULT 0
+            ''')
+            logger.info("Added milestone_notifications column to server_settings")
+
+        # Table to track which milestones have been sent per stream session
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS milestone_sent (
+                guild_id       INTEGER NOT NULL,
+                streamer_name  TEXT NOT NULL,
+                milestone_hours INTEGER NOT NULL,
+                sent_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, streamer_name, milestone_hours)
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -448,8 +471,64 @@ class Database:
         conn.close()
         
         return bool(row[0]) if row else False
-    
-    def save_notification_message(self, guild_id: int, streamer_name: str, channel_id: int, message_id: int):
+
+    def set_milestone_notifications(self, guild_id: int, enabled: bool):
+        """Enable or disable milestone notifications for a server"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO server_settings (guild_id, notification_channel_id, milestone_notifications)
+            VALUES (?, 0, ?)
+            ON CONFLICT(guild_id)
+            DO UPDATE SET milestone_notifications = ?
+        ''', (guild_id, 1 if enabled else 0, 1 if enabled else 0))
+        conn.commit()
+        conn.close()
+        logger.info(f"Set milestone notifications for guild {guild_id} to {enabled}")
+
+    def get_milestone_notifications(self, guild_id: int) -> bool:
+        """Check if milestone notifications are enabled for a server"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT milestone_notifications FROM server_settings WHERE guild_id = ?
+        ''', (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return bool(row[0]) if row else False
+
+    def has_milestone_been_sent(self, guild_id: int, streamer_name: str, milestone_hours: int) -> bool:
+        """Check if a milestone notification has already been sent this stream session"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT 1 FROM milestone_sent
+            WHERE guild_id = ? AND streamer_name = ? AND milestone_hours = ?
+        ''', (guild_id, streamer_name, milestone_hours))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+
+    def record_milestone_sent(self, guild_id: int, streamer_name: str, milestone_hours: int):
+        """Record that a milestone notification was sent"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR IGNORE INTO milestone_sent (guild_id, streamer_name, milestone_hours)
+            VALUES (?, ?, ?)
+        ''', (guild_id, streamer_name, milestone_hours))
+        conn.commit()
+        conn.close()
+
+    def clear_milestones_for_streamer(self, guild_id: int, streamer_name: str):
+        """Clear milestone records when a streamer goes offline (reset for next stream)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            DELETE FROM milestone_sent WHERE guild_id = ? AND streamer_name = ?
+        ''', (guild_id, streamer_name))
+        conn.commit()
+        conn.close()(self, guild_id: int, streamer_name: str, channel_id: int, message_id: int):
         """Save a notification message ID for later deletion"""
         conn = self.get_connection()
         cursor = conn.cursor()
