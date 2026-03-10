@@ -24,6 +24,7 @@ class TwitchNotifierBot(discord.Client):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
+        intents.members = True  # Required for display names in birthdaylist and member lookups
         
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
