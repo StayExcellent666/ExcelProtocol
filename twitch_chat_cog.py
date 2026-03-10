@@ -6,13 +6,173 @@ from config import BOT_OWNER_ID
 logger = logging.getLogger(__name__)
 
 COMMAND_LIMIT = 75
+VALID_PERMISSIONS = ["everyone", "subscriber", "mod", "broadcaster"]
 
+
+# ─────────────────────────────────────────────────────────────
+# Modal — Add / Edit command
+# ─────────────────────────────────────────────────────────────
+
+class CmdModal(discord.ui.Modal):
+    def __init__(self, db, channel_name: str, existing: dict = None):
+        is_edit = existing is not None
+        super().__init__(title="Edit Command" if is_edit else "New Command")
+        self.db = db
+        self.channel_name = channel_name
+        self.existing = existing
+
+        self.command_input = discord.ui.TextInput(
+            label="Command name",
+            placeholder="e.g. !lurk  (! added automatically if missing)",
+            default=existing["command_name"] if is_edit else "",
+            max_length=50,
+        )
+        self.response_input = discord.ui.TextInput(
+            label="Response",
+            placeholder="Use $user, $game, $uptime, $viewers, $count, $channel",
+            default=existing["response"] if is_edit else "",
+            style=discord.TextStyle.paragraph,
+            max_length=400,
+        )
+        self.permission_input = discord.ui.TextInput(
+            label="Permission (optional)",
+            placeholder="everyone / subscriber / mod / broadcaster",
+            default=existing["permission"] if is_edit else "everyone",
+            required=False,
+            max_length=20,
+        )
+        self.cooldown_input = discord.ui.TextInput(
+            label="Cooldown in seconds (optional)",
+            placeholder="0",
+            default=str(existing["cooldown_seconds"]) if is_edit else "0",
+            required=False,
+            max_length=6,
+        )
+
+        self.add_item(self.command_input)
+        self.add_item(self.response_input)
+        self.add_item(self.permission_input)
+        self.add_item(self.cooldown_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        command = self.command_input.value.lower().strip()
+        if not command.startswith("!"):
+            command = "!" + command
+
+        response = self.response_input.value.strip()
+
+        permission = self.permission_input.value.lower().strip() or "everyone"
+        if permission not in VALID_PERMISSIONS:
+            await interaction.response.send_message(
+                f"❌ Invalid permission `{permission}`. Must be: {', '.join(VALID_PERMISSIONS)}",
+                ephemeral=True
+            )
+            return
+
+        try:
+            cooldown = max(0, min(int(self.cooldown_input.value or 0), 3600))
+        except ValueError:
+            cooldown = 0
+
+        existing_cmds = self.db.get_twitch_commands(self.channel_name)
+        current_cmd = self.db.get_twitch_command(self.channel_name, command)
+
+        if not current_cmd and len(existing_cmds) >= COMMAND_LIMIT:
+            await interaction.response.send_message(
+                f"❌ You've reached the {COMMAND_LIMIT} command limit. Remove one first.",
+                ephemeral=True
+            )
+            return
+
+        self.db.add_twitch_command(self.channel_name, command, response, permission, cooldown)
+        action = "Updated" if (current_cmd or self.existing) else "Added"
+
+        await interaction.response.send_message(
+            f"✅ **{action}** `{command}`\n"
+            f"**Response:** {response}\n"
+            f"**Permission:** {permission} | **Cooldown:** {cooldown}s",
+            ephemeral=True
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# Dropdown — pick existing command to edit or create new
+# ─────────────────────────────────────────────────────────────
+
+class CmdSelect(discord.ui.Select):
+    def __init__(self, db, channel_name: str, cmds: list):
+        self.db = db
+        self.channel_name = channel_name
+
+        options = [discord.SelectOption(label="➕ New Command", value="__new__", description="Create a brand new command")]
+        for cmd in cmds[:24]:
+            cd = f" | {cmd['cooldown_seconds']}s cd" if cmd["cooldown_seconds"] > 0 else ""
+            options.append(discord.SelectOption(
+                label=cmd["command_name"],
+                description=f"{cmd['permission']}{cd} | {cmd['response'][:50]}",
+                value=cmd["command_name"]
+            ))
+
+        super().__init__(placeholder="Choose a command to edit, or create new...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "__new__":
+            modal = CmdModal(self.db, self.channel_name)
+        else:
+            existing = self.db.get_twitch_command(self.channel_name, self.values[0])
+            modal = CmdModal(self.db, self.channel_name, existing=existing)
+        await interaction.response.send_modal(modal)
+
+
+class CmdView(discord.ui.View):
+    def __init__(self, db, channel_name: str, cmds: list):
+        super().__init__(timeout=60)
+        self.add_item(CmdSelect(db, channel_name, cmds))
+
+
+# ─────────────────────────────────────────────────────────────
+# Dropdown — pick command to remove
+# ─────────────────────────────────────────────────────────────
+
+class CmdRemoveSelect(discord.ui.Select):
+    def __init__(self, db, channel_name: str, cmds: list):
+        self.db = db
+        self.channel_name = channel_name
+
+        options = [
+            discord.SelectOption(
+                label=cmd["command_name"],
+                description=f"{cmd['permission']} | {cmd['response'][:60]}",
+                value=cmd["command_name"]
+            )
+            for cmd in cmds[:25]
+        ]
+        super().__init__(placeholder="Choose a command to remove...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        command = self.values[0]
+        self.db.remove_twitch_command(self.channel_name, command)
+        await interaction.response.edit_message(
+            content=f"🗑️ Removed `{command}`.",
+            view=None
+        )
+
+
+class CmdRemoveView(discord.ui.View):
+    def __init__(self, db, channel_name: str, cmds: list):
+        super().__init__(timeout=60)
+        self.add_item(CmdRemoveSelect(db, channel_name, cmds))
+
+
+# ─────────────────────────────────────────────────────────────
+# Setup
+# ─────────────────────────────────────────────────────────────
 
 async def setup(discord_bot, twitch_chat_bot):
     """Register all Twitch slash commands directly on the bot tree"""
 
     # ------------------------------------------------------------------
-    # /twitch setchannel
+    # /twitchset
     # ------------------------------------------------------------------
     @app_commands.default_permissions(manage_guild=True)
     @discord_bot.tree.command(name="twitchset", description="Link this Discord server to your Twitch channel")
@@ -77,10 +237,12 @@ async def setup(discord_bot, twitch_chat_bot):
 
         channel_name = row["twitch_channel"]
         cmd_count = len(discord_bot.db.get_twitch_commands(channel_name))
+        embed_color = discord_bot.db.get_embed_color(interaction.guild_id)
 
-        embed = discord.Embed(title="🟣 Twitch Chat Bot Status", color=0x9146FF)
+        embed = discord.Embed(title="🟣 Twitch Chat Bot Status", color=embed_color)
         embed.add_field(name="Channel", value=f"twitch.tv/{channel_name}", inline=True)
         embed.add_field(name="Custom Commands", value=f"{cmd_count} / {COMMAND_LIMIT}", inline=True)
+        embed.add_field(name="Default Commands", value="`!commands` — lists all active commands in chat", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------
@@ -119,23 +281,11 @@ async def setup(discord_bot, twitch_chat_bot):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------
-    # /cmdadd
+    # /cmd — unified add/edit with dropdown + modal
     # ------------------------------------------------------------------
     @app_commands.default_permissions(manage_guild=True)
-    @discord_bot.tree.command(name="cmdadd", description="Add a custom Twitch chat command")
-    @app_commands.describe(
-        command="Command name (include the ! e.g. !lurk)",
-        response="Response text. Use $user, $game, $uptime, $viewers, $count, $channel",
-        permission="Who can trigger it",
-        cooldown="Cooldown in seconds (default 0)"
-    )
-    @app_commands.choices(permission=[
-        app_commands.Choice(name="Everyone", value="everyone"),
-        app_commands.Choice(name="Subscribers & above", value="subscriber"),
-        app_commands.Choice(name="Mods & above", value="mod"),
-        app_commands.Choice(name="Broadcaster only", value="broadcaster"),
-    ])
-    async def cmd_add(interaction: discord.Interaction, command: str, response: str, permission: str = "everyone", cooldown: int = 0):
+    @discord_bot.tree.command(name="cmd", description="Add or edit a custom Twitch chat command")
+    async def cmd(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need 'Manage Server' permission.", ephemeral=True)
             return
@@ -146,32 +296,22 @@ async def setup(discord_bot, twitch_chat_bot):
             return
 
         channel_name = row["twitch_channel"]
-        if not command.startswith("!"):
-            command = "!" + command
-        command = command.lower().strip()
+        cmds = discord_bot.db.get_twitch_commands(channel_name)
 
-        existing_cmds = discord_bot.db.get_twitch_commands(channel_name)
-        current_cmd = discord_bot.db.get_twitch_command(channel_name, command)
-        if not current_cmd and len(existing_cmds) >= COMMAND_LIMIT:
-            await interaction.response.send_message(f"❌ You've reached the {COMMAND_LIMIT} command limit. Remove one first.", ephemeral=True)
-            return
-
-        cooldown = max(0, min(cooldown, 3600))
-        discord_bot.db.add_twitch_command(channel_name, command, response, permission, cooldown)
-
-        action = "Updated" if current_cmd else "Added"
+        view = CmdView(discord_bot.db, channel_name, cmds)
         await interaction.response.send_message(
-            f"✅ **{action}** `{command}`\n**Response:** {response}\n**Permission:** {permission} | **Cooldown:** {cooldown}s",
+            f"📋 **{len(cmds)}/{COMMAND_LIMIT}** commands set for **#{channel_name}**\n"
+            f"Select an existing command to view/edit, or choose **➕ New Command**:",
+            view=view,
             ephemeral=True
         )
 
     # ------------------------------------------------------------------
-    # /cmdremove
+    # /cmdremove — dropdown to pick which command to delete
     # ------------------------------------------------------------------
     @app_commands.default_permissions(manage_guild=True)
     @discord_bot.tree.command(name="cmdremove", description="Remove a custom Twitch chat command")
-    @app_commands.describe(command="Command name to remove (e.g. !lurk)")
-    async def cmd_remove(interaction: discord.Interaction, command: str):
+    async def cmd_remove(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need 'Manage Server' permission.", ephemeral=True)
             return
@@ -181,60 +321,17 @@ async def setup(discord_bot, twitch_chat_bot):
             await interaction.response.send_message("❌ No Twitch channel linked.", ephemeral=True)
             return
 
-        if not command.startswith("!"):
-            command = "!" + command
-        command = command.lower().strip()
+        channel_name = row["twitch_channel"]
+        cmds = discord_bot.db.get_twitch_commands(channel_name)
 
-        removed = discord_bot.db.remove_twitch_command(row["twitch_channel"], command)
-        if removed:
-            await interaction.response.send_message(f"✅ Removed `{command}`", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"❌ Command `{command}` not found.", ephemeral=True)
-
-    # ------------------------------------------------------------------
-    # /cmdedit
-    # ------------------------------------------------------------------
-    @app_commands.default_permissions(manage_guild=True)
-    @discord_bot.tree.command(name="cmdedit", description="Edit an existing Twitch chat command")
-    @app_commands.describe(
-        command="Command to edit (e.g. !lurk)",
-        response="New response text",
-        permission="New permission level",
-        cooldown="New cooldown in seconds"
-    )
-    @app_commands.choices(permission=[
-        app_commands.Choice(name="Everyone", value="everyone"),
-        app_commands.Choice(name="Subscribers & above", value="subscriber"),
-        app_commands.Choice(name="Mods & above", value="mod"),
-        app_commands.Choice(name="Broadcaster only", value="broadcaster"),
-    ])
-    async def cmd_edit(interaction: discord.Interaction, command: str, response: str = None, permission: str = None, cooldown: int = None):
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ You need 'Manage Server' permission.", ephemeral=True)
+        if not cmds:
+            await interaction.response.send_message("📋 No commands to remove.", ephemeral=True)
             return
 
-        row = discord_bot.db.get_twitch_channel(interaction.guild_id)
-        if not row:
-            await interaction.response.send_message("❌ No Twitch channel linked.", ephemeral=True)
-            return
-
-        if not command.startswith("!"):
-            command = "!" + command
-        command = command.lower().strip()
-
-        existing = discord_bot.db.get_twitch_command(row["twitch_channel"], command)
-        if not existing:
-            await interaction.response.send_message(f"❌ Command `{command}` not found. Use `/cmdadd` to create it.", ephemeral=True)
-            return
-
-        new_response = response if response is not None else existing["response"]
-        new_permission = permission if permission is not None else existing["permission"]
-        new_cooldown = cooldown if cooldown is not None else existing["cooldown_seconds"]
-        new_cooldown = max(0, min(new_cooldown, 3600))
-
-        discord_bot.db.add_twitch_command(row["twitch_channel"], command, new_response, new_permission, new_cooldown)
+        view = CmdRemoveView(discord_bot.db, channel_name, cmds)
         await interaction.response.send_message(
-            f"✅ Updated `{command}`\n**Response:** {new_response}\n**Permission:** {new_permission} | **Cooldown:** {new_cooldown}s",
+            "Select a command to remove:",
+            view=view,
             ephemeral=True
         )
 
@@ -250,24 +347,42 @@ async def setup(discord_bot, twitch_chat_bot):
 
         channel_name = row["twitch_channel"]
         cmds = discord_bot.db.get_twitch_commands(channel_name)
+        embed_color = discord_bot.db.get_embed_color(interaction.guild_id)
 
         if not cmds:
-            await interaction.response.send_message(f"📋 No custom commands yet. Add one with `/cmdadd`!", ephemeral=True)
+            await interaction.response.send_message("📋 No custom commands yet. Add one with `/cmd`!", ephemeral=True)
             return
 
         embed = discord.Embed(
             title=f"📋 Commands for #{channel_name}",
             description=f"{len(cmds)} / {COMMAND_LIMIT} commands used",
-            color=0x9146FF
+            color=embed_color
         )
 
         lines = []
-        for cmd in cmds:
-            cd = f"{cmd['cooldown_seconds']}s cd" if cmd["cooldown_seconds"] > 0 else "no cd"
-            uses = cmd.get("use_count", 0)
-            lines.append(f"`{cmd['command_name']}` — {cmd['permission']} | {cd} | {uses} uses")
+        for cmd_row in cmds:
+            cd = f"{cmd_row['cooldown_seconds']}s cd" if cmd_row["cooldown_seconds"] > 0 else "no cd"
+            uses = cmd_row.get("use_count", 0)
+            lines.append(f"`{cmd_row['command_name']}` — {cmd_row['permission']} | {cd} | {uses} uses")
 
-        embed.add_field(name="Commands", value="\n".join(lines) or "None", inline=False)
+        # Split into multiple fields if over 1024 chars
+        current_field = []
+        current_length = 0
+        field_num = 1
+        for line in lines:
+            if current_length + len(line) + 1 > 1000 and current_field:
+                label = "Commands" if field_num == 1 else f"Commands (cont. {field_num})"
+                embed.add_field(name=label, value="\n".join(current_field), inline=False)
+                current_field = [line]
+                current_length = len(line)
+                field_num += 1
+            else:
+                current_field.append(line)
+                current_length += len(line) + 1
+        if current_field:
+            label = "Commands" if field_num == 1 else f"Commands (cont. {field_num})"
+            embed.add_field(name=label, value="\n".join(current_field), inline=False)
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------
@@ -290,7 +405,8 @@ async def setup(discord_bot, twitch_chat_bot):
             await interaction.response.send_message(f"❌ Command `{command}` not found.", ephemeral=True)
             return
 
-        embed = discord.Embed(title=f"Command: {command}", color=0x9146FF)
+        embed_color = discord_bot.db.get_embed_color(interaction.guild_id)
+        embed = discord.Embed(title=f"Command: {command}", color=embed_color)
         embed.add_field(name="Response", value=cmd["response"], inline=False)
         embed.add_field(name="Permission", value=cmd["permission"], inline=True)
         embed.add_field(name="Cooldown", value=f"{cmd['cooldown_seconds']}s", inline=True)

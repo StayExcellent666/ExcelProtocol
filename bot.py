@@ -817,7 +817,7 @@ async def check_live(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🔴 Currently Live",
         description=f"{len(live_streams)} streamer(s) live now",
-        color=0xFF0000
+        color=bot.db.get_embed_color(interaction.guild_id)
     )
     
     for stream in live_streams:
@@ -863,7 +863,7 @@ async def bot_stats(interaction: discord.Interaction):
     # Create embed
     embed = discord.Embed(
         title="📊 Bot Statistics",
-        color=0x9146FF,
+        color=bot.db.get_embed_color(interaction.guild_id),
         timestamp=datetime.utcnow()
     )
     
@@ -961,7 +961,7 @@ async def test_notification(interaction: discord.Interaction):
         title=fake_stream['title'],
         url=f"https://twitch.tv/{fake_stream['user_login']}",
         description=f"**{fake_stream['user_name']}** is now live!",
-        color=0x9146FF,  # Twitch purple
+        color=bot.db.get_embed_color(interaction.guild_id),  # Use server custom color
         timestamp=datetime.utcnow()
     )
     
@@ -1248,7 +1248,7 @@ async def auto_delete(interaction: discord.Interaction, enabled: bool):
             "Notifications will be **automatically deleted** when streams end." if enabled else
             "Notifications will **stay in the channel** after streams end."
         ),
-        color=0x00FF00 if enabled else 0xFF0000
+        color=bot.db.get_embed_color(interaction.guild_id)
     )
     
     if enabled:
@@ -1854,7 +1854,7 @@ async def leaderboard(interaction: discord.Interaction):
     embed = discord.Embed(
         title=f"🏆 Streamer Leaderboard — {month_name}",
         description=f"Most active streamers tracked in **{interaction.guild.name}** this month",
-        color=0x9146FF
+        color=bot.db.get_embed_color(interaction.guild_id)
     )
     
     if not rows:
