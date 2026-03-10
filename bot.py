@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timedelta
 from database import Database
 from twitch_api import TwitchAPI
-from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID
+from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID, LOG_CHANNEL_ID
 from config import TWITCH_BOT_USERNAME, TWITCH_BOT_TOKEN
 
 # Set up logging
@@ -120,6 +120,13 @@ class TwitchNotifierBot(discord.Client):
         if not self.monthly_leaderboard_cleanup.is_running():
             self.monthly_leaderboard_cleanup.start()
             logger.info("Monthly leaderboard cleanup loop started")
+
+        guild_count = len(self.guilds)
+        await self.log_to_channel(
+            "🤖", "Bot Started",
+            f"ExcelProtocol is online.\n**Servers:** {guild_count}",
+            color=0x00CC66
+        )
     
     async def on_guild_remove(self, guild):
         """Called when bot is removed from a server - clean up data"""
@@ -276,6 +283,11 @@ class TwitchNotifierBot(discord.Client):
             f"**Issue:** {issue}\n\n"
             f"{owner_note}",
             guild_id=guild.id
+        )
+        await self.log_to_channel(
+            "❌", "Notification Failed — Permission Issue",
+            f"**Server:** {guild.name}\n**Channel:** <#{channel_id}>\n**Issue:** {issue}",
+            color=0xFF0000
         )
 
     async def send_notification(self, server_data, stream):
@@ -498,6 +510,27 @@ class TwitchNotifierBot(discord.Client):
             logger.error("Cannot send DM to owner - DMs may be disabled")
         except Exception as e:
             logger.error(f"Error sending owner alert: {e}", exc_info=True)
+
+    async def log_to_channel(self, emoji: str, title: str, description: str, color: int = 0x9146FF):
+        """Send a log message to the hardcoded log channel."""
+        if not LOG_CHANNEL_ID:
+            return
+        try:
+            channel = self.get_channel(LOG_CHANNEL_ID)
+            if not channel:
+                channel = await self.fetch_channel(LOG_CHANNEL_ID)
+            if not channel:
+                return
+            embed = discord.Embed(
+                title=f"{emoji} {title}",
+                description=description,
+                color=color,
+                timestamp=datetime.utcnow()
+            )
+            embed.set_footer(text="ExcelProtocol Log")
+            await channel.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Failed to send to log channel: {e}")
     
     @tasks.loop(hours=1)
     async def cleanup_channels(self):
@@ -682,6 +715,11 @@ async def add_streamer(interaction: discord.Interaction, streamer: str, channel:
 
             ephemeral=True
         )
+        await bot.log_to_channel(
+            "➕", "Streamer Added",
+            f"**{user_info['display_name']}** added in **{interaction.guild.name}**\n"
+            f"Channel: <#{channel_id}>{custom}\nBy: {interaction.user} (`{interaction.user.id}`)"
+        )
     else:
         await interaction.followup.send(
             f"ℹ️ Already monitoring **{user_info['display_name']}** in this server.",
@@ -707,6 +745,11 @@ async def remove_streamer(interaction: discord.Interaction, streamer: str):
         await interaction.response.send_message(
             f"✅ No longer monitoring **{streamer}**",
             ephemeral=True
+        )
+        await bot.log_to_channel(
+            "➖", "Streamer Removed",
+            f"**{streamer}** removed in **{interaction.guild.name}**\nBy: {interaction.user} (`{interaction.user.id}`)",
+            color=0xFF6600
         )
     else:
         await interaction.response.send_message(
@@ -1179,7 +1222,10 @@ async def set_color(interaction: discord.Interaction, color: str):
     # Save to database
     bot.db.set_embed_color(interaction.guild_id, color_int)
     
-    # Create preview embed
+    await bot.log_to_channel(
+        "🎨", "Embed Color Changed",
+        f"**Server:** {interaction.guild.name}\n**New Color:** `#{color.upper()}`\nBy: {interaction.user} (`{interaction.user.id}`)"
+    )
     preview_embed = discord.Embed(
         title="Color Updated!",
         description=f"Stream notifications will now use this color.",
@@ -1215,6 +1261,11 @@ async def reset_color(interaction: discord.Interaction):
     
     # Reset to Twitch purple
     bot.db.set_embed_color(interaction.guild_id, 0x9146FF)
+
+    await bot.log_to_channel(
+        "🎨", "Embed Color Reset",
+        f"**Server:** {interaction.guild.name} reset to default purple\nBy: {interaction.user} (`{interaction.user.id}`)"
+    )
     
     embed = discord.Embed(
         title="✅ Color Reset",
@@ -1240,6 +1291,11 @@ async def auto_delete(interaction: discord.Interaction, enabled: bool):
     
     # Save setting
     bot.db.set_auto_delete(interaction.guild_id, enabled)
+
+    await bot.log_to_channel(
+        "🗑️" if enabled else "📌", f"Auto-Delete {'Enabled' if enabled else 'Disabled'}",
+        f"**Server:** {interaction.guild.name}\nBy: {interaction.user} (`{interaction.user.id}`)"
+    )
     
     # Create response embed
     embed = discord.Embed(

@@ -14,6 +14,7 @@ TWITCH_CLIENT_SECRET = os.getenv('TWITCH_CLIENT_SECRET')
 # Bot Settings
 CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', '90'))  # Default: 90 seconds (1.5 minutes)
 BOT_OWNER_ID = int(os.getenv('BOT_OWNER_ID', '0'))  # Your Discord user ID for owner-only commands
+LOG_CHANNEL_ID = 1480890141508767874  # Bot log channel
 
 # Twitch Chat Bot (twitchio)
 # Create a separate Twitch account for the bot, then get its OAuth token at:

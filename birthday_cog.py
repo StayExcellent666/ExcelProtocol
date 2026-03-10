@@ -8,10 +8,11 @@ logger = logging.getLogger(__name__)
 
 
 class BirthdaySetModal(discord.ui.Modal, title="Set Birthday"):
-    def __init__(self, target_user: discord.Member, db):
+    def __init__(self, target_user: discord.Member, db, bot):
         super().__init__()
         self.target_user = target_user
         self.db = db
+        self.bot = bot
 
     day = discord.ui.TextInput(label="Day", placeholder="e.g. 15", min_length=1, max_length=2)
     month = discord.ui.TextInput(label="Month (number)", placeholder="e.g. 6 for June", min_length=1, max_length=2)
@@ -41,6 +42,12 @@ class BirthdaySetModal(discord.ui.Modal, title="Set Birthday"):
             msg = f"🎂 Birthday for {self.target_user.mention} set to **{birthday.strftime('%B %d, %Y')}**!"
 
         await interaction.response.send_message(msg, ephemeral=True)
+
+        await self.bot.log_to_channel(
+            "🎂", "Birthday Set",
+            f"**{self.target_user.display_name}** — **{birthday.strftime('%B %d, %Y')}** in **{interaction.guild.name}**\n"
+            f"Set by: {interaction.user} (`{interaction.user.id}`)"
+        )
 
 
 class BirthdayChecker:
@@ -89,6 +96,11 @@ class BirthdayChecker:
                         f"🎂 It's {member.mention}'s birthday today! "
                         f"They are turning **{age}** years old! Happy Birthday! 🎉"
                     )
+                    await self.bot.log_to_channel(
+                        "🎂", "Birthday Announced",
+                        f"**{member.display_name}** turning **{age}** in **{guild.name}**",
+                        color=0xFFD700
+                    )
                 except Exception as e:
                     logger.error(f"Failed to send birthday message in guild {guild.id}: {e}")
         self._last_birthday_date = today
@@ -117,7 +129,7 @@ async def setup(discord_bot):
                 await interaction.response.send_message("❌ Only moderators and admins can set another user's birthday.", ephemeral=True)
                 return
             target = user
-        modal = BirthdaySetModal(target_user=target, db=discord_bot.db)
+        modal = BirthdaySetModal(target_user=target, db=discord_bot.db, bot=discord_bot)
         await interaction.response.send_modal(modal)
 
     @discord_bot.tree.command(name="birthdayremove", description="Remove a birthday entry (yours, or another user's if mod/admin)")
