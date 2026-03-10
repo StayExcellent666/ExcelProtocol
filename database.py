@@ -528,7 +528,9 @@ class Database:
             DELETE FROM milestone_sent WHERE guild_id = ? AND streamer_name = ?
         ''', (guild_id, streamer_name))
         conn.commit()
-        conn.close()(self, guild_id: int, streamer_name: str, channel_id: int, message_id: int):
+        conn.close()
+
+    def save_notification_message(self, guild_id: int, streamer_name: str, channel_id: int, message_id: int):
         """Save a notification message ID for later deletion"""
         conn = self.get_connection()
         cursor = conn.cursor()
