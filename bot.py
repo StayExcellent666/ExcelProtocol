@@ -1594,6 +1594,29 @@ async def cleanup_test(interaction: discord.Interaction, channel: discord.TextCh
 
 
 @app_commands.default_permissions(administrator=True)
+@bot.tree.command(name="tip", description="Support ExcelProtocol's development")
+async def tip(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="☕ Support ExcelProtocol",
+        description=(
+            "If you're enjoying ExcelProtocol, consider leaving a tip!\n\n"
+            "Every contribution helps keep the bot running and supports future development. "
+            "It means a lot! 💜"
+        ),
+        color=0xFF5E5B
+    )
+    embed.set_footer(text="Thank you for your support! — stayexcellent")
+
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(
+        label="Support on Ko-fi ☕",
+        url="https://ko-fi.com/stayexcellent",
+        style=discord.ButtonStyle.link
+    ))
+
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
 @bot.tree.command(name="help", description="Learn how to use ExcelProtocol")
 async def help_command(interaction: discord.Interaction):
     embed_color = bot.db.get_embed_color(interaction.guild_id)
