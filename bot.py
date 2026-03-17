@@ -1594,6 +1594,167 @@ async def cleanup_test(interaction: discord.Interaction, channel: discord.TextCh
 
 
 @app_commands.default_permissions(administrator=True)
+@bot.tree.command(name="help", description="Learn how to use ExcelProtocol")
+async def help_command(interaction: discord.Interaction):
+    embed_color = bot.db.get_embed_color(interaction.guild_id)
+
+    pages = [
+        discord.Embed(
+            title="📖 ExcelProtocol — Getting Started",
+            description=(
+                "Welcome to ExcelProtocol! Here's a quick overview of what the bot can do.\n\n"
+                "Use the buttons below to navigate through the setup guide.\n\n"
+                "**Features:**\n"
+                "📺 Twitch stream notifications\n"
+                "🎂 Birthday announcements\n"
+                "🔘 Reaction roles\n"
+                "🟣 Twitch chat bot with custom commands\n"
+                "🏆 Stream leaderboards\n"
+                "🗑️ Auto channel cleanup"
+            ),
+            color=embed_color
+        ),
+        discord.Embed(
+            title="📺 Stream Notifications — Setup",
+            description=(
+                "**Step 1 — Set your notification channel:**\n"
+                "`/setchannel` → Select **Stream Notifications** → Pick a channel\n\n"
+                "**Step 2 — Add streamers to monitor:**\n"
+                "`/addstreamer streamer:ninja`\n\n"
+                "Optionally post to a specific channel per streamer:\n"
+                "`/addstreamer streamer:ninja channel:#ninja-notifs`\n\n"
+                "**Other commands:**\n"
+                "`/streamers` — List monitored streamers\n"
+                "`/removestreamer streamer:ninja` — Stop monitoring\n"
+                "`/live` — See who is live right now\n"
+                "`/repostlive` — Re-send notifications for live streamers"
+            ),
+            color=embed_color
+        ),
+        discord.Embed(
+            title="🎨 Notification Settings",
+            description=(
+                "**Change embed color:**\n"
+                "`/setcolor color:9146FF` — Any 6-digit hex code\n"
+                "`/resetcolor` — Reset to default Twitch purple\n\n"
+                "**Auto-delete when stream ends:**\n"
+                "`/autodelete enabled:True`\n"
+                "Notifications are removed automatically when the streamer goes offline.\n\n"
+                "**Milestone notifications:**\n"
+                "`/milestonetoggle enabled:True`\n"
+                "Sends a notification at 5 hours and 10 hours of streaming."
+            ),
+            color=embed_color
+        ),
+        discord.Embed(
+            title="🔘 Reaction Roles — Setup",
+            description=(
+                "**Create a panel:**\n"
+                "`/rr create` — Opens a setup popup\n\n"
+                "**Add roles to your panel:**\n"
+                "`/rr addrole label:Gaming role:@Gamer emoji:🎮`\n\n"
+                "**Post the panel:**\n"
+                "`/rr publish` — Sends the embed to the current channel\n\n"
+                "**Manage panels:**\n"
+                "`/rr edit message_id:123456` — Edit an existing panel\n"
+                "`/rr delete message_id:123456` — Delete a panel\n"
+                "`/rr sort message_id:123456` — Sort roles alphabetically\n"
+                "`/rr list` — See all panels in this server\n"
+                "`/rr cancel` — Cancel your current session"
+            ),
+            color=embed_color
+        ),
+        discord.Embed(
+            title="🟣 Twitch Chat Bot — Setup",
+            description=(
+                "**Link your Twitch channel:**\n"
+                "`/twitchset channel:yourchannel`\n\n"
+                "**Add or edit a custom command:**\n"
+                "`/cmd` — Opens a dropdown to pick an existing command or create new\n\n"
+                "**Remove a command:**\n"
+                "`/cmdremove` — Dropdown to pick which command to delete\n\n"
+                "**View commands:**\n"
+                "`/cmdlist` — List all custom commands\n"
+                "`/twitchstatus` — Show linked channel info\n\n"
+                "**Response variables:** `$user` `$game` `$uptime` `$viewers` `$count` `$channel`"
+            ),
+            color=embed_color
+        ),
+        discord.Embed(
+            title="🟣 Built-in Twitch Chat Commands",
+            description=(
+                "These commands are always active in your Twitch chat once linked:\n\n"
+                "`!commands` — Lists all active commands\n"
+                "`!uptime` — How long the stream has been live\n"
+                "`!game` — Current game\n"
+                "`!title` — Stream title\n"
+                "`!viewers` — Current viewer count\n"
+                "`!so @username` — Shoutout another streamer *(mods only)*"
+            ),
+            color=embed_color
+        ),
+        discord.Embed(
+            title="🎂 Birthdays — Setup",
+            description=(
+                "**Set birthday announcement channel:**\n"
+                "`/setchannel` → Select **Birthday Announcements** → Pick a channel\n\n"
+                "**Set your birthday:**\n"
+                "`/birthday` — Opens a popup to enter your date\n\n"
+                "**Mods can manage anyone's birthday:**\n"
+                "`/birthday user:@username`\n"
+                "`/birthdayremove user:@username`\n\n"
+                "**View all birthdays:**\n"
+                "`/birthdaylist` *(mods/admins only)*"
+            ),
+            color=embed_color
+        ),
+        discord.Embed(
+            title="⚙️ Permissions Required",
+            description=(
+                "ExcelProtocol needs the following permissions to work correctly:\n\n"
+                "✅ **Send Messages** — To post notifications\n"
+                "✅ **Embed Links** — To send rich embeds\n"
+                "✅ **Manage Messages** — For auto-delete and cleanup\n"
+                "✅ **Read Message History** — For channel cleanup\n"
+                "✅ **Add Reactions** — For reaction roles\n"
+                "✅ **View Channels** — To see channels\n\n"
+                "Need help? Contact the bot owner: `stayexcellent`"
+            ),
+            color=embed_color
+        ),
+    ]
+
+    # Add page numbers to footers
+    total = len(pages)
+    for i, page in enumerate(pages):
+        page.set_footer(text=f"Page {i + 1} of {total} • ExcelProtocol Help")
+
+    class HelpView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=120)
+            self.page = 0
+
+        def update_buttons(self):
+            self.prev_btn.disabled = self.page == 0
+            self.next_btn.disabled = self.page == total - 1
+
+        @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+        async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=pages[self.page], view=self)
+
+        @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+        async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=pages[self.page], view=self)
+
+    view = HelpView()
+    view.prev_btn.disabled = True  # Start on page 1, disable back button
+    await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+
+
 @bot.tree.command(name="botinfo", description="Show bot statistics and server information")
 async def bot_info(interaction: discord.Interaction):
     """Display bot stats including server count and configurations"""

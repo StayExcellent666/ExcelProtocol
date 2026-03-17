@@ -265,6 +265,20 @@ class Database:
             )
         ''')
 
+        # Reaction roles panels
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reaction_roles (
+                message_id  INTEGER PRIMARY KEY,
+                guild_id    INTEGER NOT NULL,
+                channel_id  INTEGER NOT NULL,
+                title       TEXT NOT NULL,
+                type        TEXT NOT NULL DEFAULT 'dropdown',
+                only_add    INTEGER NOT NULL DEFAULT 0,
+                max_roles   INTEGER,
+                roles_json  TEXT NOT NULL DEFAULT '[]'
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -986,6 +1000,9 @@ class Database:
         cursor.execute('DELETE FROM twitch_channels WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM birthdays WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM birthday_channels WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM reaction_roles WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM milestone_sent WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM stream_events WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()
@@ -1059,3 +1076,91 @@ class Database:
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else None
+
+    # ----------------------------------------------------------------
+    # Reaction roles
+    # ----------------------------------------------------------------
+
+    def rr_save(self, message_id: int, guild_id: int, channel_id: int, title: str,
+                rr_type: str, only_add: bool, max_roles, roles: list):
+        """Save or update a reaction role panel."""
+        import json
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO reaction_roles (message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(message_id) DO UPDATE SET
+                guild_id   = excluded.guild_id,
+                channel_id = excluded.channel_id,
+                title      = excluded.title,
+                type       = excluded.type,
+                only_add   = excluded.only_add,
+                max_roles  = excluded.max_roles,
+                roles_json = excluded.roles_json
+        ''', (message_id, guild_id, channel_id, title, rr_type,
+              1 if only_add else 0, max_roles, json.dumps(roles)))
+        conn.commit()
+        conn.close()
+
+    def rr_get(self, message_id: int) -> dict | None:
+        """Get a reaction role panel by message ID."""
+        import json
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM reaction_roles WHERE message_id = ?', (message_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            'message_id': row[0], 'guild_id': row[1], 'channel_id': row[2],
+            'title': row[3], 'type': row[4], 'only_add': bool(row[5]),
+            'max_roles': row[6], 'roles': json.loads(row[7])
+        }
+
+    def rr_get_all(self) -> list:
+        """Get all reaction role panels (for restore on startup)."""
+        import json
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM reaction_roles')
+        rows = cursor.fetchall()
+        conn.close()
+        return [{
+            'message_id': r[0], 'guild_id': r[1], 'channel_id': r[2],
+            'title': r[3], 'type': r[4], 'only_add': bool(r[5]),
+            'max_roles': r[6], 'roles': json.loads(r[7])
+        } for r in rows]
+
+    def rr_get_for_guild(self, guild_id: int) -> list:
+        """Get all reaction role panels for a specific guild."""
+        import json
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM reaction_roles WHERE guild_id = ?', (guild_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{
+            'message_id': r[0], 'guild_id': r[1], 'channel_id': r[2],
+            'title': r[3], 'type': r[4], 'only_add': bool(r[5]),
+            'max_roles': r[6], 'roles': json.loads(r[7])
+        } for r in rows]
+
+    def rr_delete(self, message_id: int):
+        """Delete a reaction role panel."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM reaction_roles WHERE message_id = ?', (message_id,))
+        conn.commit()
+        conn.close()
+
+    def rr_update_roles(self, message_id: int, roles: list):
+        """Update just the roles list for a panel."""
+        import json
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE reaction_roles SET roles_json = ? WHERE message_id = ?',
+                       (json.dumps(roles), message_id))
+        conn.commit()
+        conn.close()

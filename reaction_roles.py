@@ -15,23 +15,38 @@ _bot = None  # stored reference for color lookups
 
 
 # ------------------------------------------------------------------
-# Data persistence
+# JSON → SQLite migration (runs once on startup if JSON exists)
 # ------------------------------------------------------------------
 
-def _load_data() -> dict:
-    if os.path.exists(RR_DATA_PATH):
-        try:
-            with open(RR_DATA_PATH, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_data(data: dict):
-    os.makedirs(os.path.dirname(RR_DATA_PATH), exist_ok=True)
-    with open(RR_DATA_PATH, "w") as f:
-        json.dump(data, f, indent=2)
+def _migrate_json_to_db(db):
+    if not os.path.exists(RR_DATA_PATH):
+        return
+    try:
+        with open(RR_DATA_PATH, "r") as f:
+            data = json.load(f)
+        if not data:
+            return
+        count = 0
+        for message_id_str, entry in data.items():
+            try:
+                db.rr_save(
+                    message_id=int(message_id_str),
+                    guild_id=entry["guild_id"],
+                    channel_id=entry["channel_id"],
+                    title=entry["title"],
+                    rr_type=entry.get("type", "dropdown"),
+                    only_add=entry.get("only_add", False),
+                    max_roles=entry.get("max_roles"),
+                    roles=entry.get("roles", [])
+                )
+                count += 1
+            except Exception as e:
+                logger.error(f"Failed to migrate RR entry {message_id_str}: {e}")
+        # Rename JSON to backup so migration doesn't run again
+        os.rename(RR_DATA_PATH, RR_DATA_PATH + ".bak")
+        logger.info(f"Migrated {count} reaction role panel(s) from JSON to SQLite. Backup at {RR_DATA_PATH}.bak")
+    except Exception as e:
+        logger.error(f"Failed to migrate reaction_roles.json: {e}")
 
 
 # ------------------------------------------------------------------
@@ -49,22 +64,20 @@ def _get_button_style(guild_id: int) -> discord.ButtonStyle:
     g = (color >> 8) & 0xFF
     b = color & 0xFF
 
-    # Map to closest Discord button color
-    # Success = green, Danger = red, Primary = blue, Secondary = grey
     max_channel = max(r, g, b)
     if max_channel == 0:
         return discord.ButtonStyle.secondary
 
     if r == max_channel and r > g + 30 and r > b + 30:
-        return discord.ButtonStyle.danger   # reddish
+        return discord.ButtonStyle.danger
     elif g == max_channel and g > r + 30 and g > b + 30:
-        return discord.ButtonStyle.success  # greenish
+        return discord.ButtonStyle.success
     elif b == max_channel and b > r + 30 and b > g + 30:
-        return discord.ButtonStyle.primary  # blueish
+        return discord.ButtonStyle.primary
     elif r == max_channel and g > b + 30:
-        return discord.ButtonStyle.danger   # orange-ish → red
+        return discord.ButtonStyle.danger
     else:
-        return discord.ButtonStyle.secondary  # default grey
+        return discord.ButtonStyle.secondary
 
 
 def _get_embed_color(guild_id: int) -> int:
@@ -175,7 +188,7 @@ class EditSettingsModal(discord.ui.Modal, title="Edit Reaction Role"):
             "only_add": only_add_val,
             "max_roles": max_val,
             "editing_message_id": self.message_id,
-            "channel_id": self.entry["channel_id"],  # preserve original channel
+            "channel_id": self.entry["channel_id"],
         }
         _sessions[interaction.user.id] = updated
 
@@ -244,8 +257,6 @@ def _build_edit_role_view(user_id: int, guild: discord.Guild) -> discord.ui.View
         async def select_cb(si: discord.Interaction):
             role_id_to_edit = int(select.values[0])
             s = _sessions.get(si.user.id, {})
-
-            # Pre-fill current values
             current = next((r for r in s["roles"] if r["role_id"] == role_id_to_edit), {})
 
             class EditLabelModal(discord.ui.Modal, title="Edit Role Label & Emoji"):
@@ -293,7 +304,6 @@ def _build_edit_role_view(user_id: int, guild: discord.Guild) -> discord.ui.View
 # ------------------------------------------------------------------
 
 async def _get_or_create_role(guild: discord.Guild, role_name: str) -> discord.Role:
-    # Handle Discord role mention format <@&ROLE_ID>
     import re
     mention_match = re.match(r'<@&(\d+)>', role_name.strip())
     if mention_match:
@@ -366,7 +376,6 @@ async def _handle_select(interaction: discord.Interaction, selected_values: list
     all_role_ids = [r["role_id"] for r in roles_data]
     selected_ids = [int(v) for v in selected_values]
 
-    # Enforce max_roles server-side
     if max_roles and len(selected_ids) > max_roles:
         await interaction.response.send_message(
             f"❌ You can only select up to **{max_roles}** role{'s' if max_roles != 1 else ''}.",
@@ -428,7 +437,6 @@ async def _handle_button(interaction: discord.Interaction, role_id: int, only_ad
                 await member.remove_roles(role, reason="Reaction role button")
                 await interaction.response.send_message(f"➖ Removed **{role.name}**.", ephemeral=True)
         else:
-            # Enforce max_roles for buttons
             if max_roles and all_role_ids:
                 current_count = sum(1 for rid in all_role_ids if guild.get_role(rid) in member.roles)
                 if current_count >= max_roles:
@@ -451,14 +459,14 @@ async def _handle_button(interaction: discord.Interaction, role_id: int, only_ad
 # ------------------------------------------------------------------
 
 async def restore_views(bot):
-    data = _load_data()
-    for message_id, entry in data.items():
+    panels = bot.db.rr_get_all()
+    for entry in panels:
         try:
             view = _build_view(entry, bot)
-            bot.add_view(view, message_id=int(message_id))
+            bot.add_view(view, message_id=entry["message_id"])
         except Exception as e:
-            logger.error(f"Failed to restore view for message {message_id}: {e}")
-    logger.info(f"Restored {len(data)} reaction role view(s)")
+            logger.error(f"Failed to restore view for message {entry['message_id']}: {e}")
+    logger.info(f"Restored {len(panels)} reaction role view(s)")
 
 
 # ------------------------------------------------------------------
@@ -468,6 +476,9 @@ async def restore_views(bot):
 async def setup(bot):
     global _bot
     _bot = bot
+
+    # Migrate JSON to SQLite if needed
+    _migrate_json_to_db(bot.db)
 
     await restore_views(bot)
 
@@ -535,14 +546,11 @@ async def setup(bot):
             discord_role = role
         else:
             discord_role = await _get_or_create_role(interaction.guild, new_role_name)
-        # Parse emoji — handle unicode and custom <:name:id> or <a:name:id>
+
         parsed_emoji = None
         if emoji:
             emoji = emoji.strip()
-            if emoji.startswith("<:") or emoji.startswith("<a:"):
-                parsed_emoji = emoji  # store as-is, discord accepts this string
-            else:
-                parsed_emoji = emoji  # unicode emoji
+            parsed_emoji = emoji
 
         session["roles"].append({"label": label, "role_id": discord_role.id, "emoji": parsed_emoji})
 
@@ -586,13 +594,10 @@ async def setup(bot):
         editing_id = session.get("editing_message_id")
 
         if editing_id:
-            # Update existing message
-            data = _load_data()
             entry = {**session, "message_id": int(editing_id)}
             view = _build_view(entry, bot)
 
             try:
-                # Use stored channel_id from original entry
                 channel = bot.get_channel(session["channel_id"])
                 if not channel:
                     await interaction.followup.send("❌ Could not find the original channel.", ephemeral=True)
@@ -600,8 +605,16 @@ async def setup(bot):
                 msg = await channel.fetch_message(int(editing_id))
                 await msg.edit(embed=embed, view=view)
                 bot.add_view(view, message_id=int(editing_id))
-                data[str(editing_id)] = entry
-                _save_data(data)
+                bot.db.rr_save(
+                    message_id=int(editing_id),
+                    guild_id=session["guild_id"],
+                    channel_id=session["channel_id"],
+                    title=session["title"],
+                    rr_type=session["type"],
+                    only_add=session["only_add"],
+                    max_roles=session["max_roles"],
+                    roles=session["roles"]
+                )
                 del _sessions[interaction.user.id]
                 await interaction.followup.send("✅ Reaction role message updated!", ephemeral=True)
             except discord.NotFound:
@@ -611,7 +624,6 @@ async def setup(bot):
                 logger.error(f"Error updating RR message: {e}", exc_info=True)
                 await interaction.followup.send("❌ Something went wrong updating the message.", ephemeral=True)
         else:
-            # Post new message
             temp_entry = {**session, "message_id": 0}
             view = _build_view(temp_entry, bot)
             message = await interaction.channel.send(embed=embed, view=view)
@@ -621,9 +633,16 @@ async def setup(bot):
             await message.edit(view=view)
             bot.add_view(view, message_id=message.id)
 
-            data = _load_data()
-            data[str(message.id)] = entry
-            _save_data(data)
+            bot.db.rr_save(
+                message_id=message.id,
+                guild_id=session["guild_id"],
+                channel_id=interaction.channel_id,
+                title=session["title"],
+                rr_type=session["type"],
+                only_add=session["only_add"],
+                max_roles=session["max_roles"],
+                roles=session["roles"]
+            )
 
             del _sessions[interaction.user.id]
             await interaction.followup.send(f"✅ Reaction role message posted! Message ID: `{message.id}`", ephemeral=True)
@@ -638,8 +657,7 @@ async def setup(bot):
             await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
             return
 
-        data = _load_data()
-        entry = data.get(message_id)
+        entry = bot.db.rr_get(int(message_id))
 
         if not entry or entry["guild_id"] != interaction.guild_id:
             await interaction.response.send_message("❌ Reaction role message not found in this server.", ephemeral=True)
@@ -657,8 +675,7 @@ async def setup(bot):
             await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
             return
 
-        data = _load_data()
-        entry = data.get(message_id)
+        entry = bot.db.rr_get(int(message_id))
 
         if not entry or entry["guild_id"] != interaction.guild_id:
             await interaction.response.send_message("❌ Reaction role message not found in this server.", ephemeral=True)
@@ -667,8 +684,7 @@ async def setup(bot):
         await interaction.response.defer(ephemeral=True)
 
         entry["roles"] = sorted(entry["roles"], key=lambda r: r["label"].lower())
-        data[message_id] = entry
-        _save_data(data)
+        bot.db.rr_update_roles(int(message_id), entry["roles"])
 
         embed = discord.Embed(title=entry["title"], color=_get_embed_color(entry["guild_id"]))
         view = _build_view(entry, bot)
@@ -695,8 +711,7 @@ async def setup(bot):
             await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
             return
 
-        data = _load_data()
-        entry = data.get(message_id)
+        entry = bot.db.rr_get(int(message_id))
 
         if not entry or entry["guild_id"] != interaction.guild_id:
             await interaction.response.send_message("❌ Reaction role message not found in this server.", ephemeral=True)
@@ -712,8 +727,7 @@ async def setup(bot):
         except Exception:
             pass
 
-        del data[message_id]
-        _save_data(data)
+        bot.db.rr_delete(int(message_id))
         await interaction.followup.send("✅ Reaction role message deleted.", ephemeral=True)
 
     # ------------------------------------------------------------------
@@ -725,21 +739,20 @@ async def setup(bot):
             await interaction.response.send_message("❌ You need 'Manage Roles' permission.", ephemeral=True)
             return
 
-        data = _load_data()
-        server_entries = {mid: e for mid, e in data.items() if e["guild_id"] == interaction.guild_id}
+        panels = bot.db.rr_get_for_guild(interaction.guild_id)
 
-        if not server_entries:
+        if not panels:
             await interaction.response.send_message("No reaction role messages in this server yet.", ephemeral=True)
             return
 
         embed = discord.Embed(title="📋 Reaction Role Messages", color=_get_embed_color(interaction.guild_id))
 
-        for mid, entry in server_entries.items():
+        for entry in panels:
             channel = bot.get_channel(entry["channel_id"])
             channel_mention = f"<#{entry['channel_id']}>" if channel else "unknown channel"
             role_names = ", ".join(r["label"] for r in entry["roles"])
             embed.add_field(
-                name=f"{entry['title']} (ID: {mid})",
+                name=f"{entry['title']} (ID: {entry['message_id']})",
                 value=f"Channel: {channel_mention}\nType: {entry['type']} | Roles: {role_names}",
                 inline=False
             )
