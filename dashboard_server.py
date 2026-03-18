@@ -458,6 +458,157 @@ async def get_channels(request):
     default_channel_id = str(rows[0]["notification_channel_id"]) if rows else None
     return web.json_response({"channels": channels, "default_channel_id": default_channel_id})
 
+# ── Guild Emojis ─────────────────────────────────────────────────────────────
+async def get_emojis(request):
+    guild_id = request.match_info["guild_id"]
+    try:
+        async with http_client.ClientSession() as session:
+            async with session.get(
+                f"{DISCORD_API}/guilds/{guild_id}/emojis",
+                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+            ) as resp:
+                if resp.status != 200:
+                    return web.json_response([])
+                emojis = await resp.json()
+                return web.json_response([
+                    {"id": str(e["id"]), "name": e["name"], "animated": e.get("animated", False)}
+                    for e in emojis if not e.get("managed")
+                ])
+    except Exception:
+        return web.json_response([])
+
+# ── Guild Roles List ──────────────────────────────────────────────────────────
+async def get_roles_list(request):
+    guild_id = request.match_info["guild_id"]
+    try:
+        roles = await discord_get(f"/guilds/{guild_id}/roles")
+        return web.json_response([
+            {"id": str(r["id"]), "name": r["name"], "color": r["color"]}
+            for r in roles if r["name"] != "@everyone"
+        ])
+    except Exception:
+        return web.json_response([])
+
+# ── Create Reaction Role Panel ────────────────────────────────────────────────
+async def _resolve_role_id(guild_id: str, role_id: str, new_role_name: str = None) -> str:
+    """If role_id is __create__, create the role in Discord and return the real ID."""
+    if role_id != "__create__":
+        return role_id
+    if not new_role_name or not new_role_name.strip():
+        raise web.HTTPBadRequest(reason="New role name is required when creating a role")
+    async with http_client.ClientSession() as session:
+        resp = await session.post(
+            f"{DISCORD_API}/guilds/{guild_id}/roles",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+            json={"name": new_role_name.strip()},
+        )
+        if resp.status not in (200, 201):
+            err = await resp.text()
+            raise web.HTTPInternalServerError(reason=f"Failed to create role: {err}")
+        data = await resp.json()
+        # Bust the roles cache so the new role shows up next time
+        _discord_cache.pop(f"/guilds/{guild_id}/roles", None)
+        return str(data["id"])
+
+async def create_reaction_role(request):
+    """
+    Create a new reaction role panel and post it to Discord.
+    The bot posts the embed+components to the channel, then saves to DB.
+    """
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    title      = body.get("title", "").strip()
+    rr_type    = body.get("type", "dropdown")
+    only_add   = body.get("only_add", False)
+    max_roles  = body.get("max_roles")
+    channel_id = body.get("channel_id")
+    roles      = body.get("roles", [])
+
+    if not title or not channel_id or not roles:
+        raise web.HTTPBadRequest(reason="title, channel_id and roles are required")
+
+    # Resolve any __create__ role IDs first
+    for r in roles:
+        r["role_id"] = await _resolve_role_id(guild_id, str(r.get("role_id", "")), r.get("new_role_name"))
+
+    # Build the Discord message
+    embed = {
+        "title": title,
+        "color": 0x5865F2,
+        "footer": {"text": "Select your roles below"},
+    }
+
+    if rr_type == "buttons":
+        components = [{
+            "type": 1,
+            "components": [
+                {
+                    "type": 2,
+                    "style": 1,
+                    "label": r["label"],
+                    "emoji": {"name": r["emoji"]} if r.get("emoji") and not r["emoji"].startswith("<:") else (
+                        {"id": r["emoji"].split(":")[2].rstrip(">")} if r.get("emoji") and r["emoji"].startswith("<:") else None
+                    ),
+                    "custom_id": f"rr_button_{r['role_id']}",
+                }
+                for r in roles[:5]  # Discord max 5 per row
+            ]
+        }]
+        # Remove None emojis
+        for comp in components[0]["components"]:
+            if comp.get("emoji") is None:
+                del comp["emoji"]
+    else:
+        # Dropdown
+        options = []
+        for r in roles[:25]:  # Discord max 25 options
+            opt = {"label": r["label"], "value": str(r["role_id"])}
+            if r.get("emoji"):
+                if r["emoji"].startswith("<:"):
+                    opt["emoji"] = {"id": r["emoji"].split(":")[2].rstrip(">")}
+                else:
+                    opt["emoji"] = {"name": r["emoji"]}
+            options.append(opt)
+        components = [{
+            "type": 1,
+            "components": [{
+                "type": 3,
+                "custom_id": "rr_select",
+                "options": options,
+                "placeholder": f"Choose your {title.lower()}...",
+                "min_values": 0,
+                "max_values": max_roles or len(options),
+            }]
+        }]
+
+    # Post to Discord channel
+    async with http_client.ClientSession() as session:
+        msg_resp = await session.post(
+            f"{DISCORD_API}/channels/{channel_id}/messages",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+            json={"embeds": [embed], "components": components},
+        )
+        if msg_resp.status not in (200, 201):
+            err = await msg_resp.text()
+            raise web.HTTPInternalServerError(reason=f"Discord error: {err}")
+        msg_data = await msg_resp.json()
+        message_id = msg_data["id"]
+
+    # Save to DB
+    import json as _json
+    roles_json = _json.dumps(roles)
+    await db_execute(
+        """INSERT INTO reaction_roles (message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(message_id) DO UPDATE SET
+             guild_id=excluded.guild_id, channel_id=excluded.channel_id,
+             title=excluded.title, type=excluded.type,
+             only_add=excluded.only_add, max_roles=excluded.max_roles,
+             roles_json=excluded.roles_json""",
+        (message_id, guild_id, channel_id, title, rr_type, 1 if only_add else 0, max_roles, roles_json),
+    )
+    return web.json_response({"ok": True, "message_id": message_id})
+
 # ── Edit Streamer ─────────────────────────────────────────────────────────────
 async def edit_streamer(request):
     guild_id = request.match_info["guild_id"]
@@ -581,6 +732,9 @@ def create_dashboard_app():
     app.router.add_delete("/api/guild/{guild_id}/reaction-roles/{role_id}", delete_reaction_role)
 
     app.router.add_get("/api/guild/{guild_id}/channels",                   get_channels)
+    app.router.add_get("/api/guild/{guild_id}/emojis",                     get_emojis)
+    app.router.add_get("/api/guild/{guild_id}/roles",                      get_roles_list)
+    app.router.add_post("/api/guild/{guild_id}/reaction-roles",            create_reaction_role)
     app.router.add_get("/api/guild/{guild_id}/notiflog", get_notif_log)
     app.router.add_patch("/api/guild/{guild_id}/streamers/{username}",      edit_streamer)
     app.router.add_patch("/api/guild/{guild_id}/reaction-roles/{role_id}",  edit_reaction_role)
