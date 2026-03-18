@@ -246,7 +246,13 @@ def create_dashboard_app():
     # Serve the built React frontend from dashboard/dist/
     dist_path = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
     if os.path.exists(dist_path):
-        app.router.add_static("/app", path=dist_path, name="frontend")
+        # Serve index.html for /app and /app/
+        async def serve_index(request):
+            return web.FileResponse(os.path.join(dist_path, "index.html"))
+        app.router.add_get("/app", serve_index)
+        app.router.add_get("/app/", serve_index)
+        # Serve static assets (JS, CSS, SVG etc.)
+        app.router.add_static("/app/assets", path=os.path.join(dist_path, "assets"), name="frontend_assets")
 
     cors = cors_setup(app, defaults={
         "*": ResourceOptions(
