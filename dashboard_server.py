@@ -3,6 +3,7 @@ ExcelProtocol Dashboard Backend
 ================================
 aiohttp server that runs alongside your Discord bot in the same Fly.io app.
 Reads from the same SQLite DB at /data/twitch_bot.db.
+Enriches data with Discord + Twitch API calls.
 """
 
 import os
@@ -24,6 +25,9 @@ DISCORD_TOKEN         = os.getenv("DISCORD_TOKEN", "")
 DISCORD_CLIENT_ID     = os.getenv("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
 DISCORD_REDIRECT_URI  = os.getenv("DISCORD_REDIRECT_URI", "")
+TWITCH_CLIENT_ID      = os.getenv("TWITCH_CLIENT_ID", "")
+TWITCH_CLIENT_SECRET  = os.getenv("TWITCH_CLIENT_SECRET", "")
+BOT_OWNER_ID          = os.getenv("BOT_OWNER_ID", "")
 DEV_TOKEN             = os.getenv("DEV_TOKEN", "")
 PORT                  = int(os.getenv("DASHBOARD_PORT", 8080))
 DISCORD_API           = "https://discord.com/api/v10"
@@ -33,8 +37,7 @@ async def db_fetch(query: str, params: tuple = ()):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(query, params) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in await cursor.fetchall()]
 
 async def db_execute(query: str, params: tuple = ()):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -42,14 +45,93 @@ async def db_execute(query: str, params: tuple = ()):
         await db.commit()
 
 # ── Discord API Helper ────────────────────────────────────────────────────────
-async def discord_get(path: str, token: str, use_bot: bool = False):
+_discord_cache: dict = {}
+
+async def discord_get(path: str, token: str = None, use_bot: bool = True) -> dict:
+    cache_key = path
+    if cache_key in _discord_cache:
+        return _discord_cache[cache_key]
+    t = token or DISCORD_TOKEN
     prefix = "Bot" if use_bot else "Bearer"
     async with http_client.ClientSession() as session:
         async with session.get(
             f"{DISCORD_API}{path}",
-            headers={"Authorization": f"{prefix} {token}"}
+            headers={"Authorization": f"{prefix} {t}"}
         ) as resp:
-            return await resp.json()
+            data = await resp.json()
+            if resp.status == 200:
+                _discord_cache[cache_key] = data
+            return data
+
+async def get_channel_name(channel_id: str) -> str:
+    try:
+        data = await discord_get(f"/channels/{channel_id}")
+        return f"#{data.get('name', channel_id)}"
+    except Exception:
+        return channel_id
+
+async def get_guild_roles(guild_id: str) -> dict:
+    """Returns {role_id: {name, color}} for all roles in a guild."""
+    try:
+        roles = await discord_get(f"/guilds/{guild_id}/roles")
+        return {str(r["id"]): {"name": r["name"], "color": r["color"]} for r in roles}
+    except Exception:
+        return {}
+
+async def get_guild_info(guild_id: str) -> dict:
+    try:
+        return await discord_get(f"/guilds/{guild_id}?with_counts=true")
+    except Exception:
+        return {}
+
+# ── Twitch API Helper ─────────────────────────────────────────────────────────
+_twitch_token: dict = {"token": None, "expires_at": None}
+_twitch_cache: dict = {}
+
+async def get_twitch_token() -> str:
+    now = datetime.utcnow()
+    if _twitch_token["token"] and _twitch_token["expires_at"] and now < _twitch_token["expires_at"] - timedelta(seconds=60):
+        return _twitch_token["token"]
+    async with http_client.ClientSession() as session:
+        async with session.post(
+            "https://id.twitch.tv/oauth2/token",
+            params={
+                "client_id": TWITCH_CLIENT_ID,
+                "client_secret": TWITCH_CLIENT_SECRET,
+                "grant_type": "client_credentials",
+            }
+        ) as resp:
+            data = await resp.json()
+            _twitch_token["token"] = data["access_token"]
+            _twitch_token["expires_at"] = now + timedelta(seconds=data["expires_in"])
+            return _twitch_token["token"]
+
+async def get_twitch_users(usernames: list) -> dict:
+    """Returns {username_lower: {display_name, profile_image_url, description}}"""
+    if not usernames:
+        return {}
+    missing = [u for u in usernames if u.lower() not in _twitch_cache]
+    if missing:
+        try:
+            token = await get_twitch_token()
+            params = [("login", u.lower()) for u in missing]
+            async with http_client.ClientSession() as session:
+                async with session.get(
+                    "https://api.twitch.tv/helix/users",
+                    headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"},
+                    params=params,
+                ) as resp:
+                    data = await resp.json()
+                    for u in data.get("data", []):
+                        _twitch_cache[u["login"].lower()] = {
+                            "display_name":      u.get("display_name", u["login"]),
+                            "profile_image_url": u.get("profile_image_url", ""),
+                            "description":       u.get("description", ""),
+                            "broadcaster_type":  u.get("broadcaster_type", ""),
+                        }
+        except Exception:
+            pass
+    return {u: _twitch_cache.get(u.lower(), {}) for u in usernames}
 
 # ── Session Store ─────────────────────────────────────────────────────────────
 _sessions: dict = {}
@@ -91,7 +173,6 @@ async def auth_callback(request):
     code = request.rel_url.query.get("code")
     if not code:
         raise web.HTTPBadRequest(reason="Missing code")
-
     async with http_client.ClientSession() as session:
         token_resp = await session.post(
             f"{DISCORD_API}/oauth2/token",
@@ -108,7 +189,6 @@ async def auth_callback(request):
         access_token = token_data.get("access_token")
         if not access_token:
             raise web.HTTPInternalServerError(reason="Failed to get access token")
-
         headers = {"Authorization": f"Bearer {access_token}"}
         user_resp   = await session.get(f"{DISCORD_API}/users/@me",        headers=headers)
         guilds_resp = await session.get(f"{DISCORD_API}/users/@me/guilds", headers=headers)
@@ -120,14 +200,13 @@ async def auth_callback(request):
         for g in guilds
         if int(g.get("permissions", 0)) & 0x20
     ]
-
     session_token = secrets.token_hex(32)
     _sessions[session_token] = {
         "user_id":  user["id"],
         "username": user["username"],
+        "avatar":   user.get("avatar"),
         "guilds":   managed,
     }
-
     raise web.HTTPFound(f"/app/?token={session_token}")
 
 async def auth_me(request):
@@ -136,24 +215,28 @@ async def auth_me(request):
         rows = await db_fetch("SELECT DISTINCT guild_id FROM monitored_streamers")
         guilds = []
         for r in rows:
-            name = await get_guild_name(str(r["guild_id"]))
-            guilds.append({"id": str(r["guild_id"]), "name": name})
-        return web.json_response({"username": "Dev", "guilds": guilds})
-    return web.json_response({"username": session["username"], "guilds": session["guilds"]})
-
-# ── Guild name lookup via bot token ───────────────────────────────────────────
-_guild_name_cache: dict = {}
-
-async def get_guild_name(guild_id: str) -> str:
-    if guild_id in _guild_name_cache:
-        return _guild_name_cache[guild_id]
-    try:
-        data = await discord_get(f"/guilds/{guild_id}", DISCORD_TOKEN, use_bot=True)
-        name = data.get("name", guild_id)
-        _guild_name_cache[guild_id] = name
-        return name
-    except Exception:
-        return guild_id
+            info = await get_guild_info(str(r["guild_id"]))
+            guilds.append({
+                "id":   str(r["guild_id"]),
+                "name": info.get("name", str(r["guild_id"])),
+                "icon": info.get("icon"),
+                "approximate_member_count": info.get("approximate_member_count"),
+            })
+        return web.json_response({"username": "Dev", "avatar": None, "guilds": guilds})
+    session_guilds = session.get("guilds", [])
+    enriched = []
+    for g in session_guilds:
+        info = await get_guild_info(g["id"])
+        enriched.append({
+            **g,
+            "approximate_member_count": info.get("approximate_member_count"),
+        })
+    return web.json_response({
+        "user_id":  session["user_id"],
+        "username": session["username"],
+        "avatar":   session.get("avatar"),
+        "guilds":   enriched,
+    })
 
 # ── Guilds ────────────────────────────────────────────────────────────────────
 async def get_guilds(request):
@@ -163,41 +246,86 @@ async def get_guilds(request):
     rows = await db_fetch("SELECT DISTINCT guild_id FROM monitored_streamers")
     guilds = []
     for r in rows:
-        gid = str(r["guild_id"])
-        name = await get_guild_name(gid)
-        guilds.append({"id": gid, "name": name})
+        info = await get_guild_info(str(r["guild_id"]))
+        guilds.append({
+            "id":   str(r["guild_id"]),
+            "name": info.get("name", str(r["guild_id"])),
+            "icon": info.get("icon"),
+        })
     return web.json_response(guilds)
 
 # ── Guild Summary ─────────────────────────────────────────────────────────────
 async def get_guild_summary(request):
     guild_id = request.match_info["guild_id"]
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    cutoff   = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
 
-    streamers = await db_fetch(
+    streamers_raw = await db_fetch(
         "SELECT id, guild_id, streamer_name AS twitch_username, channel_id, custom_channel_id FROM monitored_streamers WHERE guild_id = ?",
         (guild_id,)
     )
-    reaction_roles = await db_fetch(
+    reaction_roles_raw = await db_fetch(
         "SELECT message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json FROM reaction_roles WHERE guild_id = ?",
         (guild_id,)
     )
-    for rr in reaction_roles:
-        try:
-            rr["roles"] = json.loads(rr.get("roles_json", "[]"))
-        except Exception:
-            rr["roles"] = []
-
     notif_log = await db_fetch(
-        """SELECT guild_id, streamer_name AS twitch_username,
-                  channel_id, status AS event, sent_at AS timestamp
-           FROM notification_log
-           WHERE guild_id = ? AND sent_at >= ?
+        """SELECT guild_id, streamer_name AS twitch_username, channel_id, status AS event, sent_at AS timestamp
+           FROM notification_log WHERE guild_id = ? AND sent_at >= ?
            ORDER BY sent_at DESC LIMIT 100""",
         (guild_id, cutoff),
     )
+
+    # Enrich streamers with Twitch data + channel names
+    usernames = [s["twitch_username"] for s in streamers_raw]
+    twitch_data = await get_twitch_users(usernames)
+    eff_channel_ids = list({str(s.get("custom_channel_id") or s["channel_id"]) for s in streamers_raw})
+    for rr in reaction_roles_raw:
+        eff_channel_ids.append(str(rr["channel_id"]))
+
+    channel_names = {}
+    for cid in set(eff_channel_ids):
+        channel_names[cid] = await get_channel_name(cid)
+
+    streamers = []
+    for s in streamers_raw:
+        tw = twitch_data.get(s["twitch_username"].lower(), {})
+        eff_ch = str(s.get("custom_channel_id") or s["channel_id"])
+        streamers.append({
+            **s,
+            "display_name":      tw.get("display_name", s["twitch_username"]),
+            "profile_image_url": tw.get("profile_image_url", ""),
+            "description":       tw.get("description", ""),
+            "channel_name":      channel_names.get(str(s["channel_id"]), str(s["channel_id"])),
+            "effective_channel_name": channel_names.get(eff_ch, eff_ch),
+        })
+
+    # Enrich reaction roles with role names + colors from Discord
+    guild_roles = await get_guild_roles(guild_id)
+    reaction_roles = []
+    for rr in reaction_roles_raw:
+        try:
+            roles = json.loads(rr.get("roles_json", "[]"))
+        except Exception:
+            roles = []
+        enriched_roles = []
+        for r in roles:
+            role_id = str(r.get("role_id", ""))
+            role_info = guild_roles.get(role_id, {})
+            enriched_roles.append({
+                **r,
+                "role_name":  role_info.get("name", role_id),
+                "role_color": role_info.get("color", 0),
+            })
+        reaction_roles.append({
+            **rr,
+            "roles":        enriched_roles,
+            "channel_name": channel_names.get(str(rr["channel_id"]), str(rr["channel_id"])),
+        })
+
     return web.json_response({
-        "streamers": streamers, "reaction_roles": reaction_roles,
-        "notif_log": notif_log, "commands": COMMANDS,
+        "streamers":      streamers,
+        "reaction_roles": reaction_roles,
+        "notif_log":      notif_log,
+        "commands":       COMMANDS,
     })
 
 # ── Streamers ─────────────────────────────────────────────────────────────────
@@ -207,7 +335,20 @@ async def get_streamers(request):
         "SELECT id, guild_id, streamer_name AS twitch_username, channel_id, custom_channel_id FROM monitored_streamers WHERE guild_id = ?",
         (guild_id,)
     )
-    return web.json_response(rows)
+    usernames = [r["twitch_username"] for r in rows]
+    twitch_data = await get_twitch_users(usernames)
+    result = []
+    for r in rows:
+        tw = twitch_data.get(r["twitch_username"].lower(), {})
+        eff_ch = str(r.get("custom_channel_id") or r["channel_id"])
+        ch_name = await get_channel_name(eff_ch)
+        result.append({
+            **r,
+            "display_name":      tw.get("display_name", r["twitch_username"]),
+            "profile_image_url": tw.get("profile_image_url", ""),
+            "channel_name":      ch_name,
+        })
+    return web.json_response(result)
 
 async def add_streamer(request):
     guild_id = request.match_info["guild_id"]
@@ -243,12 +384,21 @@ async def get_reaction_roles(request):
         "SELECT message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json FROM reaction_roles WHERE guild_id = ?",
         (guild_id,)
     )
-    for r in rows:
+    guild_roles = await get_guild_roles(guild_id)
+    result = []
+    for rr in rows:
         try:
-            r["roles"] = json.loads(r.get("roles_json", "[]"))
+            roles = json.loads(rr.get("roles_json", "[]"))
         except Exception:
-            r["roles"] = []
-    return web.json_response(rows)
+            roles = []
+        enriched = []
+        for r in roles:
+            role_id  = str(r.get("role_id", ""))
+            role_info = guild_roles.get(role_id, {})
+            enriched.append({**r, "role_name": role_info.get("name", role_id), "role_color": role_info.get("color", 0)})
+        ch_name = await get_channel_name(str(rr["channel_id"]))
+        result.append({**rr, "roles": enriched, "channel_name": ch_name})
+    return web.json_response(result)
 
 async def delete_reaction_role(request):
     guild_id   = request.match_info["guild_id"]
@@ -262,16 +412,70 @@ async def delete_reaction_role(request):
 # ── Notification Log ──────────────────────────────────────────────────────────
 async def get_notif_log(request):
     guild_id = request.match_info["guild_id"]
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    cutoff   = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     rows = await db_fetch(
-        """SELECT guild_id, streamer_name AS twitch_username,
-                  channel_id, status AS event, sent_at AS timestamp
-           FROM notification_log
-           WHERE guild_id = ? AND sent_at >= ?
+        """SELECT guild_id, streamer_name AS twitch_username, channel_id, status AS event, sent_at AS timestamp
+           FROM notification_log WHERE guild_id = ? AND sent_at >= ?
            ORDER BY sent_at DESC LIMIT 100""",
         (guild_id, cutoff),
     )
+    usernames = list({r["twitch_username"] for r in rows})
+    twitch_data = await get_twitch_users(usernames)
+    for r in rows:
+        tw = twitch_data.get(r["twitch_username"].lower(), {})
+        r["profile_image_url"] = tw.get("profile_image_url", "")
+        r["display_name"]      = tw.get("display_name", r["twitch_username"])
+        r["channel_name"]      = await get_channel_name(str(r["channel_id"]))
     return web.json_response(rows)
+
+# ── Suggestions ──────────────────────────────────────────────────────────────
+async def post_suggestion(request):
+    """Receive a suggestion from the dashboard and DM it to the bot owner."""
+    session = request["session"]
+    body = await request.json()
+    text = body.get("text", "").strip()
+
+    if not text:
+        raise web.HTTPBadRequest(reason="Suggestion text is required")
+    if len(text) > 1000:
+        raise web.HTTPBadRequest(reason="Suggestion must be under 1000 characters")
+    if not BOT_OWNER_ID or not DISCORD_TOKEN:
+        raise web.HTTPInternalServerError(reason="BOT_OWNER_ID or DISCORD_TOKEN not configured")
+
+    sender = "Dev (dashboard)" if session.get("dev") else session.get("username", "Unknown")
+    sender_id = None if session.get("dev") else session.get("user_id")
+
+    async with http_client.ClientSession() as s:
+        dm_resp = await s.post(
+            f"{DISCORD_API}/users/@me/channels",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+            json={"recipient_id": BOT_OWNER_ID},
+        )
+        dm_data = await dm_resp.json()
+        dm_channel_id = dm_data.get("id")
+        if not dm_channel_id:
+            raise web.HTTPInternalServerError(reason="Failed to open DM channel")
+
+        embed = {
+            "title": "\U0001f4a1 New Dashboard Suggestion",
+            "description": text,
+            "color": 0x5865F2,
+            "fields": [
+                {"name": "From", "value": f"{sender}{f' (`{sender_id}`)' if sender_id else ''}", "inline": True},
+                {"name": "Via",  "value": "ExcelProtocol Dashboard", "inline": True},
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "excelprotocol.fly.dev/app"},
+        }
+        msg_resp = await s.post(
+            f"{DISCORD_API}/channels/{dm_channel_id}/messages",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+            json={"embeds": [embed]},
+        )
+        if msg_resp.status not in (200, 201):
+            raise web.HTTPInternalServerError(reason="Failed to send DM")
+
+    return web.json_response({"ok": True})
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 COMMANDS = [
@@ -310,13 +514,14 @@ def create_dashboard_app():
 
     app.router.add_get("/api/guild/{guild_id}/notiflog", get_notif_log)
     app.router.add_get("/api/commands",                  get_commands)
+    app.router.add_post("/api/suggest",                    post_suggestion)
 
     dist_path = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
     if os.path.exists(dist_path):
         async def serve_index(request):
             return web.FileResponse(os.path.join(dist_path, "index.html"))
-        app.router.add_get("/app",   serve_index)
-        app.router.add_get("/app/",  serve_index)
+        app.router.add_get("/app",  serve_index)
+        app.router.add_get("/app/", serve_index)
         app.router.add_static("/app/assets", path=os.path.join(dist_path, "assets"), name="frontend_assets")
 
     cors = cors_setup(app, defaults={
@@ -328,5 +533,4 @@ def create_dashboard_app():
             cors.add(route)
         except Exception:
             pass
-
     return app
