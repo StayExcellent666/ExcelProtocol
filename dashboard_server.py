@@ -830,6 +830,7 @@ def create_dashboard_app(bot=None):
         app.router.add_get("/app",  serve_index)
         app.router.add_get("/app/", serve_index)
         app.router.add_static("/app/assets", path=os.path.join(dist_path, "assets"), name="frontend_assets")
+        app.router.add_static("/app",        path=dist_path,                          name="frontend_static")
 
     cors = cors_setup(app, defaults={
         "*": ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*",
