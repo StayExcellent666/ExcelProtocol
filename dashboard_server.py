@@ -162,19 +162,40 @@ _sessions: dict = {}
 
 def get_session(request: web.Request) -> dict | None:
     token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    # DEV_TOKEN is only for internal server use — never expose to browser clients
+    # It's blocked for any request coming from outside (i.e. must use OAuth2)
     if DEV_TOKEN and token == DEV_TOKEN:
+        # Only allow from localhost / internal — reject if X-Forwarded-For is present
+        # (Fly.io proxy sets this header for all external requests)
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return None  # External request trying to use dev token — reject
         return {"dev": True}
     return _sessions.get(token)
 
 # ── Auth Middleware ───────────────────────────────────────────────────────────
+def _session_can_access_guild(session: dict, guild_id: str) -> bool:
+    """Check the session has access to the requested guild."""
+    if session.get("dev"):
+        return True  # Dev token has full access — only used server-side/internally
+    guilds = session.get("guilds", [])
+    return any(str(g["id"]) == str(guild_id) for g in guilds)
+
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     public = ("/health", "/auth/login", "/auth/callback")
     if request.path in public or request.path.startswith("/app"):
         return await handler(request)
+
     session = get_session(request)
     if not session:
         raise web.HTTPUnauthorized(reason="Invalid or missing token")
+
+    # For guild-scoped routes, verify the session owns that guild
+    guild_id = request.match_info.get("guild_id")
+    if guild_id and not _session_can_access_guild(session, guild_id):
+        raise web.HTTPForbidden(reason="You do not have access to this guild")
+
     request["session"] = session
     return await handler(request)
 
