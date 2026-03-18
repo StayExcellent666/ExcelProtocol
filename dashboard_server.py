@@ -441,10 +441,33 @@ async def get_reaction_roles(request):
 async def delete_reaction_role(request):
     guild_id   = request.match_info["guild_id"]
     message_id = request.match_info["role_id"]
-    await db_execute(
-        "DELETE FROM reaction_roles WHERE guild_id = ? AND message_id = ?",
-        (guild_id, message_id),
-    )
+
+    # Get the entry first so we know which channel the message is in
+    if _bot_ref:
+        entry = _bot_ref.db.rr_get(int(message_id))
+        if entry and str(entry["guild_id"]) == guild_id:
+            try:
+                guild = _bot_ref.get_guild(int(guild_id))
+                if guild:
+                    channel = guild.get_channel(entry["channel_id"])
+                    if channel:
+                        msg = await channel.fetch_message(int(message_id))
+                        await msg.delete()
+                        logger.info(f"Dashboard deleted RR message {message_id}")
+            except Exception as e:
+                logger.warning(f"Could not delete RR Discord message {message_id}: {e}")
+            # Also delete via bot DB method so any internal state is cleared
+            _bot_ref.db.rr_delete(int(message_id))
+        else:
+            await db_execute(
+                "DELETE FROM reaction_roles WHERE guild_id = ? AND message_id = ?",
+                (guild_id, message_id),
+            )
+    else:
+        await db_execute(
+            "DELETE FROM reaction_roles WHERE guild_id = ? AND message_id = ?",
+            (guild_id, message_id),
+        )
     return web.json_response({"ok": True})
 
 # ── Notification Log ──────────────────────────────────────────────────────────
@@ -548,86 +571,64 @@ async def create_reaction_role(request):
     for r in roles:
         r["role_id"] = await _resolve_role_id(guild_id, str(r.get("role_id", "")), r.get("new_role_name"))
 
-    # Build the Discord message
-    embed = {
-        "title": title,
-        "color": 0x5865F2,
-        "footer": {"text": "Select your roles below"},
-    }
+    if _bot_ref is None:
+        raise web.HTTPInternalServerError(reason="Bot not available — try again in a moment")
 
-    if rr_type == "buttons":
-        components = [{
-            "type": 1,
-            "components": [
-                {
-                    "type": 2,
-                    "style": 1,
-                    "label": r["label"],
-                    "emoji": {"name": r["emoji"]} if r.get("emoji") and not r["emoji"].startswith("<:") else (
-                        {"id": r["emoji"].split(":")[2].rstrip(">")} if r.get("emoji") and r["emoji"].startswith("<:") else None
-                    ),
-                    "custom_id": f"rr_button_{r['role_id']}",
-                }
-                for r in roles[:5]  # Discord max 5 per row
-            ]
-        }]
-        # Remove None emojis
-        for comp in components[0]["components"]:
-            if comp.get("emoji") is None:
-                del comp["emoji"]
-    else:
-        # Dropdown
-        options = []
-        for r in roles[:25]:  # Discord max 25 options
-            opt = {"label": r["label"], "value": str(r["role_id"])}
-            if r.get("emoji"):
-                if r["emoji"].startswith("<:"):
-                    opt["emoji"] = {"id": r["emoji"].split(":")[2].rstrip(">")}
-                else:
-                    opt["emoji"] = {"name": r["emoji"]}
-            options.append(opt)
-        components = [{
-            "type": 1,
-            "components": [{
-                "type": 3,
-                "custom_id": "rr_select",
-                "options": options,
-                "placeholder": f"Choose your {title.lower()}...",
-                "min_values": 0,
-                "max_values": max_roles or len(options),
-            }]
-        }]
-
-    # Post to Discord channel
-    async with http_client.ClientSession() as session:
-        msg_resp = await session.post(
-            f"{DISCORD_API}/channels/{channel_id}/messages",
-            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
-            json={"embeds": [embed], "components": components},
-        )
-        if msg_resp.status not in (200, 201):
-            err = await msg_resp.text()
-            raise web.HTTPInternalServerError(reason=f"Discord error: {err}")
-        msg_data = await msg_resp.json()
-        message_id = msg_data["id"]
-
-    # Save to DB
     import json as _json
-    roles_json = _json.dumps(roles)
-    await db_execute(
-        """INSERT INTO reaction_roles (message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(message_id) DO UPDATE SET
-             guild_id=excluded.guild_id, channel_id=excluded.channel_id,
-             title=excluded.title, type=excluded.type,
-             only_add=excluded.only_add, max_roles=excluded.max_roles,
-             roles_json=excluded.roles_json""",
-        (message_id, guild_id, channel_id, title, rr_type, 1 if only_add else 0, max_roles, roles_json),
-    )
-    # Register the new view with the bot immediately so interactions work right away
-    await reload_rr_views()
+    import reaction_roles as rr_module
 
-    return web.json_response({"ok": True, "message_id": message_id})
+    # Convert role_id strings to ints as reaction_roles.py expects
+    for r in roles:
+        r["role_id"] = int(r["role_id"])
+
+    # Post a placeholder message first to get the message_id, then build the proper view
+    guild = _bot_ref.get_guild(int(guild_id))
+    if not guild:
+        raise web.HTTPBadRequest(reason="Bot is not in that guild")
+
+    channel = guild.get_channel(int(channel_id))
+    if not channel:
+        raise web.HTTPBadRequest(reason="Channel not found")
+
+    embed_color = _bot_ref.db.get_embed_color(int(guild_id))
+
+    import discord
+    embed = discord.Embed(title=title, color=embed_color)
+
+    # Build a temporary view to post (message_id=0), then re-edit with correct ID
+    temp_entry = {
+        "message_id": 0,
+        "guild_id": int(guild_id),
+        "channel_id": int(channel_id),
+        "title": title,
+        "type": rr_type,
+        "only_add": only_add,
+        "max_roles": max_roles,
+        "roles": roles,
+    }
+    temp_view = rr_module._build_view(temp_entry, _bot_ref)
+    message = await channel.send(embed=embed, view=temp_view)
+
+    # Now rebuild the view with the real message_id and edit
+    real_entry = {**temp_entry, "message_id": message.id}
+    real_view = rr_module._build_view(real_entry, _bot_ref)
+    await message.edit(view=real_view)
+    _bot_ref.add_view(real_view, message_id=message.id)
+
+    # Save to DB using the bot's own rr_save so it's identical to slash command flow
+    _bot_ref.db.rr_save(
+        message_id=message.id,
+        guild_id=int(guild_id),
+        channel_id=int(channel_id),
+        title=title,
+        rr_type=rr_type,
+        only_add=only_add,
+        max_roles=max_roles,
+        roles=roles,
+    )
+
+    logger.info(f"Dashboard created RR panel '{title}' in #{channel.name} (msg {message.id})")
+    return web.json_response({"ok": True, "message_id": str(message.id)})
 
 # ── Edit Streamer ─────────────────────────────────────────────────────────────
 async def edit_streamer(request):
@@ -648,28 +649,57 @@ async def edit_reaction_role(request):
     guild_id   = request.match_info["guild_id"]
     message_id = request.match_info["role_id"]
     body = await request.json()
-    fields = []
-    params = []
-    if "title" in body:
-        fields.append("title = ?"); params.append(body["title"])
-    if "type" in body:
-        fields.append("type = ?"); params.append(body["type"])
-    if "only_add" in body:
-        fields.append("only_add = ?"); params.append(1 if body["only_add"] else 0)
-    if "max_roles" in body:
-        fields.append("max_roles = ?"); params.append(body["max_roles"])
+
+    if _bot_ref is None:
+        raise web.HTTPInternalServerError(reason="Bot not available")
+
+    import reaction_roles as rr_module
+    import discord
+
+    # Get current entry from DB
+    entry = _bot_ref.db.rr_get(int(message_id))
+    if not entry or str(entry["guild_id"]) != guild_id:
+        raise web.HTTPNotFound(reason="Panel not found")
+
+    # Merge updates into the entry
+    if "title" in body:   entry["title"]     = body["title"]
+    if "type" in body:    entry["type"]      = body["type"]
+    if "only_add" in body: entry["only_add"] = body["only_add"]
+    if "max_roles" in body: entry["max_roles"] = body["max_roles"]
     if "roles" in body:
-        import json as _json
-        fields.append("roles_json = ?"); params.append(_json.dumps(body["roles"]))
-    if not fields:
-        raise web.HTTPBadRequest(reason="Nothing to update")
-    params += [guild_id, message_id]
-    await db_execute(
-        f"UPDATE reaction_roles SET {', '.join(fields)} WHERE guild_id = ? AND message_id = ?",
-        tuple(params),
+        # Convert role_ids to int
+        entry["roles"] = [{**r, "role_id": int(r["role_id"])} for r in body["roles"]]
+
+    # Save updated entry to DB
+    _bot_ref.db.rr_save(
+        message_id=int(message_id),
+        guild_id=entry["guild_id"],
+        channel_id=entry["channel_id"],
+        title=entry["title"],
+        rr_type=entry["type"],
+        only_add=entry["only_add"],
+        max_roles=entry["max_roles"],
+        roles=entry["roles"],
     )
-    # Re-register views so the edited panel works immediately
-    await reload_rr_views()
+
+    # Edit the actual Discord message
+    guild = _bot_ref.get_guild(int(guild_id))
+    if guild:
+        channel = guild.get_channel(entry["channel_id"])
+        if channel:
+            try:
+                msg = await channel.fetch_message(int(message_id))
+                embed_color = _bot_ref.db.get_embed_color(int(guild_id))
+                embed = discord.Embed(title=entry["title"], color=embed_color)
+                view = rr_module._build_view(entry, _bot_ref)
+                await msg.edit(embed=embed, view=view)
+                _bot_ref.add_view(view, message_id=int(message_id))
+                logger.info(f"Dashboard edited RR panel {message_id}")
+            except discord.NotFound:
+                logger.warning(f"RR message {message_id} not found in Discord — DB updated only")
+            except Exception as e:
+                logger.error(f"Failed to edit RR Discord message: {e}")
+
     return web.json_response({"ok": True})
 
 # ── Suggestions ──────────────────────────────────────────────────────────────
