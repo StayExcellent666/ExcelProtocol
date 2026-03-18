@@ -26,5 +26,8 @@ RUN apt-get purge -y gcc && \
 # Copy only necessary Python files
 COPY bot.py database.py twitch_api.py config.py twitch_bot.py twitch_chat_cog.py reaction_roles.py setchannel_cog.py birthday_cog.py dashboard_server.py ./
 
+# Copy the built React dashboard frontend
+COPY dashboard/dist ./dashboard/dist
+
 # Run the bot
 CMD ["python", "bot.py"]
