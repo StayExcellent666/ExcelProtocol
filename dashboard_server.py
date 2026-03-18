@@ -355,6 +355,9 @@ async def get_guild_summary(request):
             })
         reaction_roles.append({
             **rr,
+            "message_id":   str(rr["message_id"]),
+            "channel_id":   str(rr["channel_id"]),
+            "guild_id":     str(rr["guild_id"]),
             "roles":        enriched_roles,
             "channel_name": channel_names.get(str(rr["channel_id"]), str(rr["channel_id"])),
         })
@@ -433,9 +436,10 @@ async def get_reaction_roles(request):
         for r in roles:
             role_id  = str(r.get("role_id", ""))
             role_info = guild_roles.get(role_id, {})
-            enriched.append({**r, "role_name": role_info.get("name", role_id), "role_color": role_info.get("color", 0)})
+            enriched.append({**r, "role_id": str(r.get("role_id", "")), "role_name": role_info.get("name", role_id), "role_color": role_info.get("color", 0)})
         ch_name = await get_channel_name(str(rr["channel_id"]))
-        result.append({**rr, "roles": enriched, "channel_name": ch_name})
+        # Stringify message_id and channel_id — JS loses precision on Discord snowflakes (64-bit ints)
+        result.append({**rr, "message_id": str(rr["message_id"]), "channel_id": str(rr["channel_id"]), "guild_id": str(rr["guild_id"]), "roles": enriched, "channel_name": ch_name})
     return web.json_response(result)
 
 async def delete_reaction_role(request):
