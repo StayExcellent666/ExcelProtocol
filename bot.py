@@ -2380,6 +2380,24 @@ async def db_stats(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-# Run the bot
+# Run the bot + dashboard together
+async def main():
+    # Start the dashboard HTTP server (reads from the same DB the bot uses)
+    try:
+        from aiohttp import web
+        from dashboard_server import create_dashboard_app
+        dashboard_app = create_dashboard_app()
+        runner = web.AppRunner(dashboard_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", 8080)
+        await site.start()
+        logger.info("Dashboard server started on port 8080")
+    except Exception as e:
+        # Dashboard failing should never take down the bot
+        logger.error(f"Dashboard failed to start: {e} — bot continuing normally")
+
+    # Start the Discord bot (this blocks until the bot stops)
+    await bot.start(DISCORD_TOKEN)
+
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+    asyncio.run(main())

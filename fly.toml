@@ -1,7 +1,7 @@
 app = "twitch-notifier-bot"
 primary_region = "iad"
 
-# This ensures the database file persists across deploys
+# Persistent volume — bot DB lives here
 [[mounts]]
   source = "twitch_bot_data"
   destination = "/data"
@@ -9,5 +9,22 @@ primary_region = "iad"
 [deploy]
   release_command = "python -c 'from database import Database; Database(\"/data/twitch_bot.db\")'"
 
-# Discord bot doesn't need HTTP, so we don't expose ports
-# This saves resources
+# Expose port 8080 for the dashboard web server
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [services.http_checks]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
