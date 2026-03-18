@@ -1,5 +1,5 @@
-app = "twitch-notifier-bot"
-primary_region = "iad"
+app = "excelprotocol"
+primary_region = "fra"
 
 # Persistent volume — bot DB lives here
 [[mounts]]
@@ -21,10 +21,3 @@ primary_region = "iad"
   [[services.ports]]
     port = 80
     handlers = ["http"]
-
-  [services.http_checks]
-    interval = "15s"
-    timeout = "5s"
-    grace_period = "10s"
-    method = "GET"
-    path = "/health"
