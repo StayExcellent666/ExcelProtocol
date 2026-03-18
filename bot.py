@@ -2386,7 +2386,7 @@ async def main():
     try:
         from aiohttp import web
         from dashboard_server import create_dashboard_app
-        dashboard_app = create_dashboard_app()
+        dashboard_app = create_dashboard_app(bot=bot)
         runner = web.AppRunner(dashboard_app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", 8080)

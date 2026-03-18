@@ -32,6 +32,9 @@ DEV_TOKEN             = os.getenv("DEV_TOKEN", "")
 PORT                  = int(os.getenv("DASHBOARD_PORT", 8080))
 DISCORD_API           = "https://discord.com/api/v10"
 
+# Bot reference — set by create_dashboard_app() so we can reload views
+_bot_ref = None
+
 # ── DB Helper ─────────────────────────────────────────────────────────────────
 async def db_fetch(query: str, params: tuple = ()):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -178,6 +181,20 @@ async def auth_middleware(request: web.Request, handler):
 # ── Health ────────────────────────────────────────────────────────────────────
 async def health(request):
     return web.json_response({"status": "ok", "bot": "ExcelProtocol"})
+
+async def reload_rr_views(request=None):
+    """Re-register all reaction role views with the bot. Called after dashboard creates/edits a panel."""
+    if _bot_ref is None:
+        return
+    try:
+        import reaction_roles
+        await reaction_roles.restore_views(_bot_ref)
+        logger.info("Reloaded reaction role views from dashboard trigger")
+    except Exception as e:
+        logger.error(f"Failed to reload reaction role views: {e}")
+
+import logging
+logger = logging.getLogger(__name__)
 
 # ── OAuth2 ────────────────────────────────────────────────────────────────────
 async def auth_login(request):
@@ -607,6 +624,9 @@ async def create_reaction_role(request):
              roles_json=excluded.roles_json""",
         (message_id, guild_id, channel_id, title, rr_type, 1 if only_add else 0, max_roles, roles_json),
     )
+    # Register the new view with the bot immediately so interactions work right away
+    await reload_rr_views()
+
     return web.json_response({"ok": True, "message_id": message_id})
 
 # ── Edit Streamer ─────────────────────────────────────────────────────────────
@@ -638,6 +658,9 @@ async def edit_reaction_role(request):
         fields.append("only_add = ?"); params.append(1 if body["only_add"] else 0)
     if "max_roles" in body:
         fields.append("max_roles = ?"); params.append(body["max_roles"])
+    if "roles" in body:
+        import json as _json
+        fields.append("roles_json = ?"); params.append(_json.dumps(body["roles"]))
     if not fields:
         raise web.HTTPBadRequest(reason="Nothing to update")
     params += [guild_id, message_id]
@@ -645,6 +668,8 @@ async def edit_reaction_role(request):
         f"UPDATE reaction_roles SET {', '.join(fields)} WHERE guild_id = ? AND message_id = ?",
         tuple(params),
     )
+    # Re-register views so the edited panel works immediately
+    await reload_rr_views()
     return web.json_response({"ok": True})
 
 # ── Suggestions ──────────────────────────────────────────────────────────────
@@ -714,7 +739,9 @@ async def get_commands(request):
     return web.json_response(COMMANDS)
 
 # ── App Factory ───────────────────────────────────────────────────────────────
-def create_dashboard_app():
+def create_dashboard_app(bot=None):
+    global _bot_ref
+    _bot_ref = bot
     app = web.Application(middlewares=[auth_middleware])
 
     app.router.add_get("/health",        health)
