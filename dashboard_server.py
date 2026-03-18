@@ -84,6 +84,27 @@ async def get_guild_info(guild_id: str) -> dict:
     except Exception:
         return {}
 
+async def get_guild_channels(guild_id: str) -> list:
+    """Return list of text channels for a guild: [{id, name, position}]"""
+    # Don't cache channels — they can change
+    try:
+        async with http_client.ClientSession() as session:
+            async with session.get(
+                f"{DISCORD_API}/guilds/{guild_id}/channels",
+                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                channels = await resp.json()
+                # Type 0 = text channel, type 4 = category
+                text = [
+                    {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0), "parent_id": str(c.get("parent_id") or "")}
+                    for c in channels if c.get("type") == 0
+                ]
+                return sorted(text, key=lambda c: c["position"])
+    except Exception:
+        return []
+
 # ── Twitch API Helper ─────────────────────────────────────────────────────────
 _twitch_token: dict = {"token": None, "expires_at": None}
 _twitch_cache: dict = {}
@@ -428,6 +449,53 @@ async def get_notif_log(request):
         r["channel_name"]      = await get_channel_name(str(r["channel_id"]))
     return web.json_response(rows)
 
+# ── Guild Channels ───────────────────────────────────────────────────────────
+async def get_channels(request):
+    guild_id = request.match_info["guild_id"]
+    channels = await get_guild_channels(guild_id)
+    # Also get the default notification channel from server_settings
+    rows = await db_fetch("SELECT notification_channel_id FROM server_settings WHERE guild_id = ?", (guild_id,))
+    default_channel_id = str(rows[0]["notification_channel_id"]) if rows else None
+    return web.json_response({"channels": channels, "default_channel_id": default_channel_id})
+
+# ── Edit Streamer ─────────────────────────────────────────────────────────────
+async def edit_streamer(request):
+    guild_id = request.match_info["guild_id"]
+    username = request.match_info["username"]
+    body = await request.json()
+    channel_id = body.get("channel_id")
+    if not channel_id:
+        raise web.HTTPBadRequest(reason="channel_id is required")
+    await db_execute(
+        "UPDATE monitored_streamers SET custom_channel_id = ? WHERE guild_id = ? AND streamer_name = ?",
+        (channel_id, guild_id, username.lower()),
+    )
+    return web.json_response({"ok": True})
+
+# ── Edit Reaction Role Panel ──────────────────────────────────────────────────
+async def edit_reaction_role(request):
+    guild_id   = request.match_info["guild_id"]
+    message_id = request.match_info["role_id"]
+    body = await request.json()
+    fields = []
+    params = []
+    if "title" in body:
+        fields.append("title = ?"); params.append(body["title"])
+    if "type" in body:
+        fields.append("type = ?"); params.append(body["type"])
+    if "only_add" in body:
+        fields.append("only_add = ?"); params.append(1 if body["only_add"] else 0)
+    if "max_roles" in body:
+        fields.append("max_roles = ?"); params.append(body["max_roles"])
+    if not fields:
+        raise web.HTTPBadRequest(reason="Nothing to update")
+    params += [guild_id, message_id]
+    await db_execute(
+        f"UPDATE reaction_roles SET {', '.join(fields)} WHERE guild_id = ? AND message_id = ?",
+        tuple(params),
+    )
+    return web.json_response({"ok": True})
+
 # ── Suggestions ──────────────────────────────────────────────────────────────
 async def post_suggestion(request):
     """Receive a suggestion from the dashboard and DM it to the bot owner."""
@@ -512,7 +580,10 @@ def create_dashboard_app():
     app.router.add_get   ("/api/guild/{guild_id}/reaction-roles",         get_reaction_roles)
     app.router.add_delete("/api/guild/{guild_id}/reaction-roles/{role_id}", delete_reaction_role)
 
+    app.router.add_get("/api/guild/{guild_id}/channels",                   get_channels)
     app.router.add_get("/api/guild/{guild_id}/notiflog", get_notif_log)
+    app.router.add_patch("/api/guild/{guild_id}/streamers/{username}",      edit_streamer)
+    app.router.add_patch("/api/guild/{guild_id}/reaction-roles/{role_id}",  edit_reaction_role)
     app.router.add_get("/api/commands",                  get_commands)
     app.router.add_post("/api/suggest",                    post_suggestion)
 
