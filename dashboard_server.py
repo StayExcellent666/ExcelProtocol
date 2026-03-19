@@ -794,6 +794,80 @@ async def get_commands(request):
     return web.json_response(COMMANDS)
 
 
+
+# ── Birthdays ─────────────────────────────────────────────────────────────────
+async def get_birthdays(request):
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch(
+        "SELECT user_id, day, month, year FROM birthdays WHERE guild_id = ? ORDER BY month, day",
+        (guild_id,)
+    )
+    # Try to enrich with Discord usernames via bot
+    result = []
+    for r in rows:
+        username = None
+        if _bot_ref:
+            try:
+                guild = _bot_ref.get_guild(int(guild_id))
+                if guild:
+                    member = guild.get_member(int(r["user_id"]))
+                    if member:
+                        username = member.display_name
+            except Exception:
+                pass
+        result.append({
+            "user_id":  str(r["user_id"]),
+            "username": username or str(r["user_id"]),
+            "day":   r["day"],
+            "month": r["month"],
+            "year":  r["year"],
+        })
+    return web.json_response(result)
+
+async def add_birthday(request):
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    user_id = body.get("user_id")
+    day     = body.get("day")
+    month   = body.get("month")
+    year    = body.get("year", 0)
+    if not user_id or not day or not month:
+        raise web.HTTPBadRequest(reason="user_id, day and month are required")
+    if not (1 <= int(day) <= 31) or not (1 <= int(month) <= 12):
+        raise web.HTTPBadRequest(reason="Invalid day or month")
+    await db_execute(
+        "INSERT INTO birthdays (guild_id, user_id, day, month, year) VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET day=excluded.day, month=excluded.month, year=excluded.year",
+        (guild_id, int(user_id), int(day), int(month), int(year) if year else 0)
+    )
+    return web.json_response({"ok": True})
+
+async def delete_birthday(request):
+    guild_id = request.match_info["guild_id"]
+    user_id  = request.match_info["user_id"]
+    await db_execute(
+        "DELETE FROM birthdays WHERE guild_id = ? AND user_id = ?",
+        (guild_id, int(user_id))
+    )
+    return web.json_response({"ok": True})
+
+async def get_guild_members(request):
+    guild_id = request.match_info["guild_id"]
+    if not _bot_ref:
+        return web.json_response([])
+    try:
+        guild = _bot_ref.get_guild(int(guild_id))
+        if not guild:
+            return web.json_response([])
+        members = [
+            {"id": str(m.id), "username": m.display_name}
+            for m in guild.members if not m.bot
+        ]
+        members.sort(key=lambda m: m["username"].lower())
+        return web.json_response(members)
+    except Exception as e:
+        logger.error(f"Failed to get members: {e}")
+        return web.json_response([])
+
 # ── Server Settings ───────────────────────────────────────────────────────────
 async def get_server_settings(request):
     guild_id = request.match_info["guild_id"]
@@ -948,6 +1022,10 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/api/commands",                  get_commands)
     app.router.add_post("/api/suggest",                    post_suggestion)
 
+    app.router.add_get  ("/api/guild/{guild_id}/members",               get_guild_members)
+    app.router.add_get  ("/api/guild/{guild_id}/birthdays",              get_birthdays)
+    app.router.add_post ("/api/guild/{guild_id}/birthdays",              add_birthday)
+    app.router.add_delete("/api/guild/{guild_id}/birthdays/{user_id}",  delete_birthday)
     app.router.add_get  ("/api/guild/{guild_id}/settings",              get_server_settings)
     app.router.add_patch("/api/guild/{guild_id}/settings",              patch_server_settings)
     app.router.add_get  ("/api/guild/{guild_id}/cleanup",               get_cleanup_configs)
