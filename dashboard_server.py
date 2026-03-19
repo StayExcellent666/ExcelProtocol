@@ -254,10 +254,13 @@ async def auth_callback(request):
         user   = await user_resp.json()
         guilds = await guilds_resp.json()
 
+    # Only include guilds where user has Manage Server AND the bot is present
+    bot_guild_ids = {str(g.id) for g in _bot_ref.guilds} if _bot_ref else set()
     managed = [
         {"id": g["id"], "name": g["name"], "icon": g.get("icon")}
         for g in guilds
         if int(g.get("permissions", 0)) & 0x20
+        and (not bot_guild_ids or g["id"] in bot_guild_ids)
     ]
     session_token = secrets.token_hex(32)
     _sessions[session_token] = {
