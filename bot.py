@@ -660,7 +660,7 @@ class TwitchNotifierBot(discord.Client):
         statuses = [
             discord.Activity(
                 type=discord.ActivityType.watching,
-                name="excelprotocol.fly.dev/app"
+                name="Dashboard available now!"
             ),
             discord.Activity(
                 type=discord.ActivityType.listening,
