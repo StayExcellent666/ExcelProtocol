@@ -122,6 +122,11 @@ class TwitchNotifierBot(discord.Client):
             self.monthly_leaderboard_cleanup.start()
             logger.info("Monthly leaderboard cleanup loop started")
 
+        # Start status rotation loop
+        if not self.rotate_status.is_running():
+            self.rotate_status.start()
+            logger.info("Status rotation loop started")
+
         guild_count = len(self.guilds)
         await self.log_to_channel(
             "🤖", "Bot Started",
@@ -648,7 +653,28 @@ class TwitchNotifierBot(discord.Client):
     @monthly_leaderboard_cleanup.before_loop
     async def before_monthly_leaderboard_cleanup(self):
         await self.wait_until_ready()
-    
+
+    @tasks.loop(seconds=20)
+    async def rotate_status(self):
+        """Rotate bot status messages"""
+        statuses = [
+            discord.Activity(
+                type=discord.ActivityType.watching,
+                name="excelprotocol.fly.dev/app"
+            ),
+            discord.Activity(
+                type=discord.ActivityType.listening,
+                name="Twitch stream alerts 📡"
+            ),
+            discord.Game(name="across multiple servers 🎮"),
+        ]
+        current = self.rotate_status.current_loop % len(statuses)
+        await self.change_presence(activity=statuses[current])
+
+    @rotate_status.before_loop
+    async def before_rotate_status(self):
+        await self.wait_until_ready()
+
     async def cleanup_channel(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool) -> int:
         """Clean up old messages in a channel"""
         try:
