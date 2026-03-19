@@ -793,6 +793,131 @@ COMMANDS = [
 async def get_commands(request):
     return web.json_response(COMMANDS)
 
+
+# ── Server Settings ───────────────────────────────────────────────────────────
+async def get_server_settings(request):
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch(
+        "SELECT notification_channel_id, embed_color, auto_delete_notifications, milestone_notifications FROM server_settings WHERE guild_id = ?",
+        (guild_id,)
+    )
+    bday = await db_fetch("SELECT channel_id FROM birthday_channels WHERE guild_id = ?", (guild_id,))
+    s = rows[0] if rows else {}
+    color_int = s.get("embed_color") or 0x00FFFF
+    color_hex = f"#{color_int:06x}"
+    return web.json_response({
+        "notification_channel_id": str(s["notification_channel_id"]) if s.get("notification_channel_id") else None,
+        "embed_color": color_hex,
+        "auto_delete_notifications": bool(s.get("auto_delete_notifications", 0)),
+        "milestone_notifications": bool(s.get("milestone_notifications", 0)),
+        "birthday_channel_id": str(bday[0]["channel_id"]) if bday else None,
+    })
+
+async def patch_server_settings(request):
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+
+    if "notification_channel_id" in body:
+        cid = int(body["notification_channel_id"])
+        await db_execute(
+            "INSERT INTO server_settings (guild_id, notification_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET notification_channel_id = ?",
+            (guild_id, cid, cid)
+        )
+        await db_execute(
+            "UPDATE monitored_streamers SET channel_id = ? WHERE guild_id = ? AND custom_channel_id IS NULL",
+            (cid, guild_id)
+        )
+
+    if "embed_color" in body:
+        hex_str = body["embed_color"].lstrip("#")
+        color_int = int(hex_str, 16)
+        await db_execute(
+            "INSERT INTO server_settings (guild_id, notification_channel_id, embed_color) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET embed_color = ?",
+            (guild_id, color_int, color_int)
+        )
+
+    if "auto_delete_notifications" in body:
+        val = 1 if body["auto_delete_notifications"] else 0
+        await db_execute(
+            "INSERT INTO server_settings (guild_id, notification_channel_id, auto_delete_notifications) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET auto_delete_notifications = ?",
+            (guild_id, val, val)
+        )
+
+    if "milestone_notifications" in body:
+        val = 1 if body["milestone_notifications"] else 0
+        await db_execute(
+            "INSERT INTO server_settings (guild_id, notification_channel_id, milestone_notifications) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET milestone_notifications = ?",
+            (guild_id, val, val)
+        )
+
+    if "birthday_channel_id" in body:
+        cid = int(body["birthday_channel_id"])
+        await db_execute(
+            "INSERT INTO birthday_channels (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id = ?",
+            (guild_id, cid, cid)
+        )
+
+    return web.json_response({"ok": True})
+
+# ── Cleanup Configs ───────────────────────────────────────────────────────────
+async def get_cleanup_configs(request):
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch(
+        "SELECT channel_id, interval_hours, keep_pinned FROM cleanup_configs WHERE guild_id = ? ORDER BY channel_id",
+        (guild_id,)
+    )
+    result = []
+    for r in rows:
+        name = await get_channel_name(str(r["channel_id"]))
+        result.append({
+            "channel_id": str(r["channel_id"]),
+            "channel_name": name,
+            "interval_hours": r["interval_hours"],
+            "keep_pinned": bool(r["keep_pinned"]),
+        })
+    return web.json_response(result)
+
+async def add_cleanup_config(request):
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    channel_id = body.get("channel_id")
+    interval_hours = body.get("interval_hours")
+    keep_pinned = body.get("keep_pinned", True)
+    if not channel_id or not interval_hours:
+        raise web.HTTPBadRequest(reason="channel_id and interval_hours are required")
+    await db_execute(
+        "INSERT INTO cleanup_configs (guild_id, channel_id, interval_hours, keep_pinned) VALUES (?, ?, ?, ?) ON CONFLICT(guild_id, channel_id) DO UPDATE SET interval_hours = ?, keep_pinned = ?",
+        (guild_id, int(channel_id), int(interval_hours), 1 if keep_pinned else 0, int(interval_hours), 1 if keep_pinned else 0)
+    )
+    return web.json_response({"ok": True})
+
+async def edit_cleanup_config(request):
+    guild_id = request.match_info["guild_id"]
+    channel_id = request.match_info["channel_id"]
+    body = await request.json()
+    interval_hours = body.get("interval_hours")
+    keep_pinned = body.get("keep_pinned")
+    if interval_hours is not None:
+        await db_execute(
+            "UPDATE cleanup_configs SET interval_hours = ? WHERE guild_id = ? AND channel_id = ?",
+            (int(interval_hours), guild_id, int(channel_id))
+        )
+    if keep_pinned is not None:
+        await db_execute(
+            "UPDATE cleanup_configs SET keep_pinned = ? WHERE guild_id = ? AND channel_id = ?",
+            (1 if keep_pinned else 0, guild_id, int(channel_id))
+        )
+    return web.json_response({"ok": True})
+
+async def delete_cleanup_config(request):
+    guild_id = request.match_info["guild_id"]
+    channel_id = request.match_info["channel_id"]
+    await db_execute(
+        "DELETE FROM cleanup_configs WHERE guild_id = ? AND channel_id = ?",
+        (guild_id, int(channel_id))
+    )
+    return web.json_response({"ok": True})
+
 # ── App Factory ───────────────────────────────────────────────────────────────
 def create_dashboard_app(bot=None):
     global _bot_ref
@@ -822,6 +947,13 @@ def create_dashboard_app(bot=None):
     app.router.add_patch("/api/guild/{guild_id}/reaction-roles/{role_id}",  edit_reaction_role)
     app.router.add_get("/api/commands",                  get_commands)
     app.router.add_post("/api/suggest",                    post_suggestion)
+
+    app.router.add_get  ("/api/guild/{guild_id}/settings",              get_server_settings)
+    app.router.add_patch("/api/guild/{guild_id}/settings",              patch_server_settings)
+    app.router.add_get  ("/api/guild/{guild_id}/cleanup",               get_cleanup_configs)
+    app.router.add_post ("/api/guild/{guild_id}/cleanup",               add_cleanup_config)
+    app.router.add_patch("/api/guild/{guild_id}/cleanup/{channel_id}",  edit_cleanup_config)
+    app.router.add_delete("/api/guild/{guild_id}/cleanup/{channel_id}", delete_cleanup_config)
 
     dist_path = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
     if os.path.exists(dist_path):
