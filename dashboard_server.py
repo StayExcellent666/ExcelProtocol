@@ -183,7 +183,7 @@ def _session_can_access_guild(session: dict, guild_id: str) -> bool:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    public = ("/health", "/auth/login", "/auth/callback", "/auth/dev")
+    public = ("/health", "/auth/login", "/auth/callback")
     if request.path in public or request.path.startswith("/app"):
         return await handler(request)
 
@@ -995,17 +995,6 @@ async def delete_cleanup_config(request):
     )
     return web.json_response({"ok": True})
 
-
-# ── Dev Login ─────────────────────────────────────────────────────────────────
-async def auth_dev(request):
-    """Password-protected dev login — creates a full-access session."""
-    password = request.rel_url.query.get("password", "")
-    if not DEV_TOKEN or password != DEV_TOKEN:
-        raise web.HTTPForbidden(reason="Invalid dev password")
-    session_token = secrets.token_hex(32)
-    _sessions[session_token] = {"dev": True}
-    raise web.HTTPFound(f"/app/?token={session_token}")
-
 # ── App Factory ───────────────────────────────────────────────────────────────
 def create_dashboard_app(bot=None):
     global _bot_ref
@@ -1015,7 +1004,6 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/health",        health)
     app.router.add_get("/auth/login",    auth_login)
     app.router.add_get("/auth/callback", auth_callback)
-    app.router.add_get("/auth/dev",      auth_dev)
     app.router.add_get("/api/me",        auth_me)
     app.router.add_get("/api/guilds",    get_guilds)
     app.router.add_get("/api/guild/{guild_id}", get_guild_summary)
