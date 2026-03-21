@@ -130,6 +130,19 @@ class Database:
         except Exception:
             pass  # Column already exists
 
+        # Migration: add streamer_limit to server_settings
+        cursor.execute('''
+            SELECT COUNT(*) FROM pragma_table_info('server_settings')
+            WHERE name='streamer_limit'
+        ''')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('''
+                ALTER TABLE server_settings
+                ADD COLUMN streamer_limit INTEGER DEFAULT 75
+            ''')
+            conn.commit()
+            logger.info("Migration: added streamer_limit to server_settings")
+
         # Index for faster lookups
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_guild_id 
@@ -987,6 +1000,34 @@ class Database:
         ''', (twitch_channel.lower(), command_name.lower()))
         conn.commit()
         conn.close()
+
+    def get_streamer_limit(self, guild_id: int) -> int:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT streamer_limit FROM server_settings WHERE guild_id = ?", (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row and row[0] is not None else 75
+
+    def set_streamer_limit(self, guild_id: int, limit: int):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO server_settings (guild_id, notification_channel_id, streamer_limit)
+            VALUES (?, 0, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET streamer_limit = ?
+        """, (guild_id, limit, limit))
+        conn.commit()
+        conn.close()
+        logger.info(f"Set streamer limit for guild {guild_id} to {limit}")
+
+    def get_streamer_count(self, guild_id: int) -> int:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM monitored_streamers WHERE guild_id = ?", (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else 0
 
     def cleanup_guild(self, guild_id: int):
         """Remove all data for a guild (called when bot is removed from server)"""

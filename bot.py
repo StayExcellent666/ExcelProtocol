@@ -779,6 +779,16 @@ async def add_streamer(interaction: discord.Interaction, streamer: str, channel:
             channel_id = interaction.channel_id
             bot.db.set_notification_channel(interaction.guild_id, channel_id)
 
+    # Check streamer limit
+    limit = bot.db.get_streamer_limit(interaction.guild_id)
+    count = bot.db.get_streamer_count(interaction.guild_id)
+    if count >= limit:
+        await interaction.response.send_message(
+            f"❌ This server has reached its streamer limit ({count}/{limit}). Contact the bot owner to increase your limit.",
+            ephemeral=True
+        )
+        return
+
     await interaction.response.defer(ephemeral=True)
 
     user_info = await bot.twitch.get_user(streamer)

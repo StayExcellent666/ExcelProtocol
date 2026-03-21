@@ -284,7 +284,7 @@ async def auth_me(request):
                 "icon": info.get("icon"),
                 "approximate_member_count": info.get("approximate_member_count"),
             })
-        return web.json_response({"username": "Dev", "avatar": None, "guilds": guilds})
+        return web.json_response({"username": "Dev", "avatar": None, "guilds": guilds, "is_dev": True})
     session_guilds = session.get("guilds", [])
     enriched = []
     for g in session_guilds:
@@ -298,6 +298,7 @@ async def auth_me(request):
         "username": session["username"],
         "avatar":   session.get("avatar"),
         "guilds":   enriched,
+        "is_dev":   False,
     })
 
 # ── Guilds ────────────────────────────────────────────────────────────────────
@@ -413,7 +414,9 @@ async def get_streamers(request):
             "profile_image_url": tw.get("profile_image_url", ""),
             "channel_name":      ch_name,
         })
-    return web.json_response(result)
+    limit = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id))) if _bot_ref else 75
+    count = len(result)
+    return web.json_response({"streamers": result, "count": count, "limit": limit})
 
 async def add_streamer(request):
     guild_id = request.match_info["guild_id"]
@@ -422,6 +425,16 @@ async def add_streamer(request):
     channel_id      = body.get("channel_id")
     if not twitch_username or not channel_id:
         raise web.HTTPBadRequest(reason="twitch_username and channel_id are required")
+
+    # Check streamer limit — dev sessions are exempt
+    session = request.get("session", {})
+    if not session.get("dev") and _bot_ref:
+        import asyncio as _asyncio
+        limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id)))
+        count = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_count(int(guild_id)))
+        if count >= limit:
+            raise web.HTTPForbidden(reason=f"Streamer limit reached ({count}/{limit}). Contact the bot owner to increase your limit.")
+
     try:
         await db_execute(
             "INSERT INTO monitored_streamers (guild_id, streamer_name, channel_id) VALUES (?, ?, ?)",
@@ -996,6 +1009,27 @@ async def delete_cleanup_config(request):
     return web.json_response({"ok": True})
 
 
+
+# ── Streamer Limit (dev only) ─────────────────────────────────────────────────
+async def set_streamer_limit(request):
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Dev access required")
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    limit = body.get("limit")
+    if limit is None or not isinstance(limit, int) or limit < 1:
+        raise web.HTTPBadRequest(reason="limit must be a positive integer")
+    if _bot_ref:
+        import asyncio as _asyncio
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_streamer_limit(int(guild_id), limit))
+    else:
+        await db_execute(
+            "INSERT INTO server_settings (guild_id, notification_channel_id, streamer_limit) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET streamer_limit = ?",
+            (guild_id, limit, limit)
+        )
+    return web.json_response({"ok": True, "limit": limit})
+
 # ── Dev Login ─────────────────────────────────────────────────────────────────
 async def auth_dev(request):
     """Password-protected dev login — creates a full-access session."""
@@ -1043,6 +1077,7 @@ def create_dashboard_app(bot=None):
     app.router.add_delete("/api/guild/{guild_id}/birthdays/{user_id}",  delete_birthday)
     app.router.add_get  ("/api/guild/{guild_id}/settings",              get_server_settings)
     app.router.add_patch("/api/guild/{guild_id}/settings",              patch_server_settings)
+    app.router.add_patch("/api/guild/{guild_id}/streamer-limit",          set_streamer_limit)
     app.router.add_get  ("/api/guild/{guild_id}/cleanup",               get_cleanup_configs)
     app.router.add_post ("/api/guild/{guild_id}/cleanup",               add_cleanup_config)
     app.router.add_patch("/api/guild/{guild_id}/cleanup/{channel_id}",  edit_cleanup_config)
