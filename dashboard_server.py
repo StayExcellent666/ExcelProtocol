@@ -414,7 +414,8 @@ async def get_streamers(request):
             "profile_image_url": tw.get("profile_image_url", ""),
             "channel_name":      ch_name,
         })
-    limit = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id))) if _bot_ref else 75
+    import asyncio as _asyncio
+    limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id))) if _bot_ref else 75
     count = len(result)
     return web.json_response({"streamers": result, "count": count, "limit": limit})
 
