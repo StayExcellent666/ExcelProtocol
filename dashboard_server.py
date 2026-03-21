@@ -709,7 +709,9 @@ async def edit_reaction_role(request):
     if "only_add" in body: entry["only_add"] = body["only_add"]
     if "max_roles" in body: entry["max_roles"] = body["max_roles"]
     if "roles" in body:
-        # Convert role_ids to int
+        # Resolve any __create__ role IDs first, then convert to int
+        for r in body["roles"]:
+            r["role_id"] = await _resolve_role_id(guild_id, str(r.get("role_id", "")), r.get("new_role_name"))
         entry["roles"] = [{**r, "role_id": int(r["role_id"])} for r in body["roles"]]
 
     # Save updated entry to DB
