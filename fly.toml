@@ -1,5 +1,5 @@
 app = "excelprotocol"
-primary_region = "sjc"
+primary_region = "ams"
 
 # Persistent volume — bot DB lives here
 [[mounts]]
