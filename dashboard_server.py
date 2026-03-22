@@ -1049,12 +1049,43 @@ async def get_twitch_info(request):
     channel = row["twitch_channel"]
     commands = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_commands(channel))
     limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_limit(int(guild_id)))
+
+    # Check if bot is modded in the channel
+    bot_is_modded = False
+    BOT_TWITCH_LOGIN = "excelprotocol"
+    try:
+        broadcaster = await get_twitch_token()
+        async with http_client.ClientSession() as sess:
+            # Get broadcaster user ID first
+            async with sess.get(
+                "https://api.twitch.tv/helix/users",
+                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {broadcaster}"},
+                params={"login": channel}
+            ) as resp:
+                udata = await resp.json()
+                users = udata.get("data", [])
+                if users:
+                    broadcaster_id = users[0]["id"]
+                    # Check moderators list
+                    async with sess.get(
+                        "https://api.twitch.tv/helix/moderation/moderators",
+                        headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {broadcaster}"},
+                        params={"broadcaster_id": broadcaster_id, "first": 100}
+                    ) as mresp:
+                        if mresp.status == 200:
+                            mdata = await mresp.json()
+                            mod_logins = [m["user_login"].lower() for m in mdata.get("data", [])]
+                            bot_is_modded = BOT_TWITCH_LOGIN in mod_logins
+    except Exception as e:
+        logger.warning(f"Could not check mod status for {channel}: {e}")
+
     return web.json_response({
         "linked": True,
         "channel": channel,
         "commands": commands,
         "count": len(commands),
         "limit": limit,
+        "bot_is_modded": bot_is_modded,
     })
 
 async def add_twitch_command(request):
