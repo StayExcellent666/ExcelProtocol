@@ -1033,6 +1033,100 @@ async def set_streamer_limit(request):
         )
     return web.json_response({"ok": True, "limit": limit})
 
+
+# ── Twitch Commands ───────────────────────────────────────────────────────────
+async def get_twitch_info(request):
+    """Get linked twitch channel + all commands for a guild."""
+    guild_id = request.match_info["guild_id"]
+    import asyncio as _asyncio
+    if not _bot_ref:
+        return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50})
+
+    row = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
+    if not row:
+        return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50})
+
+    channel = row["twitch_channel"]
+    commands = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_commands(channel))
+    limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_limit(int(guild_id)))
+    return web.json_response({
+        "linked": True,
+        "channel": channel,
+        "commands": commands,
+        "count": len(commands),
+        "limit": limit,
+    })
+
+async def add_twitch_command(request):
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    session = request.get("session", {})
+    import asyncio as _asyncio
+
+    if not _bot_ref:
+        raise web.HTTPInternalServerError(reason="Bot not available")
+
+    row = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
+    if not row:
+        raise web.HTTPBadRequest(reason="No Twitch channel linked to this guild")
+
+    channel = row["twitch_channel"]
+    command_name = body.get("command_name", "").strip().lower()
+    response = body.get("response", "").strip()
+    permission = body.get("permission", "everyone")
+    cooldown = int(body.get("cooldown_seconds", 0))
+
+    if not command_name or not response:
+        raise web.HTTPBadRequest(reason="command_name and response are required")
+    if not command_name.startswith("!"):
+        command_name = "!" + command_name
+    if permission not in ("everyone", "subscriber", "mod", "broadcaster"):
+        raise web.HTTPBadRequest(reason="Invalid permission level")
+
+    # Check limit unless dev or editing existing
+    existing = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_command(channel, command_name))
+    if not existing and not session.get("dev"):
+        limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_limit(int(guild_id)))
+        count = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_count(int(guild_id)))
+        if count >= limit:
+            raise web.HTTPForbidden(reason=f"Command limit reached ({count}/{limit}). Contact the bot owner to increase your limit.")
+
+    success = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.add_twitch_command(channel, command_name, response, permission, cooldown))
+    if not success:
+        raise web.HTTPInternalServerError(reason="Failed to save command")
+    return web.json_response({"ok": True})
+
+async def delete_twitch_command(request):
+    guild_id = request.match_info["guild_id"]
+    command_name = request.match_info["command_name"]
+    import asyncio as _asyncio
+
+    if not _bot_ref:
+        raise web.HTTPInternalServerError(reason="Bot not available")
+
+    row = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
+    if not row:
+        raise web.HTTPNotFound(reason="No Twitch channel linked")
+
+    await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.remove_twitch_command(row["twitch_channel"], command_name))
+    return web.json_response({"ok": True})
+
+async def set_command_limit(request):
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Dev access required")
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    limit = body.get("limit")
+    if limit is None or not isinstance(limit, int) or limit < 1:
+        raise web.HTTPBadRequest(reason="limit must be a positive integer")
+    import asyncio as _asyncio
+    if _bot_ref:
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_command_limit(int(guild_id), limit))
+    else:
+        await db_execute("INSERT INTO server_settings (guild_id, notification_channel_id, command_limit) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET command_limit = ?", (guild_id, limit, limit))
+    return web.json_response({"ok": True, "limit": limit})
+
 # ── Dev Login ─────────────────────────────────────────────────────────────────
 async def auth_dev(request):
     """Password-protected dev login — creates a full-access session."""
@@ -1053,6 +1147,10 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/auth/login",    auth_login)
     app.router.add_get("/auth/callback", auth_callback)
     app.router.add_get("/auth/dev",      auth_dev)
+    app.router.add_get   ("/api/guild/{guild_id}/twitch",                    get_twitch_info)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/commands",           add_twitch_command)
+    app.router.add_delete("/api/guild/{guild_id}/twitch/commands/{command_name}", delete_twitch_command)
+    app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
     app.router.add_get("/api/me",        auth_me)
     app.router.add_get("/api/guilds",    get_guilds)
     app.router.add_get("/api/guild/{guild_id}", get_guild_summary)

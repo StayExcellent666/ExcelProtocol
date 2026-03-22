@@ -143,6 +143,13 @@ class Database:
             conn.commit()
             logger.info("Migration: added streamer_limit to server_settings")
 
+        # Migration: add command_limit to server_settings
+        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("server_settings") WHERE name="command_limit"')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('ALTER TABLE server_settings ADD COLUMN command_limit INTEGER DEFAULT 50')
+            conn.commit()
+            logger.info("Migration: added command_limit to server_settings")
+
         # Index for faster lookups
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_guild_id 
@@ -1000,6 +1007,35 @@ class Database:
         ''', (twitch_channel.lower(), command_name.lower()))
         conn.commit()
         conn.close()
+
+    def get_command_limit(self, guild_id: int) -> int:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT command_limit FROM server_settings WHERE guild_id = ?", (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row and row[0] is not None else 50
+
+    def set_command_limit(self, guild_id: int, limit: int):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO server_settings (guild_id, notification_channel_id, command_limit) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET command_limit = ?", (guild_id, limit, limit))
+        conn.commit()
+        conn.close()
+        logger.info(f"Set command limit for guild {guild_id} to {limit}")
+
+    def get_command_count(self, guild_id: int) -> int:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT twitch_channel FROM twitch_channels WHERE guild_id = ?", (guild_id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return 0
+        cursor.execute("SELECT COUNT(*) FROM twitch_commands WHERE twitch_channel = ?", (row[0],))
+        count_row = cursor.fetchone()
+        conn.close()
+        return count_row[0] if count_row else 0
 
     def get_streamer_limit(self, guild_id: int) -> int:
         conn = self.get_connection()
