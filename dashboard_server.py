@@ -795,6 +795,71 @@ async def post_suggestion(request):
 
     return web.json_response({"ok": True})
 
+# ── Support ──────────────────────────────────────────────────────────────────
+async def post_support(request):
+    """Receive a support message from the dashboard and DM it to the bot owner."""
+    session = request["session"]
+    body = await request.json()
+    text = body.get("text", "").strip()
+    guild_id = body.get("guild_id", "")
+
+    if not text:
+        raise web.HTTPBadRequest(reason="Message is required")
+    if len(text) > 1000:
+        raise web.HTTPBadRequest(reason="Message must be under 1000 characters")
+    if not BOT_OWNER_ID or not DISCORD_TOKEN:
+        raise web.HTTPInternalServerError(reason="BOT_OWNER_ID or DISCORD_TOKEN not configured")
+
+    sender    = "Dev (dashboard)" if session.get("dev") else session.get("username", "Unknown")
+    sender_id = None if session.get("dev") else session.get("user_id")
+
+    # Get guild name if possible
+    guild_name = guild_id
+    if guild_id and _bot_ref:
+        try:
+            guild_obj = _bot_ref.get_guild(int(guild_id))
+            if guild_obj:
+                guild_name = guild_obj.name
+        except Exception:
+            pass
+
+    async with http_client.ClientSession() as s:
+        dm_resp = await s.post(
+            f"{DISCORD_API}/users/@me/channels",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+            json={"recipient_id": BOT_OWNER_ID},
+        )
+        dm_data = await dm_resp.json()
+        dm_channel_id = dm_data.get("id")
+        if not dm_channel_id:
+            raise web.HTTPInternalServerError(reason="Failed to open DM channel")
+
+        user_value = f"{sender}"
+        if sender_id:
+            user_value += f"\n`{sender_id}`"
+            user_value += f"\n<@{sender_id}>"
+
+        embed = {
+            "title": "🎫 New Support Request",
+            "description": text,
+            "color": 0xFF6B6B,
+            "fields": [
+                {"name": "From",   "value": user_value, "inline": True},
+                {"name": "Server", "value": f"{guild_name}\n`{guild_id}`" if guild_id else "Unknown", "inline": True},
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "excelprotocol.fly.dev/app"},
+        }
+        msg_resp = await s.post(
+            f"{DISCORD_API}/channels/{dm_channel_id}/messages",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+            json={"embeds": [embed]},
+        )
+        if msg_resp.status not in (200, 201):
+            raise web.HTTPInternalServerError(reason="Failed to send DM")
+
+    return web.json_response({"ok": True})
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 COMMANDS = [
     {"name": "notiflog",       "description": "View notification audit log",               "usage": "/notiflog",              "category": "Moderation"},
@@ -1202,6 +1267,7 @@ def create_dashboard_app(bot=None):
     app.router.add_patch("/api/guild/{guild_id}/reaction-roles/{role_id}",  edit_reaction_role)
     app.router.add_get("/api/commands",                  get_commands)
     app.router.add_post("/api/suggest",                    post_suggestion)
+    app.router.add_post("/api/support",                     post_support)
 
     app.router.add_get  ("/api/guild/{guild_id}/members",               get_guild_members)
     app.router.add_get  ("/api/guild/{guild_id}/birthdays",              get_birthdays)
