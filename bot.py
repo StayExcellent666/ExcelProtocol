@@ -139,6 +139,19 @@ class TwitchNotifierBot(discord.Client):
             color=0x00CC66
         )
     
+    async def close(self):
+        """Called when bot is shutting down cleanly."""
+        try:
+            await self.log_to_channel(
+                "🔴", "Bot Shutting Down",
+                "ExcelProtocol is going offline.",
+                color=0xFF4444
+            )
+            await asyncio.sleep(1)
+        except Exception:
+            pass
+        await super().close()
+
     async def on_guild_remove(self, guild):
         """Called when bot is removed from a server - clean up data"""
         logger.info(f"Bot removed from guild: {guild.name} (ID: {guild.id})")
@@ -712,8 +725,22 @@ class TwitchNotifierBot(discord.Client):
                             refreshed += 1
                         else:
                             logger.warning(f"Failed to refresh broadcaster token for guild {t['guild_id']}: {resp.status}")
+                            await self.log_to_channel(
+                                "🔑", "Broadcaster Token Refresh Failed",
+                                f"Failed to refresh Twitch token for guild `{t['guild_id']}` "
+                                f"(Twitch: **{t['twitch_login']}**)\n"
+                                f"HTTP status: `{resp.status}`\n"
+                                f"Their channel rewards overlay may stop working until they reconnect.",
+                                color=0xFF6B35
+                            )
             except Exception as e:
                 logger.error(f"Error refreshing broadcaster token for guild {t['guild_id']}: {e}")
+                await self.log_to_channel(
+                    "🔑", "Broadcaster Token Refresh Error",
+                    f"Exception refreshing token for guild `{t['guild_id']}` "
+                    f"(Twitch: **{t['twitch_login']}**)\n`{type(e).__name__}: {e}`",
+                    color=0xFF6B35
+                )
         if refreshed:
             logger.info(f"Refreshed {refreshed} broadcaster token(s)")
 
@@ -2481,9 +2508,47 @@ async def main():
     except Exception as e:
         # Dashboard failing should never take down the bot
         logger.error(f"Dashboard failed to start: {e} — bot continuing normally")
+        # Wait for bot to be ready before logging
+        async def _log_dash_fail():
+            await bot.wait_until_ready()
+            await bot.log_to_channel(
+                "🌐", "Dashboard Failed to Start",
+                f"`{type(e).__name__}: {e}`\n\nThe web dashboard is unavailable. Bot commands still work normally.",
+                color=0xFF4444
+            )
+        asyncio.create_task(_log_dash_fail())
 
     # Start the Discord bot (this blocks until the bot stops)
     await bot.start(DISCORD_TOKEN)
 
+async def main_with_error_handling():
+    import traceback
+    import platform
+    import sys
+    try:
+        await main()
+    except (KeyboardInterrupt, SystemExit):
+        pass  # Normal shutdown, don't log
+    except Exception as e:
+        tb = traceback.format_exc()
+        # Trim to Discord's 4096 char limit
+        tb_trimmed = tb[-3500:] if len(tb) > 3500 else tb
+        error_msg = (
+            f"**Bot crashed with unhandled exception**\n\n"
+            f"**Error:** `{type(e).__name__}: {e}`\n\n"
+            f"**Python:** {sys.version.split()[0]}\n"
+            f"**Platform:** {platform.system()} {platform.release()}\n\n"
+            f"```python\n{tb_trimmed}\n```"
+        )
+        # Try to send to log channel before dying
+        try:
+            if bot.is_ready():
+                await bot.log_to_channel("💥", "Bot Crashed", error_msg, color=0xFF0000)
+                await asyncio.sleep(2)  # Give Discord time to send the message
+        except Exception as log_err:
+            logger.error(f"Failed to log crash to Discord: {log_err}")
+        logger.critical(f"Bot crashed: {tb}")
+        raise
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main_with_error_handling())
