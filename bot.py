@@ -2469,7 +2469,11 @@ async def main():
         from aiohttp import web
         from dashboard_server import create_dashboard_app
         dashboard_app = create_dashboard_app(bot=bot)
-        runner = web.AppRunner(dashboard_app)
+        import logging as _logging
+        # Custom access log format — method, path, status, size only
+        access_logger = _logging.getLogger("aiohttp.access")
+        access_log_format = '%a "%r" %s %b'
+        runner = web.AppRunner(dashboard_app, access_log_format=access_log_format, access_log=access_logger)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", 8080)
         await site.start()

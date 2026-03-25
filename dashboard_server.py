@@ -1307,6 +1307,7 @@ async def _register_eventsub(broadcaster_user_id: str, access_token: str):
     secret = os.getenv("EVENTSUB_SECRET", "excelprotocol_eventsub_secret")
     try:
         async with http_client.ClientSession() as sess:
+            logger.info(f"Registering EventSub for broadcaster {broadcaster_user_id} with callback {callback_url}")
             resp = await sess.post(
                 f"{TWITCH_API}/eventsub/subscriptions",
                 headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
@@ -1318,10 +1319,12 @@ async def _register_eventsub(broadcaster_user_id: str, access_token: str):
                 }
             )
             data = await resp.json()
-            if resp.status not in (200, 202, 409):  # 409 = already subscribed
-                logger.warning(f"EventSub registration failed for {broadcaster_user_id}: {resp.status} {data}")
+            if resp.status == 409:
+                logger.info(f"EventSub already subscribed for broadcaster {broadcaster_user_id}")
+            elif resp.status in (200, 202):
+                logger.info(f"EventSub registered for broadcaster {broadcaster_user_id}: {data}")
             else:
-                logger.info(f"EventSub registered for broadcaster {broadcaster_user_id}")
+                logger.warning(f"EventSub registration failed for {broadcaster_user_id}: {resp.status} {data}")
     except Exception as e:
         logger.error(f"Error registering EventSub for {broadcaster_user_id}: {e}")
 
@@ -1695,6 +1698,9 @@ def create_dashboard_app(bot=None):
     })
     for route in list(app.router.routes()):
         try:
+            # Skip WebSocket routes — CORS breaks the upgrade handshake
+            if hasattr(route, 'resource') and route.resource and '/ws' in str(route.resource.canonical):
+                continue
             cors.add(route)
         except Exception:
             pass
