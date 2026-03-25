@@ -1287,7 +1287,7 @@ async def twitch_broadcaster_callback(request):
         )
 
     # Register EventSub subscription for channel point redeems
-    await _register_eventsub(user["id"], access_token)
+    await _register_eventsub(user["id"])
 
     raise web.HTTPFound(f"/app/?twitch_connected=1")
 
@@ -1301,7 +1301,7 @@ async def twitch_broadcaster_disconnect(request):
         await db_execute("DELETE FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
     return web.json_response({"ok": True})
 
-async def _register_eventsub(broadcaster_user_id: str, access_token: str):
+async def _register_eventsub(broadcaster_user_id: str):
     """Register EventSub subscription for channel point redeems."""
     callback_url = f"{os.getenv('DASHBOARD_BASE_URL', 'https://excelprotocol.fly.dev')}/api/eventsub/callback"
     secret = os.getenv("EVENTSUB_SECRET", "excelprotocol_eventsub_secret")
@@ -1310,7 +1310,8 @@ async def _register_eventsub(broadcaster_user_id: str, access_token: str):
             logger.info(f"Registering EventSub for broadcaster {broadcaster_user_id} with callback {callback_url}")
             resp = await sess.post(
                 f"{TWITCH_API}/eventsub/subscriptions",
-                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                app_token = await get_twitch_token()
+                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {app_token}", "Content-Type": "application/json"},
                 json={
                     "type": "channel.channel_points_custom_reward_redemption.add",
                     "version": "1",
