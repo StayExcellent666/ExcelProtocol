@@ -299,6 +299,31 @@ class Database:
             )
         ''')
 
+        # Broadcaster OAuth tokens (for channel rewards / EventSub)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS broadcaster_tokens (
+                guild_id       INTEGER PRIMARY KEY,
+                twitch_user_id TEXT NOT NULL,
+                twitch_login   TEXT NOT NULL,
+                access_token   TEXT NOT NULL,
+                refresh_token  TEXT NOT NULL,
+                expires_at     TEXT NOT NULL
+            )
+        ''')
+
+        # Video triggers — links a Twitch reward_id to a video URL
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reward_triggers (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id   INTEGER NOT NULL,
+                reward_id  TEXT NOT NULL,
+                reward_title TEXT NOT NULL DEFAULT \'\',
+                video_url  TEXT NOT NULL,
+                volume     REAL NOT NULL DEFAULT 1.0,
+                UNIQUE(guild_id, reward_id)
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -1065,6 +1090,102 @@ class Database:
         conn.close()
         return row[0] if row else 0
 
+    # ── Broadcaster tokens ──────────────────────────────────────────────────────
+
+    def set_broadcaster_token(self, guild_id: int, twitch_user_id: str, twitch_login: str,
+                               access_token: str, refresh_token: str, expires_at: str):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO broadcaster_tokens (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                twitch_user_id = excluded.twitch_user_id,
+                twitch_login   = excluded.twitch_login,
+                access_token   = excluded.access_token,
+                refresh_token  = excluded.refresh_token,
+                expires_at     = excluded.expires_at
+        """, (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at))
+        conn.commit()
+        conn.close()
+
+    def get_broadcaster_token(self, guild_id: int) -> Optional[Dict]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {"guild_id": row[0], "twitch_user_id": row[1], "twitch_login": row[2],
+                "access_token": row[3], "refresh_token": row[4], "expires_at": row[5]}
+
+    def get_all_broadcaster_tokens(self) -> List[Dict]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM broadcaster_tokens")
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"guild_id": r[0], "twitch_user_id": r[1], "twitch_login": r[2],
+                 "access_token": r[3], "refresh_token": r[4], "expires_at": r[5]} for r in rows]
+
+    def delete_broadcaster_token(self, guild_id: int):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+        conn.commit()
+        conn.close()
+
+    # ── Reward triggers ──────────────────────────────────────────────────────────
+
+    def set_reward_trigger(self, guild_id: int, reward_id: str, reward_title: str, video_url: str, volume: float = 1.0):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, reward_id) DO UPDATE SET
+                reward_title = excluded.reward_title,
+                video_url    = excluded.video_url,
+                volume       = excluded.volume
+        """, (guild_id, reward_id, reward_title, video_url, volume))
+        conn.commit()
+        conn.close()
+
+    def get_reward_triggers(self, guild_id: int) -> List[Dict]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"reward_id": r[0], "reward_title": r[1], "video_url": r[2], "volume": r[3]} for r in rows]
+
+    def get_reward_trigger(self, guild_id: int, reward_id: str) -> Optional[Dict]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {"reward_id": row[0], "reward_title": row[1], "video_url": row[2], "volume": row[3]}
+
+    def delete_reward_trigger(self, guild_id: int, reward_id: str):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+        conn.commit()
+        conn.close()
+
+    def get_all_reward_triggers(self) -> List[Dict]:
+        """Get all triggers across all guilds — used for EventSub routing."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT guild_id, reward_id, reward_title, video_url, volume FROM reward_triggers")
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"guild_id": r[0], "reward_id": r[1], "reward_title": r[2], "video_url": r[3], "volume": r[4]} for r in rows]
+
     def cleanup_guild(self, guild_id: int):
         """Remove all data for a guild (called when bot is removed from server)"""
         conn = self.get_connection()
@@ -1078,6 +1199,8 @@ class Database:
         cursor.execute('DELETE FROM birthdays WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM birthday_channels WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM reaction_roles WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM broadcaster_tokens WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM reward_triggers WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM milestone_sent WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM stream_events WHERE guild_id = ?', (guild_id,))
         

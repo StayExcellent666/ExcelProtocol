@@ -31,6 +31,11 @@ BOT_OWNER_ID          = os.getenv("BOT_OWNER_ID", "")
 DEV_TOKEN             = os.getenv("DEV_TOKEN", "")
 PORT                  = int(os.getenv("DASHBOARD_PORT", 8080))
 DISCORD_API           = "https://discord.com/api/v10"
+TWITCH_REDIRECT_URI   = os.getenv("TWITCH_REDIRECT_URI", "https://excelprotocol.fly.dev/auth/twitch/callback")
+TWITCH_API            = "https://api.twitch.tv/helix"
+
+# WebSocket connections for overlays: {guild_id: set of ws}
+_overlay_connections: dict = {}
 
 # Bot reference — set by create_dashboard_app() so we can reload views
 _bot_ref = None
@@ -183,8 +188,8 @@ def _session_can_access_guild(session: dict, guild_id: str) -> bool:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    public = ("/health", "/auth/login", "/auth/callback", "/auth/dev")
-    if request.path in public or request.path.startswith("/app"):
+    public = ("/health", "/auth/login", "/auth/callback", "/auth/dev", "/auth/twitch/callback", "/api/eventsub/callback")
+    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/auth/twitch/login"):
         return await handler(request)
 
     session = get_session(request)
@@ -1223,6 +1228,377 @@ async def set_command_limit(request):
         await db_execute("INSERT INTO server_settings (guild_id, notification_channel_id, command_limit) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET command_limit = ?", (guild_id, limit, limit))
     return web.json_response({"ok": True, "limit": limit})
 
+
+# ── Broadcaster OAuth ─────────────────────────────────────────────────────────
+async def twitch_broadcaster_login(request):
+    """Redirect streamer to Twitch OAuth — stores guild_id in state param."""
+    guild_id = request.match_info["guild_id"]
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        "client_id": TWITCH_CLIENT_ID,
+        "redirect_uri": TWITCH_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "channel:read:redemptions channel:manage:redemptions",
+        "state": guild_id,
+        "force_verify": "true",
+    })
+    raise web.HTTPFound(f"https://id.twitch.tv/oauth2/authorize?{params}")
+
+async def twitch_broadcaster_callback(request):
+    """Handle Twitch OAuth callback — exchange code for tokens."""
+    code     = request.rel_url.query.get("code")
+    guild_id = request.rel_url.query.get("state")
+    if not code or not guild_id:
+        raise web.HTTPBadRequest(reason="Missing code or state")
+
+    async with http_client.ClientSession() as sess:
+        # Exchange code for tokens
+        resp = await sess.post("https://id.twitch.tv/oauth2/token", data={
+            "client_id":     TWITCH_CLIENT_ID,
+            "client_secret": TWITCH_CLIENT_SECRET,
+            "code":          code,
+            "grant_type":    "authorization_code",
+            "redirect_uri":  TWITCH_REDIRECT_URI,
+        })
+        if resp.status != 200:
+            raise web.HTTPInternalServerError(reason="Failed to exchange code for token")
+        token_data = await resp.json()
+        access_token  = token_data["access_token"]
+        refresh_token = token_data["refresh_token"]
+        expires_at    = (datetime.now(timezone.utc) + timedelta(seconds=token_data["expires_in"])).isoformat()
+
+        # Get Twitch user info
+        user_resp = await sess.get(f"{TWITCH_API}/users",
+            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"})
+        user_data = await user_resp.json()
+        user = user_data["data"][0] if user_data.get("data") else None
+        if not user:
+            raise web.HTTPInternalServerError(reason="Could not get Twitch user info")
+
+    if _bot_ref:
+        import asyncio as _asyncio
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_broadcaster_token(
+            int(guild_id), user["id"], user["login"], access_token, refresh_token, expires_at
+        ))
+    else:
+        await db_execute(
+            "INSERT INTO broadcaster_tokens (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET twitch_user_id=excluded.twitch_user_id, twitch_login=excluded.twitch_login, access_token=excluded.access_token, refresh_token=excluded.refresh_token, expires_at=excluded.expires_at",
+            (guild_id, user["id"], user["login"], access_token, refresh_token, expires_at)
+        )
+
+    # Register EventSub subscription for channel point redeems
+    await _register_eventsub(user["id"], access_token)
+
+    raise web.HTTPFound(f"/app/?twitch_connected=1")
+
+async def twitch_broadcaster_disconnect(request):
+    """Remove stored broadcaster token for a guild."""
+    guild_id = request.match_info["guild_id"]
+    if _bot_ref:
+        import asyncio as _asyncio
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.delete_broadcaster_token(int(guild_id)))
+    else:
+        await db_execute("DELETE FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+    return web.json_response({"ok": True})
+
+async def _register_eventsub(broadcaster_user_id: str, access_token: str):
+    """Register EventSub subscription for channel point redeems."""
+    callback_url = f"{os.getenv('DASHBOARD_BASE_URL', 'https://excelprotocol.fly.dev')}/api/eventsub/callback"
+    secret = os.getenv("EVENTSUB_SECRET", "excelprotocol_eventsub_secret")
+    try:
+        async with http_client.ClientSession() as sess:
+            resp = await sess.post(
+                f"{TWITCH_API}/eventsub/subscriptions",
+                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                json={
+                    "type": "channel.channel_points_custom_reward_redemption.add",
+                    "version": "1",
+                    "condition": {"broadcaster_user_id": broadcaster_user_id},
+                    "transport": {"method": "webhook", "callback": callback_url, "secret": secret},
+                }
+            )
+            data = await resp.json()
+            if resp.status not in (200, 202, 409):  # 409 = already subscribed
+                logger.warning(f"EventSub registration failed for {broadcaster_user_id}: {resp.status} {data}")
+            else:
+                logger.info(f"EventSub registered for broadcaster {broadcaster_user_id}")
+    except Exception as e:
+        logger.error(f"Error registering EventSub for {broadcaster_user_id}: {e}")
+
+# ── EventSub Webhook ──────────────────────────────────────────────────────────
+async def eventsub_callback(request):
+    """Receive EventSub events from Twitch and push to overlay websockets."""
+    import hmac, hashlib
+    body = await request.read()
+    secret = os.getenv("EVENTSUB_SECRET", "excelprotocol_eventsub_secret").encode()
+
+    # Verify signature
+    msg_id        = request.headers.get("Twitch-Eventsub-Message-Id", "")
+    msg_timestamp = request.headers.get("Twitch-Eventsub-Message-Timestamp", "")
+    msg_signature = request.headers.get("Twitch-Eventsub-Message-Signature", "")
+    hmac_msg = (msg_id + msg_timestamp + body.decode()).encode()
+    expected = "sha256=" + hmac.new(secret, hmac_msg, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, msg_signature):
+        raise web.HTTPForbidden(reason="Invalid signature")
+
+    import json as _json
+    data = _json.loads(body)
+    msg_type = request.headers.get("Twitch-Eventsub-Message-Type", "")
+
+    # Twitch sends a challenge to verify the webhook
+    if msg_type == "webhook_callback_verification":
+        return web.Response(text=data["challenge"], content_type="text/plain")
+
+    if msg_type == "notification" and data.get("subscription", {}).get("type") == "channel.channel_points_custom_reward_redemption.add":
+        event = data.get("event", {})
+        reward_id         = event.get("reward", {}).get("id")
+        broadcaster_login = event.get("broadcaster_user_login", "").lower()
+        redeemer          = event.get("user_name", "")
+
+        # Find which guild this broadcaster belongs to
+        rows = await db_fetch("SELECT guild_id FROM broadcaster_tokens WHERE twitch_login = ?", (broadcaster_login,))
+        for row in rows:
+            guild_id = str(row["guild_id"])
+            # Find matching trigger
+            trigger_rows = await db_fetch(
+                "SELECT video_url, volume FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
+                (guild_id, reward_id)
+            )
+            if trigger_rows:
+                trigger = trigger_rows[0]
+                import json as _json
+                payload = _json.dumps({
+                    "type": "play",
+                    "video_url": trigger["video_url"],
+                    "volume": trigger["volume"],
+                    "redeemer": redeemer,
+                })
+                # Push to all connected overlays for this guild
+                dead = set()
+                for ws in _overlay_connections.get(guild_id, set()):
+                    try:
+                        await ws.send_str(payload)
+                    except Exception:
+                        dead.add(ws)
+                if dead:
+                    _overlay_connections.get(guild_id, set()).difference_update(dead)
+
+    return web.Response(status=204)
+
+# ── Overlay WebSocket ─────────────────────────────────────────────────────────
+async def overlay_ws(request):
+    """WebSocket endpoint for OBS browser source overlays."""
+    guild_id = request.match_info["guild_id"]
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    _overlay_connections.setdefault(guild_id, set()).add(ws)
+    try:
+        async for msg in ws:
+            pass  # overlay only receives, doesn't send
+    finally:
+        _overlay_connections.get(guild_id, set()).discard(ws)
+    return ws
+
+# ── Overlay HTML Page ─────────────────────────────────────────────────────────
+async def overlay_page(request):
+    """Serve the OBS browser source overlay page."""
+    guild_id = request.match_info["guild_id"]
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ background:transparent; overflow:hidden; width:100vw; height:100vh; }}
+  #overlay {{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; }}
+  video {{ max-width:100%; max-height:100%; object-fit:contain; display:none; border-radius:8px; }}
+  #redeemer {{ position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+    background:rgba(0,0,0,0.7); color:#fff; padding:6px 16px; border-radius:20px;
+    font-family:sans-serif; font-size:14px; display:none; white-space:nowrap; }}
+</style>
+</head>
+<body>
+<div id="overlay"><video id="vid" playsinline></video></div>
+<div id="redeemer" id="rdm"></div>
+<script>
+const guildId = "{guild_id}";
+const vid = document.getElementById("vid");
+const rdm = document.getElementById("redeemer");
+const queue = [];
+let playing = false;
+
+const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+const ws = new WebSocket(wsProto + "//" + location.host + "/overlay/" + guildId + "/ws");
+
+ws.onmessage = e => {{
+  const msg = JSON.parse(e.data);
+  if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
+}};
+
+ws.onclose = () => {{ setTimeout(() => location.reload(), 3000); }};
+
+function processQueue() {{
+  if (playing || queue.length === 0) return;
+  const item = queue.shift();
+  playing = true;
+  vid.src = item.video_url;
+  vid.volume = Math.max(0, Math.min(1, item.volume || 1));
+  vid.style.display = "block";
+  rdm.textContent = item.redeemer ? item.redeemer + " redeemed!" : "";
+  rdm.style.display = item.redeemer ? "block" : "none";
+  vid.play().catch(() => {{}});
+  vid.onended = () => {{
+    vid.style.display = "none";
+    rdm.style.display = "none";
+    vid.src = "";
+    playing = false;
+    setTimeout(processQueue, 500);
+  }};
+}}
+</script>
+</body>
+</html>"""
+    return web.Response(text=html, content_type="text/html")
+
+# ── Broadcaster Info + Rewards ────────────────────────────────────────────────
+async def get_broadcaster_info(request):
+    """Return connection status and channel rewards for a guild."""
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch("SELECT twitch_login, twitch_user_id, access_token FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+    if not rows:
+        return web.json_response({"connected": False})
+
+    token_row = rows[0]
+    access_token = token_row["access_token"]
+    twitch_login = token_row["twitch_login"]
+    broadcaster_id = token_row["twitch_user_id"]
+
+    # Fetch channel rewards from Twitch
+    rewards = []
+    try:
+        async with http_client.ClientSession() as sess:
+            resp = await sess.get(
+                f"{TWITCH_API}/channel_points/custom_rewards",
+                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
+                params={"broadcaster_id": broadcaster_id, "only_manageable_rewards": "true"}
+            )
+            if resp.status == 200:
+                data = await resp.json()
+                rewards = [{"id": r["id"], "title": r["title"], "cost": r["cost"],
+                            "is_enabled": r["is_enabled"], "background_color": r.get("background_color", "#9146FF")}
+                           for r in data.get("data", [])]
+            elif resp.status == 401:
+                return web.json_response({"connected": False, "expired": True})
+            elif resp.status == 403:
+                # Not affiliate/partner
+                rows2 = await db_fetch("SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+                return web.json_response({"connected": True, "not_affiliate": True, "twitch_login": rows2[0]["twitch_login"] if rows2 else "", "rewards": [], "triggers": []})
+    except Exception as e:
+        logger.error(f"Error fetching rewards for guild {guild_id}: {e}")
+
+    # Get existing triggers
+    triggers = await db_fetch("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+
+    return web.json_response({
+        "connected": True,
+        "twitch_login": twitch_login,
+        "rewards": rewards,
+        "triggers": triggers,
+        "overlay_url": f"https://excelprotocol.fly.dev/overlay/{guild_id}",
+    })
+
+async def upsert_reward_trigger(request):
+    """Add or update a video trigger for a reward."""
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    reward_id    = body.get("reward_id", "").strip()
+    reward_title = body.get("reward_title", "").strip()
+    video_url    = body.get("video_url", "").strip()
+    volume       = float(body.get("volume", 1.0))
+    if not reward_id or not video_url:
+        raise web.HTTPBadRequest(reason="reward_id and video_url are required")
+    await db_execute(
+        "INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume) VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id, reward_id) DO UPDATE SET reward_title=excluded.reward_title, video_url=excluded.video_url, volume=excluded.volume",
+        (guild_id, reward_id, reward_title, video_url, volume)
+    )
+    return web.json_response({"ok": True})
+
+async def delete_reward_trigger(request):
+    guild_id  = request.match_info["guild_id"]
+    reward_id = request.match_info["reward_id"]
+    await db_execute("DELETE FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+    return web.json_response({"ok": True})
+
+async def create_reward(request):
+    """Create a new channel point reward on Twitch."""
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    rows = await db_fetch("SELECT access_token, twitch_user_id FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+    if not rows:
+        raise web.HTTPUnauthorized(reason="No Twitch account connected")
+    access_token   = rows[0]["access_token"]
+    broadcaster_id = rows[0]["twitch_user_id"]
+    async with http_client.ClientSession() as sess:
+        resp = await sess.post(
+            f"{TWITCH_API}/channel_points/custom_rewards",
+            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            params={"broadcaster_id": broadcaster_id},
+            json={"title": body.get("title", "New Reward"), "cost": int(body.get("cost", 100)),
+                  "is_enabled": body.get("is_enabled", True)}
+        )
+        data = await resp.json()
+        if resp.status not in (200, 201):
+            raise web.HTTPBadRequest(reason=data.get("message", "Failed to create reward"))
+        reward = data["data"][0]
+    return web.json_response({"ok": True, "reward": {"id": reward["id"], "title": reward["title"], "cost": reward["cost"]}})
+
+async def edit_reward(request):
+    """Edit an existing channel point reward on Twitch."""
+    guild_id  = request.match_info["guild_id"]
+    reward_id = request.match_info["reward_id"]
+    body = await request.json()
+    rows = await db_fetch("SELECT access_token, twitch_user_id FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+    if not rows:
+        raise web.HTTPUnauthorized(reason="No Twitch account connected")
+    access_token   = rows[0]["access_token"]
+    broadcaster_id = rows[0]["twitch_user_id"]
+    patch = {}
+    if "title"      in body: patch["title"]      = body["title"]
+    if "cost"       in body: patch["cost"]        = int(body["cost"])
+    if "is_enabled" in body: patch["is_enabled"]  = body["is_enabled"]
+    async with http_client.ClientSession() as sess:
+        resp = await sess.patch(
+            f"{TWITCH_API}/channel_points/custom_rewards",
+            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            params={"broadcaster_id": broadcaster_id, "id": reward_id},
+            json=patch
+        )
+        if resp.status not in (200, 204):
+            data = await resp.json()
+            raise web.HTTPBadRequest(reason=data.get("message", "Failed to edit reward"))
+    return web.json_response({"ok": True})
+
+async def delete_reward(request):
+    """Delete a channel point reward from Twitch."""
+    guild_id  = request.match_info["guild_id"]
+    reward_id = request.match_info["reward_id"]
+    rows = await db_fetch("SELECT access_token, twitch_user_id FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+    if not rows:
+        raise web.HTTPUnauthorized(reason="No Twitch account connected")
+    access_token   = rows[0]["access_token"]
+    broadcaster_id = rows[0]["twitch_user_id"]
+    async with http_client.ClientSession() as sess:
+        resp = await sess.delete(
+            f"{TWITCH_API}/channel_points/custom_rewards",
+            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
+            params={"broadcaster_id": broadcaster_id, "id": reward_id}
+        )
+        if resp.status not in (200, 204):
+            raise web.HTTPBadRequest(reason="Failed to delete reward")
+    # Also remove trigger if exists
+    await db_execute("DELETE FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+    return web.json_response({"ok": True})
+
 # ── Dev Login ─────────────────────────────────────────────────────────────────
 async def auth_dev(request):
     """Password-protected dev login — creates a full-access session."""
@@ -1243,6 +1619,18 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/auth/login",    auth_login)
     app.router.add_get("/auth/callback", auth_callback)
     app.router.add_get("/auth/dev",      auth_dev)
+    app.router.add_get("/auth/twitch/login/{guild_id}",  twitch_broadcaster_login)
+    app.router.add_get("/auth/twitch/callback",          twitch_broadcaster_callback)
+    app.router.add_delete("/api/guild/{guild_id}/broadcaster",              twitch_broadcaster_disconnect)
+    app.router.add_get   ("/api/guild/{guild_id}/broadcaster",              get_broadcaster_info)
+    app.router.add_post  ("/api/guild/{guild_id}/broadcaster/triggers",     upsert_reward_trigger)
+    app.router.add_delete("/api/guild/{guild_id}/broadcaster/triggers/{reward_id}", delete_reward_trigger)
+    app.router.add_post  ("/api/guild/{guild_id}/broadcaster/rewards",      create_reward)
+    app.router.add_patch ("/api/guild/{guild_id}/broadcaster/rewards/{reward_id}", edit_reward)
+    app.router.add_delete("/api/guild/{guild_id}/broadcaster/rewards/{reward_id}", delete_reward)
+    app.router.add_post  ("/api/eventsub/callback",                         eventsub_callback)
+    app.router.add_get   ("/overlay/{guild_id}",                            overlay_page)
+    app.router.add_get   ("/overlay/{guild_id}/ws",                         overlay_ws)
     app.router.add_get   ("/api/guild/{guild_id}/twitch",                    get_twitch_info)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/commands",           add_twitch_command)
     app.router.add_delete("/api/guild/{guild_id}/twitch/commands/{command_name}", delete_twitch_command)

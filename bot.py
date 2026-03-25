@@ -127,6 +127,11 @@ class TwitchNotifierBot(discord.Client):
             self.rotate_status.start()
             logger.info("Status rotation loop started")
 
+        # Start broadcaster token refresh loop
+        if not self.refresh_broadcaster_tokens.is_running():
+            self.refresh_broadcaster_tokens.start()
+            logger.info("Broadcaster token refresh loop started")
+
         guild_count = len(self.guilds)
         await self.log_to_channel(
             "🤖", "Bot Started",
@@ -673,6 +678,47 @@ class TwitchNotifierBot(discord.Client):
 
     @rotate_status.before_loop
     async def before_rotate_status(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(hours=3)
+    async def refresh_broadcaster_tokens(self):
+        """Proactively refresh all broadcaster OAuth tokens every 3 hours."""
+        import aiohttp
+        from datetime import timezone
+        tokens = self.db.get_all_broadcaster_tokens()
+        if not tokens:
+            return
+        refreshed = 0
+        for t in tokens:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        "https://id.twitch.tv/oauth2/token",
+                        data={
+                            "grant_type": "refresh_token",
+                            "refresh_token": t["refresh_token"],
+                            "client_id": self.twitch.client_id,
+                            "client_secret": self.twitch.client_secret,
+                        }
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            from datetime import datetime, timedelta
+                            expires_at = (datetime.utcnow() + timedelta(seconds=data["expires_in"])).isoformat()
+                            self.db.set_broadcaster_token(
+                                t["guild_id"], t["twitch_user_id"], t["twitch_login"],
+                                data["access_token"], data.get("refresh_token", t["refresh_token"]), expires_at
+                            )
+                            refreshed += 1
+                        else:
+                            logger.warning(f"Failed to refresh broadcaster token for guild {t['guild_id']}: {resp.status}")
+            except Exception as e:
+                logger.error(f"Error refreshing broadcaster token for guild {t['guild_id']}: {e}")
+        if refreshed:
+            logger.info(f"Refreshed {refreshed} broadcaster token(s)")
+
+    @refresh_broadcaster_tokens.before_loop
+    async def before_refresh_broadcaster_tokens(self):
         await self.wait_until_ready()
 
     async def cleanup_channel(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool) -> int:
