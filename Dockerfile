@@ -1,5 +1,5 @@
 # Use Python slim (Debian-based but smaller than full)
-FROM python:3.11-slim-bullseye
+FROM python:3.11-slim-bullseye 
 
 # Install SQLite runtime and build dependencies
 RUN apt-get update && \
