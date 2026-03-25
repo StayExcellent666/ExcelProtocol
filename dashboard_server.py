@@ -1480,12 +1480,23 @@ async def get_broadcaster_info(request):
             resp = await sess.get(
                 f"{TWITCH_API}/channel_points/custom_rewards",
                 headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
-                params={"broadcaster_id": broadcaster_id, "only_manageable_rewards": "true"}
+                params={"broadcaster_id": broadcaster_id}
             )
             if resp.status == 200:
                 data = await resp.json()
+                # Also fetch app-managed IDs to mark which ones are editable
+                mgmt_resp = await sess.get(
+                    f"{TWITCH_API}/channel_points/custom_rewards",
+                    headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
+                    params={"broadcaster_id": broadcaster_id, "only_manageable_rewards": "true"}
+                )
+                manageable_ids = set()
+                if mgmt_resp.status == 200:
+                    mgmt_data = await mgmt_resp.json()
+                    manageable_ids = {r["id"] for r in mgmt_data.get("data", [])}
                 rewards = [{"id": r["id"], "title": r["title"], "cost": r["cost"],
-                            "is_enabled": r["is_enabled"], "background_color": r.get("background_color", "#9146FF")}
+                            "is_enabled": r["is_enabled"], "background_color": r.get("background_color", "#9146FF"),
+                            "manageable": r["id"] in manageable_ids}
                            for r in data.get("data", [])]
             elif resp.status == 401:
                 return web.json_response({"connected": False, "expired": True})
