@@ -1392,15 +1392,22 @@ async def eventsub_callback(request):
 # ── Overlay WebSocket ─────────────────────────────────────────────────────────
 async def overlay_ws(request):
     """WebSocket endpoint for OBS browser source overlays."""
+    import asyncio as _asyncio
     guild_id = request.match_info["guild_id"]
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
     _overlay_connections.setdefault(guild_id, set()).add(ws)
     try:
         async for msg in ws:
             pass  # overlay only receives, doesn't send
+    except _asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.debug(f"Overlay WS closed for guild {guild_id}: {e}")
     finally:
         _overlay_connections.get(guild_id, set()).discard(ws)
+        if not ws.closed:
+            await ws.close()
     return ws
 
 # ── Overlay HTML Page ─────────────────────────────────────────────────────────
