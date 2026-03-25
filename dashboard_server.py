@@ -1308,9 +1308,9 @@ async def _register_eventsub(broadcaster_user_id: str):
     try:
         async with http_client.ClientSession() as sess:
             logger.info(f"Registering EventSub for broadcaster {broadcaster_user_id} with callback {callback_url}")
+            app_token = await get_twitch_token()
             resp = await sess.post(
                 f"{TWITCH_API}/eventsub/subscriptions",
-                app_token = await get_twitch_token()
                 headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {app_token}", "Content-Type": "application/json"},
                 json={
                     "type": "channel.channel_points_custom_reward_redemption.add",
