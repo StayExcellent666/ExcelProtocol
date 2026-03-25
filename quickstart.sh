@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash 
 
 # Quick Start Script for Twitch Notifier Bot
 # This script helps you set up the bot quickly
