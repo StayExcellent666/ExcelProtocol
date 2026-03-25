@@ -11,6 +11,10 @@ primary_region = "fra"
   internal_port = 8080
   protocol = "tcp"
 
+  [services.http_options]
+    response_timeout = 300
+    idle_timeout = 600
+
   [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
