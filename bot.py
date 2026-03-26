@@ -106,6 +106,22 @@ class TwitchNotifierBot(discord.Client):
         """Called when bot successfully connects to Discord"""
         logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
         logger.info('------')
+
+        # Bug 2 fix: re-populate live_streamers from the DB so that streamers who
+        # were already notified before a restart are not double-notified, and so
+        # their stored message IDs can still be deleted when they go offline.
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT streamer_name FROM notification_messages")
+            rows = cursor.fetchall()
+            conn.close()
+            for (name,) in rows:
+                self.live_streamers.add(name.lower())
+            if rows:
+                logger.info(f"Restored {len(rows)} active streamer(s) from notification_messages into live_streamers")
+        except Exception as e:
+            logger.error(f"Failed to restore live_streamers from DB on startup: {e}")
         
         # Start the polling loop
         if not self.check_streams.is_running():
@@ -375,17 +391,20 @@ class TwitchNotifierBot(discord.Client):
         """Send a notification embed to the configured channel"""
         try:
             guild = self.get_guild(server_data['guild_id'])
-            channel = self.get_channel(server_data['channel_id'])
+            # Bug 3 fix: honour custom_channel_id so the stored channel_id matches
+            # where the message is actually sent (mirrors repostlive behaviour).
+            effective_channel_id = server_data.get('custom_channel_id') or server_data['channel_id']
+            channel = self.get_channel(effective_channel_id)
 
             if not channel:
-                logger.warning(f"Channel {server_data['channel_id']} not found")
+                logger.warning(f"Channel {effective_channel_id} not found")
                 if guild:
                     await self.alert_permission_issue(
                         guild,
-                        server_data['channel_id'],
+                        effective_channel_id,
                         "Notification channel not found — it may have been deleted."
                     )
-                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data['channel_id'], 'failed')
+                self.db.log_notification(server_data['guild_id'], stream['user_login'], effective_channel_id, 'failed')
                 return
 
             # Check permissions before attempting to send
@@ -403,7 +422,14 @@ class TwitchNotifierBot(discord.Client):
                     channel.id,
                     f"Missing permissions: **{', '.join(missing)}**"
                 )
-                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data['channel_id'], 'failed')
+                self.db.log_notification(server_data['guild_id'], stream['user_login'], effective_channel_id, 'failed')
+                return
+
+            # Bug 4 fix: DB-level dedup to prevent duplicate notifications during
+            # rolling deploys where multiple instances briefly run simultaneously,
+            # each with an empty live_streamers set.
+            if self.db.recent_notification_exists(server_data['guild_id'], stream['user_login']):
+                logger.info(f"Skipping duplicate notification for {stream['user_login']} in guild {server_data['guild_id']} (sent within last 10 minutes)")
                 return
 
             # Get custom color for this server (or default)
@@ -455,20 +481,20 @@ class TwitchNotifierBot(discord.Client):
             message = await channel.send(embed=embed, view=view)
             logger.info(f"Sent notification for {stream['user_name']} to {channel.guild.name}")
             
-            # Save message ID if auto-delete is enabled
-            if self.db.get_auto_delete(server_data['guild_id']):
-                self.db.save_notification_message(
-                    server_data['guild_id'],
-                    stream['user_login'],
-                    server_data['channel_id'],
-                    message.id
-                )
+            # Bug 1 fix: always save the message ID regardless of auto-delete setting.
+            # The flag is checked at delete time in delete_offline_notifications, not here.
+            self.db.save_notification_message(
+                server_data['guild_id'],
+                stream['user_login'],
+                effective_channel_id,
+                message.id
+            )
             
             # Log stream event for leaderboard
             self.db.log_stream_event(server_data['guild_id'], stream['user_login'])
 
             # Log notification for history
-            self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data['channel_id'], 'sent')
+            self.db.log_notification(server_data['guild_id'], stream['user_login'], effective_channel_id, 'sent')
 
         except discord.Forbidden:
             logger.error(f"Forbidden sending notification in guild {server_data['guild_id']}")
@@ -476,18 +502,18 @@ class TwitchNotifierBot(discord.Client):
             if guild:
                 await self.alert_permission_issue(
                     guild,
-                    server_data['channel_id'],
+                    effective_channel_id,
                     "Bot was denied permission to send messages (Forbidden error)."
                 )
             try:
-                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('channel_id', 0), 'failed')
+                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('custom_channel_id') or server_data.get('channel_id', 0), 'failed')
             except Exception:
                 pass
 
         except Exception as e:
             logger.error(f"Error sending notification: {e}", exc_info=True)
             try:
-                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('channel_id', 0), 'failed')
+                self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('custom_channel_id') or server_data.get('channel_id', 0), 'failed')
             except Exception:
                 pass
     

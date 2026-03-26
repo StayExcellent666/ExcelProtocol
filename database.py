@@ -589,6 +589,21 @@ class Database:
         conn.commit()
         conn.close()
 
+    def recent_notification_exists(self, guild_id: int, streamer_name: str, within_minutes: int = 10) -> bool:
+        """Return True if a notification was already sent for this streamer+guild within the last N minutes.
+        Used to deduplicate across bot restarts and brief multi-instance windows during deploys."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT 1 FROM notification_messages
+            WHERE guild_id = ? AND streamer_name = ?
+            AND sent_at >= datetime('now', ? || ' minutes')
+            LIMIT 1
+        ''', (guild_id, streamer_name.lower(), f'-{within_minutes}'))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+
     def save_notification_message(self, guild_id: int, streamer_name: str, channel_id: int, message_id: int):
         """Save a notification message ID for later deletion"""
         conn = self.get_connection()
