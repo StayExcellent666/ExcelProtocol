@@ -831,6 +831,8 @@ class TwitchNotifierBot(discord.Client):
                     self.db.clear_permission_issue(guild.id, channel_id)
         except Exception as e:
             logger.error(f"Error checking permissions for guild {guild.id}: {e}")
+
+    async def cleanup_channel(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool) -> int:
         """Clean up old messages in a channel"""
         try:
             channel = self.get_channel(channel_id)
