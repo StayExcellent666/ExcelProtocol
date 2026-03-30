@@ -787,7 +787,7 @@ class TwitchNotifierBot(discord.Client):
         'send_messages':   'Send Messages',
         'embed_links':     'Embed Links',
         'manage_messages': 'Manage Messages',
-        'manage_roles':    'Manage Roles',
+        'manage_roles':    'Manage Roles (server-wide)',
     }
 
     @tasks.loop(minutes=10)
