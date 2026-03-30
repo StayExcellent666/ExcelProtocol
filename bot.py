@@ -2249,17 +2249,18 @@ async def manual_notif(
     
     # Send notification
     try:
-        message = await channel.send(embed=embed, view=view)
-        
-        # Save for auto-delete if enabled
-        if bot.db.get_auto_delete(interaction.guild_id):
-            bot.db.save_notification_message(
-                interaction.guild_id,
-                stream['user_login'],
-                channel.id,
-                message.id
-            )
-        
+        ping_role_id = bot.db.get_ping_role(interaction.guild_id)
+        ping_content = f"<@&{ping_role_id}>" if ping_role_id else None
+        message = await channel.send(content=ping_content, embed=embed, view=view)
+
+        # Always save message ID (auto-delete checks flag at delete time)
+        bot.db.save_notification_message(
+            interaction.guild_id,
+            stream['user_login'],
+            channel.id,
+            message.id
+        )
+
         await interaction.followup.send(
             f"✅ Manual notification sent for {stream['user_name']} to {channel.mention}",
             ephemeral=True
