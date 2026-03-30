@@ -150,6 +150,13 @@ class Database:
             conn.commit()
             logger.info("Migration: added command_limit to server_settings")
 
+        # Migration: add ping_role_id to server_settings
+        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("server_settings") WHERE name="ping_role_id"')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('ALTER TABLE server_settings ADD COLUMN ping_role_id INTEGER DEFAULT NULL')
+            conn.commit()
+            logger.info("Migration: added ping_role_id to server_settings")
+
         # Index for faster lookups
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_guild_id 
@@ -324,10 +331,67 @@ class Database:
             )
         ''')
 
+        # Permission issues — written by bot's periodic check, read by dashboard
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS permission_issues (
+                guild_id   INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                missing    TEXT NOT NULL,
+                detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, channel_id)
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
-    
+
+    # ----------------------------------------------------------------
+    # Permission issues
+    # ----------------------------------------------------------------
+
+    def upsert_permission_issue(self, guild_id: int, channel_id: int, missing: list):
+        """Insert or replace a permission issue record."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO permission_issues (guild_id, channel_id, missing, detected_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id, channel_id) DO UPDATE SET
+                missing = excluded.missing,
+                detected_at = excluded.detected_at
+        ''', (guild_id, channel_id, ','.join(missing)))
+        conn.commit()
+        conn.close()
+
+    def clear_permission_issue(self, guild_id: int, channel_id: int):
+        """Remove a resolved permission issue."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM permission_issues WHERE guild_id = ? AND channel_id = ?', (guild_id, channel_id))
+        conn.commit()
+        conn.close()
+
+    def clear_all_permission_issues(self, guild_id: int):
+        """Remove all permission issues for a guild (e.g. on bot removal)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM permission_issues WHERE guild_id = ?', (guild_id,))
+        conn.commit()
+        conn.close()
+
+    def get_permission_issues(self, guild_id: int) -> list:
+        """Return all current permission issues for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT channel_id, missing, detected_at FROM permission_issues WHERE guild_id = ? ORDER BY detected_at DESC',
+            (guild_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'channel_id': r[0], 'missing': r[1].split(','), 'detected_at': r[2]} for r in rows]
+
     def add_streamer(self, guild_id: int, streamer_name: str, channel_id: int, custom_channel_id: int = None) -> bool:
         """
         Add a streamer to monitor for a guild.
@@ -530,6 +594,29 @@ class Database:
         conn.close()
         
         return bool(row[0]) if row else False
+
+    def set_ping_role(self, guild_id: int, role_id: Optional[int]):
+        """Set or clear the ping role for stream notifications."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO server_settings (guild_id, notification_channel_id, ping_role_id)
+            VALUES (?, 0, ?)
+            ON CONFLICT(guild_id)
+            DO UPDATE SET ping_role_id = ?
+        ''', (guild_id, role_id, role_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"Set ping_role_id for guild {guild_id} to {role_id}")
+
+    def get_ping_role(self, guild_id: int) -> Optional[int]:
+        """Get the ping role ID for stream notifications (None if not set)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT ping_role_id FROM server_settings WHERE guild_id = ?', (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row and row[0] else None
 
     def set_milestone_notifications(self, guild_id: int, enabled: bool):
         """Enable or disable milestone notifications for a server"""
@@ -1218,6 +1305,7 @@ class Database:
         cursor.execute('DELETE FROM reward_triggers WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM milestone_sent WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM stream_events WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM permission_issues WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()

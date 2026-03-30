@@ -148,6 +148,11 @@ class TwitchNotifierBot(discord.Client):
             self.refresh_broadcaster_tokens.start()
             logger.info("Broadcaster token refresh loop started")
 
+        # Start permission check loop
+        if not self.check_permissions.is_running():
+            self.check_permissions.start()
+            logger.info("Permission check loop started")
+
         guild_count = len(self.guilds)
         await self.log_to_channel(
             "🤖", "Bot Started",
@@ -171,10 +176,7 @@ class TwitchNotifierBot(discord.Client):
     async def on_guild_remove(self, guild):
         """Called when bot is removed from a server - clean up data"""
         logger.info(f"Bot removed from guild: {guild.name} (ID: {guild.id})")
-        
-        # Clean up all data for this guild
         self.db.cleanup_guild(guild.id)
-        
         logger.info(f"Cleaned up all data for guild {guild.id}")
     
     @tasks.loop(seconds=CHECK_INTERVAL_SECONDS)
@@ -432,6 +434,10 @@ class TwitchNotifierBot(discord.Client):
                 logger.info(f"Skipping duplicate notification for {stream['user_login']} in guild {server_data['guild_id']} (sent within last 10 minutes)")
                 return
 
+            # Resolve ping role (if configured)
+            ping_role_id = self.db.get_ping_role(server_data['guild_id'])
+            ping_content = f"<@&{ping_role_id}>" if ping_role_id else None
+
             # Get custom color for this server (or default)
             embed_color = self.db.get_embed_color(server_data['guild_id'])
             
@@ -478,7 +484,7 @@ class TwitchNotifierBot(discord.Client):
             ))
             
             # Send the notification
-            message = await channel.send(embed=embed, view=view)
+            message = await channel.send(content=ping_content, embed=embed, view=view)
             logger.info(f"Sent notification for {stream['user_name']} to {channel.guild.name}")
             
             # Bug 1 fix: always save the message ID regardless of auto-delete setting.
@@ -774,7 +780,57 @@ class TwitchNotifierBot(discord.Client):
     async def before_refresh_broadcaster_tokens(self):
         await self.wait_until_ready()
 
-    async def cleanup_channel(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool) -> int:
+    # ── Permission Check Loop ─────────────────────────────────────────────────
+
+    REQUIRED_PERMS = {
+        'view_channel':    'View Channel',
+        'send_messages':   'Send Messages',
+        'embed_links':     'Embed Links',
+        'manage_messages': 'Manage Messages',
+        'manage_roles':    'Manage Roles',
+    }
+
+    @tasks.loop(minutes=10)
+    async def check_permissions(self):
+        """Periodically check bot permissions in all configured notification channels."""
+        try:
+            for guild in self.guilds:
+                await self._check_guild_permissions(guild)
+        except Exception as e:
+            logger.error(f"Error in permission check loop: {e}", exc_info=True)
+
+    @check_permissions.before_loop
+    async def before_check_permissions(self):
+        await self.wait_until_ready()
+
+    async def _check_guild_permissions(self, guild):
+        """Check permissions for every notification channel in a guild and update the DB."""
+        try:
+            streamers = self.db.get_server_streamers(guild.id)
+            if not streamers:
+                return
+
+            # Collect all unique channel IDs that need checking
+            channel_ids = set()
+            for s in streamers:
+                channel_ids.add(s.get('custom_channel_id') or s['channel_id'])
+
+            for channel_id in channel_ids:
+                channel = self.get_channel(channel_id)
+                if not channel:
+                    continue
+                perms = channel.permissions_for(guild.me)
+                missing = [
+                    label for attr, label in self.REQUIRED_PERMS.items()
+                    if not getattr(perms, attr, True)
+                ]
+                if missing:
+                    self.db.upsert_permission_issue(guild.id, channel_id, missing)
+                    logger.warning(f"Permission issues in #{channel.name} ({guild.name}): {missing}")
+                else:
+                    self.db.clear_permission_issue(guild.id, channel_id)
+        except Exception as e:
+            logger.error(f"Error checking permissions for guild {guild.id}: {e}")
         """Clean up old messages in a channel"""
         try:
             channel = self.get_channel(channel_id)

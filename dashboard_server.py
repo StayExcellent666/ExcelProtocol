@@ -577,17 +577,20 @@ async def get_roles_list(request):
         return web.json_response([])
 
 # ── Create Reaction Role Panel ────────────────────────────────────────────────
-async def _resolve_role_id(guild_id: str, role_id: str, new_role_name: str = None) -> str:
+async def _resolve_role_id(guild_id: str, role_id: str, new_role_name: str = None, new_role_color: int = None) -> str:
     """If role_id is __create__, create the role in Discord and return the real ID."""
     if role_id != "__create__":
         return role_id
     if not new_role_name or not new_role_name.strip():
         raise web.HTTPBadRequest(reason="New role name is required when creating a role")
+    role_payload = {"name": new_role_name.strip()}
+    if new_role_color is not None:
+        role_payload["color"] = int(new_role_color)
     async with http_client.ClientSession() as session:
         resp = await session.post(
             f"{DISCORD_API}/guilds/{guild_id}/roles",
             headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
-            json={"name": new_role_name.strip()},
+            json=role_payload,
         )
         if resp.status not in (200, 201):
             err = await resp.text()
@@ -961,7 +964,7 @@ async def get_guild_members(request):
 async def get_server_settings(request):
     guild_id = request.match_info["guild_id"]
     rows = await db_fetch(
-        "SELECT notification_channel_id, embed_color, auto_delete_notifications, milestone_notifications FROM server_settings WHERE guild_id = ?",
+        "SELECT notification_channel_id, embed_color, auto_delete_notifications, milestone_notifications, ping_role_id FROM server_settings WHERE guild_id = ?",
         (guild_id,)
     )
     bday = await db_fetch("SELECT channel_id FROM birthday_channels WHERE guild_id = ?", (guild_id,))
@@ -974,6 +977,7 @@ async def get_server_settings(request):
         "auto_delete_notifications": bool(s.get("auto_delete_notifications", 0)),
         "milestone_notifications": bool(s.get("milestone_notifications", 0)),
         "birthday_channel_id": str(bday[0]["channel_id"]) if bday else None,
+        "ping_role_id": str(s["ping_role_id"]) if s.get("ping_role_id") else None,
     })
 
 async def patch_server_settings(request):
@@ -1019,6 +1023,28 @@ async def patch_server_settings(request):
             "INSERT INTO birthday_channels (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id = ?",
             (guild_id, cid, cid)
         )
+
+    if "ping_role_id" in body:
+        raw = body["ping_role_id"]
+        if raw is None or raw == "":
+            # Clear the ping role
+            await db_execute(
+                "INSERT INTO server_settings (guild_id, notification_channel_id, ping_role_id) VALUES (?, 0, NULL) ON CONFLICT(guild_id) DO UPDATE SET ping_role_id = NULL",
+                (guild_id,)
+            )
+        else:
+            # May be "__create__" with accompanying new_role_name / new_role_color
+            resolved = await _resolve_role_id(
+                guild_id,
+                str(raw),
+                body.get("new_role_name"),
+                body.get("new_role_color"),
+            )
+            rid = int(resolved)
+            await db_execute(
+                "INSERT INTO server_settings (guild_id, notification_channel_id, ping_role_id) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET ping_role_id = ?",
+                (guild_id, rid, rid)
+            )
 
     return web.json_response({"ok": True})
 
@@ -1621,7 +1647,36 @@ async def delete_reward(request):
     await db_execute("DELETE FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
     return web.json_response({"ok": True})
 
-# ── Dev Login ─────────────────────────────────────────────────────────────────
+# ── Permission Issues ─────────────────────────────────────────────────────────
+async def get_permission_issues(request):
+    """Return current permission issues for a guild."""
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch(
+        "SELECT channel_id, missing, detected_at FROM permission_issues WHERE guild_id = ? ORDER BY detected_at DESC",
+        (guild_id,)
+    )
+    result = []
+    for r in rows:
+        ch_name = await get_channel_name(str(r["channel_id"]))
+        result.append({
+            "channel_id":   str(r["channel_id"]),
+            "channel_name": ch_name,
+            "missing":      r["missing"].split(","),
+            "detected_at":  r["detected_at"],
+        })
+    return web.json_response(result)
+
+async def recheck_permissions(request):
+    """Trigger an immediate permission re-check for a guild via the bot."""
+    guild_id = request.match_info["guild_id"]
+    if _bot_ref is None:
+        raise web.HTTPServiceUnavailable(reason="Bot not available")
+    guild = _bot_ref.get_guild(int(guild_id))
+    if not guild:
+        raise web.HTTPNotFound(reason="Guild not found")
+    import asyncio as _asyncio
+    _asyncio.create_task(_bot_ref._check_guild_permissions(guild))
+    return web.json_response({"ok": True})
 async def auth_dev(request):
     """Password-protected dev login — creates a full-access session."""
     password = request.rel_url.query.get("password", "")
@@ -1690,6 +1745,8 @@ def create_dashboard_app(bot=None):
     app.router.add_post ("/api/guild/{guild_id}/cleanup",               add_cleanup_config)
     app.router.add_patch("/api/guild/{guild_id}/cleanup/{channel_id}",  edit_cleanup_config)
     app.router.add_delete("/api/guild/{guild_id}/cleanup/{channel_id}", delete_cleanup_config)
+    app.router.add_get  ("/api/guild/{guild_id}/permission-issues",     get_permission_issues)
+    app.router.add_post ("/api/guild/{guild_id}/permission-issues/recheck", recheck_permissions)
 
     dist_path = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
     if os.path.exists(dist_path):
