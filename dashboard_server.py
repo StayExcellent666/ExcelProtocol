@@ -79,10 +79,17 @@ async def get_channel_name(channel_id: str) -> str:
         return channel_id
 
 async def get_guild_roles(guild_id: str) -> dict:
-    """Returns {role_id: {name, color}} for all roles in a guild."""
+    """Returns {role_id: {name, color}} for all roles in a guild. Not cached — roles can be renamed."""
     try:
-        roles = await discord_get(f"/guilds/{guild_id}/roles")
-        return {str(r["id"]): {"name": r["name"], "color": r["color"]} for r in roles}
+        async with http_client.ClientSession() as session:
+            async with session.get(
+                f"{DISCORD_API}/guilds/{guild_id}/roles",
+                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+            ) as resp:
+                if resp.status != 200:
+                    return {}
+                roles = await resp.json()
+                return {str(r["id"]): {"name": r["name"], "color": r["color"]} for r in roles}
     except Exception:
         return {}
 
@@ -332,7 +339,7 @@ async def get_guild_summary(request):
         (guild_id,)
     )
     reaction_roles_raw = await db_fetch(
-        "SELECT message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json FROM reaction_roles WHERE guild_id = ?",
+        "SELECT message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json, body_text FROM reaction_roles WHERE guild_id = ?",
         (guild_id,)
     )
     notif_log = await db_fetch(
@@ -465,7 +472,7 @@ async def delete_streamer(request):
 async def get_reaction_roles(request):
     guild_id = request.match_info["guild_id"]
     rows = await db_fetch(
-        "SELECT message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json FROM reaction_roles WHERE guild_id = ?",
+        "SELECT message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json, body_text FROM reaction_roles WHERE guild_id = ?",
         (guild_id,)
     )
     guild_roles = await get_guild_roles(guild_id)
@@ -568,11 +575,18 @@ async def get_emojis(request):
 async def get_roles_list(request):
     guild_id = request.match_info["guild_id"]
     try:
-        roles = await discord_get(f"/guilds/{guild_id}/roles")
-        return web.json_response([
-            {"id": str(r["id"]), "name": r["name"], "color": r["color"]}
-            for r in roles if r["name"] != "@everyone"
-        ])
+        async with http_client.ClientSession() as session:
+            async with session.get(
+                f"{DISCORD_API}/guilds/{guild_id}/roles",
+                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+            ) as resp:
+                if resp.status != 200:
+                    return web.json_response([])
+                roles = await resp.json()
+                return web.json_response([
+                    {"id": str(r["id"]), "name": r["name"], "color": r["color"]}
+                    for r in roles if r["name"] != "@everyone"
+                ])
     except Exception:
         return web.json_response([])
 
@@ -613,6 +627,7 @@ async def create_reaction_role(request):
     max_roles  = body.get("max_roles")
     channel_id = body.get("channel_id")
     roles      = body.get("roles", [])
+    body_text  = body.get("body_text", "").strip() or None
 
     if not title or not channel_id or not roles:
         raise web.HTTPBadRequest(reason="title, channel_id and roles are required")
@@ -643,7 +658,7 @@ async def create_reaction_role(request):
     embed_color = _bot_ref.db.get_embed_color(int(guild_id))
 
     import discord
-    embed = discord.Embed(title=title, color=embed_color)
+    embed = discord.Embed(title=title, description=body_text, color=embed_color)
 
     # Build a temporary view to post (message_id=0), then re-edit with correct ID
     temp_entry = {
@@ -655,9 +670,13 @@ async def create_reaction_role(request):
         "only_add": only_add,
         "max_roles": max_roles,
         "roles": roles,
+        "body_text": body_text,
     }
     temp_view = rr_module._build_view(temp_entry, _bot_ref)
-    message = await channel.send(embed=embed, view=temp_view)
+    try:
+        message = await channel.send(embed=embed, view=temp_view)
+    except discord.Forbidden:
+        raise web.HTTPForbidden(reason=f"Bot is missing permissions in #{channel.name} — check Send Messages and Embed Links.")
 
     # Now rebuild the view with the real message_id and edit
     real_entry = {**temp_entry, "message_id": message.id}
@@ -675,6 +694,7 @@ async def create_reaction_role(request):
         only_add=only_add,
         max_roles=max_roles,
         roles=roles,
+        body_text=body_text,
     )
 
     logger.info(f"Dashboard created RR panel '{title}' in #{channel.name} (msg {message.id})")
@@ -692,6 +712,8 @@ async def edit_streamer(request):
         "UPDATE monitored_streamers SET custom_channel_id = ? WHERE guild_id = ? AND streamer_name = ?",
         (channel_id, guild_id, username.lower()),
     )
+    # Clear stale permission issues — next check will re-evaluate with new channel
+    await db_execute("DELETE FROM permission_issues WHERE guild_id = ?", (guild_id,))
     return web.json_response({"ok": True})
 
 # ── Edit Reaction Role Panel ──────────────────────────────────────────────────
@@ -712,10 +734,11 @@ async def edit_reaction_role(request):
         raise web.HTTPNotFound(reason="Panel not found")
 
     # Merge updates into the entry
-    if "title" in body:   entry["title"]     = body["title"]
-    if "type" in body:    entry["type"]      = body["type"]
-    if "only_add" in body: entry["only_add"] = body["only_add"]
+    if "title" in body:     entry["title"]     = body["title"]
+    if "type" in body:      entry["type"]      = body["type"]
+    if "only_add" in body:  entry["only_add"]  = body["only_add"]
     if "max_roles" in body: entry["max_roles"] = body["max_roles"]
+    if "body_text" in body: entry["body_text"] = body["body_text"].strip() or None
     if "roles" in body:
         # Resolve any __create__ role IDs first, then convert to int
         for r in body["roles"]:
@@ -732,6 +755,7 @@ async def edit_reaction_role(request):
         only_add=entry["only_add"],
         max_roles=entry["max_roles"],
         roles=entry["roles"],
+        body_text=entry.get("body_text"),
     )
 
     # Edit the actual Discord message
@@ -742,7 +766,7 @@ async def edit_reaction_role(request):
             try:
                 msg = await channel.fetch_message(int(message_id))
                 embed_color = _bot_ref.db.get_embed_color(int(guild_id))
-                embed = discord.Embed(title=entry["title"], color=embed_color)
+                embed = discord.Embed(title=entry["title"], description=entry.get("body_text") or None, color=embed_color)
                 view = rr_module._build_view(entry, _bot_ref)
                 await msg.edit(embed=embed, view=view)
                 _bot_ref.add_view(view, message_id=int(message_id))
@@ -994,6 +1018,8 @@ async def patch_server_settings(request):
             "UPDATE monitored_streamers SET channel_id = ? WHERE guild_id = ? AND custom_channel_id IS NULL",
             (cid, guild_id)
         )
+        # Clear stale permission issues — next periodic check will re-evaluate current channels
+        await db_execute("DELETE FROM permission_issues WHERE guild_id = ?", (guild_id,))
 
     if "embed_color" in body:
         hex_str = body["embed_color"].lstrip("#")

@@ -97,6 +97,13 @@ class CreateSettingsModal(discord.ui.Modal, title="Create Reaction Role"):
         placeholder="e.g. Choose the games you play",
         max_length=100
     )
+    body_text = discord.ui.TextInput(
+        label="Body Text (optional)",
+        placeholder="e.g. Pick the roles that apply to you",
+        max_length=2000,
+        required=False,
+        style=discord.TextStyle.paragraph
+    )
     only_add = discord.ui.TextInput(
         label="Only Add? (true/false)",
         placeholder="false",
@@ -124,6 +131,7 @@ class CreateSettingsModal(discord.ui.Modal, title="Create Reaction Role"):
             "guild_id": interaction.guild_id,
             "channel_id": interaction.channel_id,
             "title": self.rr_title.value.strip(),
+            "body_text": self.body_text.value.strip() or None,
             "type": "dropdown",
             "only_add": only_add_val,
             "max_roles": max_val,
@@ -163,6 +171,12 @@ class CreateSettingsModal(discord.ui.Modal, title="Create Reaction Role"):
 
 class EditSettingsModal(discord.ui.Modal, title="Edit Reaction Role"):
     rr_title = discord.ui.TextInput(label="Title", max_length=100)
+    body_text = discord.ui.TextInput(
+        label="Body Text (optional)",
+        max_length=2000,
+        required=False,
+        style=discord.TextStyle.paragraph
+    )
     only_add = discord.ui.TextInput(label="Only Add? (true/false)", max_length=5, required=False)
     max_roles = discord.ui.TextInput(label="Max roles a user can pick (0 = unlimited)", max_length=2, required=False)
 
@@ -171,6 +185,7 @@ class EditSettingsModal(discord.ui.Modal, title="Edit Reaction Role"):
         self.message_id = message_id
         self.entry = entry
         self.rr_title.default = entry.get("title", "")
+        self.body_text.default = entry.get("body_text") or ""
         self.only_add.default = str(entry.get("only_add", False)).lower()
         self.max_roles.default = str(entry.get("max_roles") or 0)
 
@@ -185,6 +200,7 @@ class EditSettingsModal(discord.ui.Modal, title="Edit Reaction Role"):
         updated = {
             **self.entry,
             "title": self.rr_title.value.strip(),
+            "body_text": self.body_text.value.strip() or None,
             "only_add": only_add_val,
             "max_roles": max_val,
             "editing_message_id": self.message_id,
@@ -588,6 +604,7 @@ async def setup(bot):
 
         embed = discord.Embed(
             title=session["title"],
+            description=session.get("body_text") or None,
             color=_get_embed_color(session["guild_id"])
         )
 
@@ -613,7 +630,8 @@ async def setup(bot):
                     rr_type=session["type"],
                     only_add=session["only_add"],
                     max_roles=session["max_roles"],
-                    roles=session["roles"]
+                    roles=session["roles"],
+                    body_text=session.get("body_text"),
                 )
                 del _sessions[interaction.user.id]
                 await interaction.followup.send("✅ Reaction role message updated!", ephemeral=True)
@@ -641,7 +659,8 @@ async def setup(bot):
                 rr_type=session["type"],
                 only_add=session["only_add"],
                 max_roles=session["max_roles"],
-                roles=session["roles"]
+                roles=session["roles"],
+                body_text=session.get("body_text"),
             )
 
             del _sessions[interaction.user.id]
@@ -686,7 +705,7 @@ async def setup(bot):
         entry["roles"] = sorted(entry["roles"], key=lambda r: r["label"].lower())
         bot.db.rr_update_roles(int(message_id), entry["roles"])
 
-        embed = discord.Embed(title=entry["title"], color=_get_embed_color(entry["guild_id"]))
+        embed = discord.Embed(title=entry["title"], description=entry.get("body_text") or None, color=_get_embed_color(entry["guild_id"]))
         view = _build_view(entry, bot)
 
         try:

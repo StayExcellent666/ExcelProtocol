@@ -157,6 +157,13 @@ class Database:
             conn.commit()
             logger.info("Migration: added ping_role_id to server_settings")
 
+        # Migration: add body_text to reaction_roles
+        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("reaction_roles") WHERE name="body_text"')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('ALTER TABLE reaction_roles ADD COLUMN body_text TEXT DEFAULT NULL')
+            conn.commit()
+            logger.info("Migration: added body_text to reaction_roles")
+
         # Index for faster lookups
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_guild_id 
@@ -1385,14 +1392,14 @@ class Database:
     # ----------------------------------------------------------------
 
     def rr_save(self, message_id: int, guild_id: int, channel_id: int, title: str,
-                rr_type: str, only_add: bool, max_roles, roles: list):
+                rr_type: str, only_add: bool, max_roles, roles: list, body_text: str = None):
         """Save or update a reaction role panel."""
         import json
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO reaction_roles (message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO reaction_roles (message_id, guild_id, channel_id, title, type, only_add, max_roles, roles_json, body_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 guild_id   = excluded.guild_id,
                 channel_id = excluded.channel_id,
@@ -1400,9 +1407,10 @@ class Database:
                 type       = excluded.type,
                 only_add   = excluded.only_add,
                 max_roles  = excluded.max_roles,
-                roles_json = excluded.roles_json
+                roles_json = excluded.roles_json,
+                body_text  = excluded.body_text
         ''', (message_id, guild_id, channel_id, title, rr_type,
-              1 if only_add else 0, max_roles, json.dumps(roles)))
+              1 if only_add else 0, max_roles, json.dumps(roles), body_text or None))
         conn.commit()
         conn.close()
 
@@ -1419,7 +1427,8 @@ class Database:
         return {
             'message_id': row[0], 'guild_id': row[1], 'channel_id': row[2],
             'title': row[3], 'type': row[4], 'only_add': bool(row[5]),
-            'max_roles': row[6], 'roles': json.loads(row[7])
+            'max_roles': row[6], 'roles': json.loads(row[7]),
+            'body_text': row[8] if len(row) > 8 else None,
         }
 
     def rr_get_all(self) -> list:
@@ -1433,7 +1442,8 @@ class Database:
         return [{
             'message_id': r[0], 'guild_id': r[1], 'channel_id': r[2],
             'title': r[3], 'type': r[4], 'only_add': bool(r[5]),
-            'max_roles': r[6], 'roles': json.loads(r[7])
+            'max_roles': r[6], 'roles': json.loads(r[7]),
+            'body_text': r[8] if len(r) > 8 else None,
         } for r in rows]
 
     def rr_get_for_guild(self, guild_id: int) -> list:
@@ -1447,7 +1457,8 @@ class Database:
         return [{
             'message_id': r[0], 'guild_id': r[1], 'channel_id': r[2],
             'title': r[3], 'type': r[4], 'only_add': bool(r[5]),
-            'max_roles': r[6], 'roles': json.loads(r[7])
+            'max_roles': r[6], 'roles': json.loads(r[7]),
+            'body_text': r[8] if len(r) > 8 else None,
         } for r in rows]
 
     def rr_delete(self, message_id: int):
