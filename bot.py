@@ -787,7 +787,10 @@ class TwitchNotifierBot(discord.Client):
         'send_messages':   'Send Messages',
         'embed_links':     'Embed Links',
         'manage_messages': 'Manage Messages',
-        'manage_roles':    'Manage Roles (server-wide)',
+    }
+    # Checked once at guild level, not per-channel
+    GUILD_PERMS = {
+        'manage_roles': 'Manage Roles (server-wide)',
     }
 
     @tasks.loop(minutes=10)
@@ -810,6 +813,13 @@ class TwitchNotifierBot(discord.Client):
             if not streamers:
                 return
 
+            # Check guild-level permissions once (e.g. manage_roles)
+            guild_perms = guild.me.guild_permissions
+            guild_missing = [
+                label for attr, label in self.GUILD_PERMS.items()
+                if not getattr(guild_perms, attr, True)
+            ]
+
             # Collect all unique channel IDs that need checking
             channel_ids = set()
             for s in streamers:
@@ -823,7 +833,8 @@ class TwitchNotifierBot(discord.Client):
                 missing = [
                     label for attr, label in self.REQUIRED_PERMS.items()
                     if not getattr(perms, attr, True)
-                ]
+                ] + guild_missing
+
                 if missing:
                     self.db.upsert_permission_issue(guild.id, channel_id, missing)
                     logger.warning(f"Permission issues in #{channel.name} ({guild.name}): {missing}")
