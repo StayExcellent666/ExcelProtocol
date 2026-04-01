@@ -153,6 +153,11 @@ class TwitchNotifierBot(discord.Client):
             self.check_permissions.start()
             logger.info("Permission check loop started")
 
+        # Start stat channel update loop
+        if not self.update_stat_channels.is_running():
+            self.update_stat_channels.start()
+            logger.info("Stat channel update loop started")
+
         guild_count = len(self.guilds)
         await self.log_to_channel(
             "🤖", "Bot Started",
@@ -842,6 +847,41 @@ class TwitchNotifierBot(discord.Client):
                     self.db.clear_permission_issue(guild.id, channel_id)
         except Exception as e:
             logger.error(f"Error checking permissions for guild {guild.id}: {e}")
+
+    # ── Stat Channel Update Loop ──────────────────────────────────────────────
+
+    @tasks.loop(minutes=15)
+    async def update_stat_channels(self):
+        """Update voice channel names with live member counts every 15 minutes."""
+        try:
+            configs = self.db.get_all_stat_channels()
+            if not configs:
+                return
+            for cfg in configs:
+                try:
+                    guild = self.get_guild(cfg['guild_id'])
+                    if not guild:
+                        continue
+                    channel = guild.get_channel(cfg['channel_id'])
+                    if not channel:
+                        continue
+                    count = guild.member_count
+                    new_name = cfg['format'].replace('{count}', f'{count:,}')
+                    # Only update if the name actually changed to avoid wasting the rate limit
+                    if channel.name != new_name:
+                        await channel.edit(name=new_name, reason="ExcelProtocol stat update")
+                        self.db.update_stat_channel_timestamp(cfg['guild_id'], cfg['channel_id'])
+                        logger.info(f"Updated stat channel '{new_name}' in {guild.name}")
+                except discord.Forbidden:
+                    logger.warning(f"Missing permission to edit stat channel {cfg['channel_id']} in guild {cfg['guild_id']}")
+                except Exception as e:
+                    logger.error(f"Error updating stat channel {cfg['channel_id']}: {e}")
+        except Exception as e:
+            logger.error(f"Error in update_stat_channels loop: {e}", exc_info=True)
+
+    @update_stat_channels.before_loop
+    async def before_update_stat_channels(self):
+        await self.wait_until_ready()
 
     async def cleanup_channel(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool) -> int:
         """Clean up old messages in a channel"""

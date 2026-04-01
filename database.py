@@ -349,6 +349,17 @@ class Database:
             )
         ''')
 
+        # Stat channels — voice channels whose names are updated with live member counts
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS stat_channels (
+                guild_id    INTEGER NOT NULL,
+                channel_id  INTEGER NOT NULL,
+                format      TEXT NOT NULL DEFAULT 'Members: {count}',
+                last_updated TIMESTAMP DEFAULT NULL,
+                PRIMARY KEY (guild_id, channel_id)
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -398,6 +409,59 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [{'channel_id': r[0], 'missing': r[1].split(','), 'detected_at': r[2]} for r in rows]
+
+    # ----------------------------------------------------------------
+    # Stat channels
+    # ----------------------------------------------------------------
+
+    def set_stat_channel(self, guild_id: int, channel_id: int, fmt: str):
+        """Add or update a stat channel for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO stat_channels (guild_id, channel_id, format)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, channel_id) DO UPDATE SET format = excluded.format
+        ''', (guild_id, channel_id, fmt))
+        conn.commit()
+        conn.close()
+
+    def remove_stat_channel(self, guild_id: int, channel_id: int):
+        """Remove a stat channel."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM stat_channels WHERE guild_id = ? AND channel_id = ?', (guild_id, channel_id))
+        conn.commit()
+        conn.close()
+
+    def get_stat_channels(self, guild_id: int) -> list:
+        """Get all stat channels for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT channel_id, format, last_updated FROM stat_channels WHERE guild_id = ?', (guild_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'channel_id': r[0], 'format': r[1], 'last_updated': r[2]} for r in rows]
+
+    def get_all_stat_channels(self) -> list:
+        """Get all stat channels across all guilds."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT guild_id, channel_id, format, last_updated FROM stat_channels')
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'guild_id': r[0], 'channel_id': r[1], 'format': r[2], 'last_updated': r[3]} for r in rows]
+
+    def update_stat_channel_timestamp(self, guild_id: int, channel_id: int):
+        """Record when a stat channel was last updated."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE stat_channels SET last_updated = CURRENT_TIMESTAMP WHERE guild_id = ? AND channel_id = ?',
+            (guild_id, channel_id)
+        )
+        conn.commit()
+        conn.close()
 
     def add_streamer(self, guild_id: int, streamer_name: str, channel_id: int, custom_channel_id: int = None) -> bool:
         """
@@ -1313,6 +1377,7 @@ class Database:
         cursor.execute('DELETE FROM milestone_sent WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM stream_events WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM permission_issues WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM stat_channels WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()

@@ -7,6 +7,7 @@ Enriches data with Discord + Twitch API calls.
 """
 
 import os
+import asyncio
 import json
 import secrets
 import aiosqlite
@@ -111,12 +112,31 @@ async def get_guild_channels(guild_id: str) -> list:
                 if resp.status != 200:
                     return []
                 channels = await resp.json()
-                # Type 0 = text channel, type 4 = category
+                # Type 0 = text channel, type 2 = voice channel, type 4 = category
                 text = [
                     {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0), "parent_id": str(c.get("parent_id") or "")}
                     for c in channels if c.get("type") == 0
                 ]
                 return sorted(text, key=lambda c: c["position"])
+    except Exception:
+        return []
+
+async def get_guild_voice_channels(guild_id: str) -> list:
+    """Return list of voice channels for a guild: [{id, name, position}]"""
+    try:
+        async with http_client.ClientSession() as session:
+            async with session.get(
+                f"{DISCORD_API}/guilds/{guild_id}/channels",
+                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                channels = await resp.json()
+                voice = [
+                    {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0)}
+                    for c in channels if c.get("type") == 2
+                ]
+                return sorted(voice, key=lambda c: c["position"])
     except Exception:
         return []
 
@@ -546,11 +566,13 @@ async def get_notif_log(request):
 # ── Guild Channels ───────────────────────────────────────────────────────────
 async def get_channels(request):
     guild_id = request.match_info["guild_id"]
-    channels = await get_guild_channels(guild_id)
-    # Also get the default notification channel from server_settings
+    channels, voice_channels = await asyncio.gather(
+        get_guild_channels(guild_id),
+        get_guild_voice_channels(guild_id),
+    )
     rows = await db_fetch("SELECT notification_channel_id FROM server_settings WHERE guild_id = ?", (guild_id,))
     default_channel_id = str(rows[0]["notification_channel_id"]) if rows else None
-    return web.json_response({"channels": channels, "default_channel_id": default_channel_id})
+    return web.json_response({"channels": channels, "voice_channels": voice_channels, "default_channel_id": default_channel_id})
 
 # ── Guild Emojis ─────────────────────────────────────────────────────────────
 async def get_emojis(request):
@@ -1703,6 +1725,75 @@ async def recheck_permissions(request):
     import asyncio as _asyncio
     _asyncio.create_task(_bot_ref._check_guild_permissions(guild))
     return web.json_response({"ok": True})
+
+# ── Stat Channels ─────────────────────────────────────────────────────────────
+async def get_stat_channels(request):
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch(
+        "SELECT channel_id, format, last_updated FROM stat_channels WHERE guild_id = ?",
+        (guild_id,)
+    )
+    result = []
+    for r in rows:
+        ch_name = str(r["channel_id"])
+        if _bot_ref:
+            guild = _bot_ref.get_guild(int(guild_id))
+            if guild:
+                ch = guild.get_channel(r["channel_id"])
+                if ch:
+                    ch_name = ch.name
+        result.append({
+            "channel_id":   str(r["channel_id"]),
+            "channel_name": ch_name,
+            "format":       r["format"],
+            "last_updated": r["last_updated"],
+        })
+    return web.json_response(result)
+
+async def set_stat_channel(request):
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    channel_id = body.get("channel_id")
+    fmt = body.get("format", "Members: {count}").strip()
+    if not channel_id:
+        raise web.HTTPBadRequest(reason="channel_id is required")
+    if "{count}" not in fmt:
+        raise web.HTTPBadRequest(reason="format must contain {count}")
+    await db_execute(
+        "INSERT INTO stat_channels (guild_id, channel_id, format) VALUES (?, ?, ?) ON CONFLICT(guild_id, channel_id) DO UPDATE SET format = excluded.format",
+        (guild_id, int(channel_id), fmt)
+    )
+    # Trigger an immediate update via the bot
+    if _bot_ref:
+        import asyncio as _asyncio
+        async def _immediate_update():
+            try:
+                guild = _bot_ref.get_guild(int(guild_id))
+                if not guild:
+                    return
+                channel = guild.get_channel(int(channel_id))
+                if not channel:
+                    return
+                new_name = fmt.replace('{count}', f'{guild.member_count:,}')
+                await channel.edit(name=new_name, reason="ExcelProtocol stat update")
+                await db_execute(
+                    "UPDATE stat_channels SET last_updated = CURRENT_TIMESTAMP WHERE guild_id = ? AND channel_id = ?",
+                    (guild_id, int(channel_id))
+                )
+            except Exception as e:
+                logger.warning(f"Immediate stat update failed: {e}")
+        _asyncio.create_task(_immediate_update())
+    return web.json_response({"ok": True})
+
+async def delete_stat_channel(request):
+    guild_id   = request.match_info["guild_id"]
+    channel_id = request.match_info["channel_id"]
+    await db_execute(
+        "DELETE FROM stat_channels WHERE guild_id = ? AND channel_id = ?",
+        (guild_id, int(channel_id))
+    )
+    return web.json_response({"ok": True})
+
 async def auth_dev(request):
     """Password-protected dev login — creates a full-access session."""
     password = request.rel_url.query.get("password", "")
@@ -1773,6 +1864,9 @@ def create_dashboard_app(bot=None):
     app.router.add_delete("/api/guild/{guild_id}/cleanup/{channel_id}", delete_cleanup_config)
     app.router.add_get  ("/api/guild/{guild_id}/permission-issues",     get_permission_issues)
     app.router.add_post ("/api/guild/{guild_id}/permission-issues/recheck", recheck_permissions)
+    app.router.add_get   ("/api/guild/{guild_id}/stat-channels",            get_stat_channels)
+    app.router.add_post  ("/api/guild/{guild_id}/stat-channels",            set_stat_channel)
+    app.router.add_delete("/api/guild/{guild_id}/stat-channels/{channel_id}", delete_stat_channel)
 
     dist_path = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
     if os.path.exists(dist_path):
