@@ -961,6 +961,22 @@ class TwitchNotifierBot(discord.Client):
 # Initialize bot
 bot = TwitchNotifierBot()
 
+def sanitise_streamer_name(raw: str) -> str:
+    """Strip URLs and whitespace from a streamer input, returning just the username.
+    Handles inputs like 'https://twitch.tv/username', 'twitch.tv/username', '@username'."""
+    name = raw.strip()
+    # Strip full URL forms
+    for prefix in ("https://www.twitch.tv/", "http://www.twitch.tv/",
+                   "https://twitch.tv/", "http://twitch.tv/", "twitch.tv/"):
+        if name.lower().startswith(prefix):
+            name = name[len(prefix):]
+            break
+    # Strip leading @ 
+    name = name.lstrip("@")
+    # Strip any trailing slashes or query strings
+    name = name.split("/")[0].split("?")[0].strip()
+    return name.lower()
+
 # Slash Commands
 
 @app_commands.default_permissions(manage_guild=True)
@@ -999,6 +1015,7 @@ async def add_streamer(interaction: discord.Interaction, streamer: str, channel:
 
     await interaction.response.defer(ephemeral=True)
 
+    streamer = sanitise_streamer_name(streamer)
     user_info = await bot.twitch.get_user(streamer)
 
     if not user_info:
@@ -2206,6 +2223,7 @@ async def manual_notif(
     await interaction.response.defer(ephemeral=True)
     
     # Get streamer info from Twitch
+    streamer = sanitise_streamer_name(streamer)
     user_info = await bot.twitch.get_user(streamer)
     
     if not user_info:

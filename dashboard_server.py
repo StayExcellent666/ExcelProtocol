@@ -205,6 +205,32 @@ def get_session(request: web.Request) -> dict | None:
         return {"dev": True}
     return _sessions.get(token)
 
+# ── Error Logging Middleware ──────────────────────────────────────────────────
+@web.middleware
+async def error_logging_middleware(request: web.Request, handler):
+    """Catch unhandled 500s and log them to the bot's Discord log channel."""
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise  # Let normal HTTP errors (400, 401, 403, 404) pass through untouched
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        tb_trimmed = tb[-2000:] if len(tb) > 2000 else tb
+        logger.error(f"Unhandled dashboard error on {request.method} {request.path}: {e}\n{tb}")
+        if _bot_ref:
+            try:
+                await _bot_ref.log_to_channel(
+                    "🌐", "Dashboard 500 Error",
+                    f"**Route:** `{request.method} {request.path}`\n"
+                    f"**Error:** `{type(e).__name__}: {str(e)[:200]}`\n\n"
+                    f"```python\n{tb_trimmed}\n```",
+                    color=0xFF4444
+                )
+            except Exception as log_err:
+                logger.error(f"Failed to log dashboard error to Discord: {log_err}")
+        raise web.HTTPInternalServerError(reason=f"{type(e).__name__}: {str(e)[:100]}")
+
 # ── Auth Middleware ───────────────────────────────────────────────────────────
 def _session_can_access_guild(session: dict, guild_id: str) -> bool:
     """Check the session has access to the requested guild."""
@@ -454,8 +480,18 @@ async def get_streamers(request):
 async def add_streamer(request):
     guild_id = request.match_info["guild_id"]
     body = await request.json()
-    twitch_username = body.get("twitch_username", "").lower().strip()
-    channel_id      = body.get("channel_id")
+    raw_username = body.get("twitch_username", "").strip()
+    channel_id   = body.get("channel_id")
+
+    # Strip URLs, @ signs, and trailing slashes so users can paste full Twitch URLs
+    twitch_username = raw_username.lower()
+    for prefix in ("https://www.twitch.tv/", "http://www.twitch.tv/",
+                   "https://twitch.tv/", "http://twitch.tv/", "twitch.tv/"):
+        if twitch_username.startswith(prefix):
+            twitch_username = twitch_username[len(prefix):]
+            break
+    twitch_username = twitch_username.lstrip("@").split("/")[0].split("?")[0].strip()
+
     if not twitch_username or not channel_id:
         raise web.HTTPBadRequest(reason="twitch_username and channel_id are required")
 
@@ -482,6 +518,13 @@ async def add_streamer(request):
 async def delete_streamer(request):
     guild_id = request.match_info["guild_id"]
     username = request.match_info["username"]
+    # Sanitise in case a URL was stored — strip prefix so the DB lookup matches
+    for prefix in ("https://www.twitch.tv/", "http://www.twitch.tv/",
+                   "https://twitch.tv/", "http://twitch.tv/", "twitch.tv/"):
+        if username.lower().startswith(prefix):
+            username = username[len(prefix):]
+            break
+    username = username.lstrip("@").split("?")[0].strip()
     await db_execute(
         "DELETE FROM monitored_streamers WHERE guild_id = ? AND streamer_name = ?",
         (guild_id, username.lower()),
@@ -726,6 +769,12 @@ async def create_reaction_role(request):
 async def edit_streamer(request):
     guild_id = request.match_info["guild_id"]
     username = request.match_info["username"]
+    for prefix in ("https://www.twitch.tv/", "http://www.twitch.tv/",
+                   "https://twitch.tv/", "http://twitch.tv/", "twitch.tv/"):
+        if username.lower().startswith(prefix):
+            username = username[len(prefix):]
+            break
+    username = username.lstrip("@").split("?")[0].strip()
     body = await request.json()
     channel_id = body.get("channel_id")
     if not channel_id:
@@ -1807,7 +1856,7 @@ async def auth_dev(request):
 def create_dashboard_app(bot=None):
     global _bot_ref
     _bot_ref = bot
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application(middlewares=[error_logging_middleware, auth_middleware])
 
     app.router.add_get("/health",        health)
     app.router.add_get("/auth/login",    auth_login)
