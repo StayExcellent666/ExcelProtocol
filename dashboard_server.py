@@ -692,7 +692,7 @@ async def create_reaction_role(request):
     max_roles  = body.get("max_roles")
     channel_id = body.get("channel_id")
     roles      = body.get("roles", [])
-    body_text  = body.get("body_text", "").strip() or None
+    body_text  = (body.get("body_text") or "").strip() or None
 
     if not title or not channel_id or not roles:
         raise web.HTTPBadRequest(reason="title, channel_id and roles are required")
@@ -809,7 +809,7 @@ async def edit_reaction_role(request):
     if "type" in body:      entry["type"]      = body["type"]
     if "only_add" in body:  entry["only_add"]  = body["only_add"]
     if "max_roles" in body: entry["max_roles"] = body["max_roles"]
-    if "body_text" in body: entry["body_text"] = body["body_text"].strip() or None
+    if "body_text" in body: entry["body_text"] = (body["body_text"] or "").strip() or None
     if "roles" in body:
         # Resolve any __create__ role IDs first, then convert to int
         for r in body["roles"]:
