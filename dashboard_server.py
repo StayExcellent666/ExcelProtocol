@@ -495,6 +495,14 @@ async def add_streamer(request):
     if not twitch_username or not channel_id:
         raise web.HTTPBadRequest(reason="twitch_username and channel_id are required")
 
+    # Verify the Twitch account actually exists
+    if _bot_ref:
+        user_info = await _bot_ref.twitch.get_user(twitch_username)
+        if not user_info:
+            raise web.HTTPBadRequest(reason=f"Twitch user '{twitch_username}' not found. Check the spelling.")
+        # Use the canonical login name from Twitch in case casing differs
+        twitch_username = user_info["login"]
+
     # Check streamer limit — dev sessions are exempt
     session = request.get("session", {})
     if not session.get("dev") and _bot_ref:
