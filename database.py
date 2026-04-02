@@ -774,7 +774,7 @@ class Database:
             ''', (guild_id, streamer_name.lower(), channel_id, message_id))
             
             conn.commit()
-            logger.info(f"Saved notification message {message_id} for {streamer_name} in guild {guild_id}")
+            logger.debug(f"Saved notification message {message_id} for {streamer_name} in guild {guild_id}")
         except sqlite3.IntegrityError:
             logger.warning(f"Message {message_id} already saved")
         finally:
@@ -810,7 +810,7 @@ class Database:
         conn.commit()
         conn.close()
         
-        logger.info(f"Deleted {deleted} notification records for {streamer_name} in guild {guild_id}")
+        logger.debug(f"Deleted {deleted} notification records for {streamer_name} in guild {guild_id}")
     
     def add_cleanup_config(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool = True) -> bool:
         """Add or update cleanup configuration for a channel"""

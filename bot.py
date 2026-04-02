@@ -198,7 +198,7 @@ class TwitchNotifierBot(discord.Client):
             # Get unique streamer names (remove duplicates across servers)
             unique_streamers = list(set(s['streamer_name'] for s in streamers))
             
-            logger.info(f"Checking {len(unique_streamers)} streamers...")
+            logger.debug(f"Checking {len(unique_streamers)} streamers...")
             
             # Batch check streamers (Twitch API supports up to 100 per request)
             # Split into batches of 100 if needed
@@ -322,6 +322,11 @@ class TwitchNotifierBot(discord.Client):
                 f"Error: `{str(e)[:200]}`\n\n"
                 f"This might mean Twitch API is down or there's a code bug.\n"
                 f"Stream notifications may not be working."
+            )
+            await self.log_to_channel(
+                "⚠️", "Stream Check Error",
+                f"**Error in stream checking loop**\n`{type(e).__name__}: {str(e)[:300]}`\n\nStream notifications may not be working.",
+                color=0xFF6B35
             )
     
     @check_streams.before_loop
@@ -516,6 +521,14 @@ class TwitchNotifierBot(discord.Client):
                     effective_channel_id,
                     "Bot was denied permission to send messages (Forbidden error)."
                 )
+            await self.log_to_channel(
+                "🚫", "Notification Blocked — Missing Permissions",
+                f"**Guild:** `{server_data['guild_id']}`\n"
+                f"**Streamer:** {stream['user_name']}\n"
+                f"**Channel:** <#{effective_channel_id}>\n\n"
+                f"Bot was denied permission to send the live notification.",
+                color=0xFF4444
+            )
             try:
                 self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('custom_channel_id') or server_data.get('channel_id', 0), 'failed')
             except Exception:
@@ -523,6 +536,13 @@ class TwitchNotifierBot(discord.Client):
 
         except Exception as e:
             logger.error(f"Error sending notification: {e}", exc_info=True)
+            await self.log_to_channel(
+                "❌", "Notification Failed",
+                f"**Guild:** `{server_data['guild_id']}`\n"
+                f"**Streamer:** {stream.get('user_name', 'unknown')}\n"
+                f"`{type(e).__name__}: {str(e)[:300]}`",
+                color=0xFF4444
+            )
             try:
                 self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('custom_channel_id') or server_data.get('channel_id', 0), 'failed')
             except Exception:
@@ -567,6 +587,11 @@ class TwitchNotifierBot(discord.Client):
         
         except Exception as e:
             logger.error(f"Error in delete_offline_notifications: {e}", exc_info=True)
+            await self.log_to_channel(
+                "❌", "Auto-Delete Error",
+                f"**Streamer:** {streamer_name}\n`{type(e).__name__}: {str(e)[:300]}`",
+                color=0xFF4444
+            )
     
     async def send_owner_alert(self, error_type: str, details: str, guild_id: int = None):
         """Send DM alert to bot owner about critical errors"""
@@ -660,7 +685,7 @@ class TwitchNotifierBot(discord.Client):
                 logger.debug("No cleanup configs to process")
                 return
             
-            logger.info(f"Running cleanup for {len(configs)} channel(s)...")
+            logger.debug(f"Running cleanup for {len(configs)} channel(s)...")
             total_deleted = 0
             
             for config in configs:
@@ -674,7 +699,7 @@ class TwitchNotifierBot(discord.Client):
             
             self.cleanup_stats['last_run'] = datetime.utcnow()
             self.cleanup_stats['total_deleted'] += total_deleted
-            logger.info(f"Cleanup complete: {total_deleted} messages deleted")
+            logger.debug(f"Cleanup complete: {total_deleted} messages deleted")
         
         except Exception as e:
             logger.error(f"Error in cleanup loop: {e}", exc_info=True)
@@ -685,6 +710,11 @@ class TwitchNotifierBot(discord.Client):
                 f"**Error in channel cleanup loop!**\n\n"
                 f"Error: `{str(e)[:200]}`\n\n"
                 f"Automatic message cleanup may not be working."
+            )
+            await self.log_to_channel(
+                "❌", "Channel Cleanup Error",
+                f"**Error in cleanup loop**\n`{type(e).__name__}: {str(e)[:300]}`",
+                color=0xFF4444
             )
     
     @cleanup_channels.before_loop
@@ -806,6 +836,11 @@ class TwitchNotifierBot(discord.Client):
                 await self._check_guild_permissions(guild)
         except Exception as e:
             logger.error(f"Error in permission check loop: {e}", exc_info=True)
+            await self.log_to_channel(
+                "❌", "Permission Check Error",
+                f"**Error in permission check loop**\n`{type(e).__name__}: {str(e)[:300]}`",
+                color=0xFF4444
+            )
 
     @check_permissions.before_loop
     async def before_check_permissions(self):
@@ -874,8 +909,18 @@ class TwitchNotifierBot(discord.Client):
                         logger.info(f"Updated stat channel '{new_name}' in {guild.name}")
                 except discord.Forbidden:
                     logger.warning(f"Missing permission to edit stat channel {cfg['channel_id']} in guild {cfg['guild_id']}")
+                    await self.log_to_channel(
+                        "🚫", "Stat Channel Update Blocked",
+                        f"**Guild:** `{cfg['guild_id']}`\n**Channel:** <#{cfg['channel_id']}>\nMissing permission to edit channel name.",
+                        color=0xFF6B35
+                    )
                 except Exception as e:
                     logger.error(f"Error updating stat channel {cfg['channel_id']}: {e}")
+                    await self.log_to_channel(
+                        "❌", "Stat Channel Update Error",
+                        f"**Guild:** `{cfg['guild_id']}`\n**Channel:** <#{cfg['channel_id']}>\n`{type(e).__name__}: {str(e)[:300]}`",
+                        color=0xFF4444
+                    )
         except Exception as e:
             logger.error(f"Error in update_stat_channels loop: {e}", exc_info=True)
 
@@ -2653,6 +2698,7 @@ async def main():
         import logging as _logging
         # Custom access log format — method, path, status, size only
         access_logger = _logging.getLogger("aiohttp.access")
+        access_logger.setLevel(_logging.WARNING)
         access_log_format = '%a "%r" %s %b'
         runner = web.AppRunner(dashboard_app, access_log_format=access_log_format, access_log=access_logger)
         await runner.setup()
