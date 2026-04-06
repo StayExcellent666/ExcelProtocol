@@ -286,3 +286,106 @@ class TwitchAPI:
         if not streams:
             return None
         return streams[0].get("viewer_count", 0)
+
+    # ── EventSub ──────────────────────────────────────────────────────────────
+
+    async def get_stream_info_by_user_id(self, user_id: str) -> dict | None:
+        """Get live stream data for a user ID (used after stream.online event)."""
+        session = await self.get_session()
+        headers = await self._headers()
+        try:
+            async with session.get(
+                f"{self.base_url}/streams",
+                headers=headers,
+                params={"user_id": user_id}
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                streams = data.get("data", [])
+                if not streams:
+                    return None
+                stream = streams[0]
+                # Enrich with profile image
+                images = await self._get_profile_images([stream["user_id"]])
+                stream["profile_image_url"] = images.get(stream["user_id"], "")
+                return stream
+        except Exception as e:
+            logger.error(f"Error fetching stream by user_id {user_id}: {e}")
+            return None
+
+    async def register_stream_subscription(self, user_id: str, event_type: str,
+                                           callback_url: str, secret: str) -> dict | None:
+        """Register a stream.online or stream.offline EventSub subscription.
+        Returns the created subscription dict, or None on failure."""
+        session = await self.get_session()
+        headers = await self._headers()
+        headers["Content-Type"] = "application/json"
+        payload = {
+            "type": event_type,
+            "version": "1",
+            "condition": {"broadcaster_user_id": user_id},
+            "transport": {"method": "webhook", "callback": callback_url, "secret": secret},
+        }
+        try:
+            async with session.post(
+                f"{self.base_url}/eventsub/subscriptions",
+                headers=headers,
+                json=payload
+            ) as resp:
+                data = await resp.json()
+                if resp.status in (200, 202):
+                    subs = data.get("data", [])
+                    return subs[0] if subs else None
+                if resp.status == 409:
+                    logger.debug(f"EventSub {event_type} already exists for user {user_id}")
+                    return {"already_exists": True}
+                logger.warning(f"EventSub registration failed for {user_id} ({event_type}): {resp.status} {data}")
+                return None
+        except Exception as e:
+            logger.error(f"Error registering EventSub for {user_id}: {e}")
+            return None
+
+    async def delete_subscription(self, subscription_id: str) -> bool:
+        """Delete an EventSub subscription by ID."""
+        session = await self.get_session()
+        headers = await self._headers()
+        try:
+            async with session.delete(
+                f"{self.base_url}/eventsub/subscriptions",
+                headers=headers,
+                params={"id": subscription_id}
+            ) as resp:
+                return resp.status == 204
+        except Exception as e:
+            logger.error(f"Error deleting EventSub subscription {subscription_id}: {e}")
+            return False
+
+    async def get_subscriptions(self, status: str = None) -> list:
+        """List all current EventSub subscriptions (optionally filter by status)."""
+        session = await self.get_session()
+        headers = await self._headers()
+        params = {}
+        if status:
+            params["status"] = status
+        all_subs = []
+        cursor = None
+        try:
+            while True:
+                if cursor:
+                    params["after"] = cursor
+                async with session.get(
+                    f"{self.base_url}/eventsub/subscriptions",
+                    headers=headers,
+                    params=params
+                ) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json()
+                    all_subs.extend(data.get("data", []))
+                    cursor = data.get("pagination", {}).get("cursor")
+                    if not cursor:
+                        break
+        except Exception as e:
+            logger.error(f"Error listing EventSub subscriptions: {e}")
+        return all_subs

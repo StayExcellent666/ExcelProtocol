@@ -521,6 +521,11 @@ async def add_streamer(request):
         if "UNIQUE" in str(e):
             raise web.HTTPConflict(reason="Streamer already tracked")
         raise
+
+    # Register EventSub for this streamer
+    if _bot_ref and user_info:
+        asyncio.create_task(_bot_ref._register_eventsub_for_user(user_info["id"], twitch_username))
+
     return web.json_response({"ok": True})
 
 async def delete_streamer(request):
@@ -1484,39 +1489,54 @@ async def eventsub_callback(request):
     if msg_type == "webhook_callback_verification":
         return web.Response(text=data["challenge"], content_type="text/plain")
 
-    if msg_type == "notification" and data.get("subscription", {}).get("type") == "channel.channel_points_custom_reward_redemption.add":
+    if msg_type == "notification":
+        sub_type = data.get("subscription", {}).get("type", "")
         event = data.get("event", {})
-        reward_id         = event.get("reward", {}).get("id")
-        broadcaster_login = event.get("broadcaster_user_login", "").lower()
-        redeemer          = event.get("user_name", "")
 
-        # Find which guild this broadcaster belongs to
-        rows = await db_fetch("SELECT guild_id FROM broadcaster_tokens WHERE twitch_login = ?", (broadcaster_login,))
-        for row in rows:
-            guild_id = str(row["guild_id"])
-            # Find matching trigger
-            trigger_rows = await db_fetch(
-                "SELECT video_url, volume FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
-                (guild_id, reward_id)
-            )
-            if trigger_rows:
-                trigger = trigger_rows[0]
-                import json as _json
-                payload = _json.dumps({
-                    "type": "play",
-                    "video_url": trigger["video_url"],
-                    "volume": trigger["volume"],
-                    "redeemer": redeemer,
-                })
-                # Push to all connected overlays for this guild
-                dead = set()
-                for ws in _overlay_connections.get(guild_id, set()):
-                    try:
-                        await ws.send_str(payload)
-                    except Exception:
-                        dead.add(ws)
-                if dead:
-                    _overlay_connections.get(guild_id, set()).difference_update(dead)
+        if sub_type == "stream.online":
+            user_login = event.get("broadcaster_user_login", "").lower()
+            user_id    = event.get("broadcaster_user_id", "")
+            logger.info(f"EventSub stream.online received for {user_login}")
+            if _bot_ref:
+                asyncio.create_task(_bot_ref.handle_stream_online(user_login, user_id))
+
+        elif sub_type == "stream.offline":
+            user_login = event.get("broadcaster_user_login", "").lower()
+            logger.info(f"EventSub stream.offline received for {user_login}")
+            if _bot_ref:
+                asyncio.create_task(_bot_ref.handle_stream_offline(user_login))
+
+        elif sub_type == "channel.channel_points_custom_reward_redemption.add":
+            reward_id         = event.get("reward", {}).get("id")
+            broadcaster_login = event.get("broadcaster_user_login", "").lower()
+            redeemer          = event.get("user_name", "")
+
+            # Find which guild this broadcaster belongs to
+            rows = await db_fetch("SELECT guild_id FROM broadcaster_tokens WHERE twitch_login = ?", (broadcaster_login,))
+            for row in rows:
+                guild_id = str(row["guild_id"])
+                # Find matching trigger
+                trigger_rows = await db_fetch(
+                    "SELECT video_url, volume FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
+                    (guild_id, reward_id)
+                )
+                if trigger_rows:
+                    trigger = trigger_rows[0]
+                    import json as _json
+                    payload = _json.dumps({
+                        "type": "play",
+                        "video_url": trigger["video_url"],
+                        "volume": trigger["volume"],
+                        "redeemer": redeemer,
+                    })
+                    dead = set()
+                    for ws in _overlay_connections.get(guild_id, set()):
+                        try:
+                            await ws.send_str(payload)
+                        except Exception:
+                            dead.add(ws)
+                    if dead:
+                        _overlay_connections.get(guild_id, set()).difference_update(dead)
 
     return web.Response(status=204)
 
@@ -1851,6 +1871,165 @@ async def delete_stat_channel(request):
     )
     return web.json_response({"ok": True})
 
+# ── Dev: Global Stats ─────────────────────────────────────────────────────────
+async def get_global_stats(request):
+    """Dev-only: global stats across all servers."""
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Dev access required")
+
+    servers        = await db_fetch("SELECT COUNT(DISTINCT guild_id) AS c FROM server_settings")
+    streamer_rows  = await db_fetch("SELECT COUNT(*) AS c FROM monitored_streamers")
+    unique_str     = await db_fetch("SELECT COUNT(DISTINCT streamer_name) AS c FROM monitored_streamers")
+    notif_msgs     = await db_fetch("SELECT COUNT(*) AS c FROM notification_messages")
+    last_24h       = await db_fetch("""
+        SELECT COUNT(*) AS c FROM notification_log
+        WHERE sent_at >= datetime('now', '-24 hours') AND status = 'sent'
+    """)
+    top_streamers  = await db_fetch("""
+        SELECT streamer_name, COUNT(DISTINCT guild_id) AS server_count
+        FROM monitored_streamers GROUP BY streamer_name
+        ORDER BY server_count DESC LIMIT 15
+    """)
+    servers_by_count = await db_fetch("""
+        SELECT guild_id, COUNT(*) AS streamer_count
+        FROM monitored_streamers GROUP BY guild_id
+        ORDER BY streamer_count DESC LIMIT 10
+    """)
+    # Enrich with guild names
+    enriched_servers = []
+    for r in servers_by_count:
+        name = str(r["guild_id"])
+        if _bot_ref:
+            g = _bot_ref.get_guild(r["guild_id"])
+            if g:
+                name = g.name
+        enriched_servers.append({"guild_id": str(r["guild_id"]), "name": name, "streamer_count": r["streamer_count"]})
+
+    # Live streamers from bot memory
+    live_count = len(_bot_ref.live_streamers) if _bot_ref else 0
+    live_list  = sorted(_bot_ref.live_streamers) if _bot_ref else []
+
+    # EventSub subscription count
+    eventsub_count = 0
+    try:
+        if _bot_ref:
+            subs = await _bot_ref.twitch.get_subscriptions()
+            eventsub_count = len([s for s in subs if s.get("type") in ("stream.online", "stream.offline")])
+    except Exception:
+        pass
+
+    return web.json_response({
+        "total_servers":       servers[0]["c"] if servers else 0,
+        "total_streamer_rows": streamer_rows[0]["c"] if streamer_rows else 0,
+        "unique_streamers":    unique_str[0]["c"] if unique_str else 0,
+        "active_notifications": notif_msgs[0]["c"] if notif_msgs else 0,
+        "notifications_24h":   last_24h[0]["c"] if last_24h else 0,
+        "live_count":          live_count,
+        "live_streamers":      live_list,
+        "eventsub_count":      eventsub_count,
+        "top_streamers":       top_streamers,
+        "servers_by_count":    enriched_servers,
+    })
+
+
+# ── Dev: DB Tools ─────────────────────────────────────────────────────────────
+async def db_tools_status(request):
+    """Dev-only: show orphaned records and fixable issues."""
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Dev access required")
+
+    # Orphaned notification_messages (streamer no longer monitored anywhere)
+    orphaned_notifs = await db_fetch("""
+        SELECT DISTINCT streamer_name FROM notification_messages
+        WHERE streamer_name NOT IN (SELECT DISTINCT streamer_name FROM monitored_streamers)
+    """)
+    # Orphaned permission_issues (channel no longer a notification channel)
+    orphaned_perms = await db_fetch("""
+        SELECT guild_id, channel_id FROM permission_issues
+        WHERE channel_id NOT IN (
+            SELECT DISTINCT channel_id FROM monitored_streamers
+            UNION SELECT DISTINCT custom_channel_id FROM monitored_streamers WHERE custom_channel_id IS NOT NULL
+        )
+    """)
+    # Bad streamer names (contain /)
+    bad_names = await db_fetch("""
+        SELECT streamer_name, COUNT(DISTINCT guild_id) AS guild_count
+        FROM monitored_streamers WHERE streamer_name LIKE '%/%'
+        GROUP BY streamer_name
+    """)
+    # notification_log row count
+    log_count = await db_fetch("SELECT COUNT(*) AS c FROM notification_log")
+    # stat_channels
+    stat_channels = await db_fetch("SELECT guild_id, channel_id, format, last_updated FROM stat_channels")
+
+    return web.json_response({
+        "orphaned_notification_messages": [r["streamer_name"] for r in orphaned_notifs],
+        "orphaned_permission_issues": [{"guild_id": str(r["guild_id"]), "channel_id": str(r["channel_id"])} for r in orphaned_perms],
+        "bad_streamer_names": [{"name": r["streamer_name"], "guild_count": r["guild_count"]} for r in bad_names],
+        "notification_log_rows": log_count[0]["c"] if log_count else 0,
+        "stat_channels": [{"guild_id": str(r["guild_id"]), "channel_id": str(r["channel_id"]), "format": r["format"], "last_updated": r["last_updated"]} for r in stat_channels],
+    })
+
+
+async def db_tools_action(request):
+    """Dev-only: run a DB cleanup action."""
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Dev access required")
+    body = await request.json()
+    action = body.get("action")
+
+    if action == "clear_orphaned_notifications":
+        await db_execute("""
+            DELETE FROM notification_messages
+            WHERE streamer_name NOT IN (SELECT DISTINCT streamer_name FROM monitored_streamers)
+        """)
+        return web.json_response({"ok": True, "message": "Orphaned notification_messages cleared."})
+
+    elif action == "clear_orphaned_perms":
+        await db_execute("""
+            DELETE FROM permission_issues
+            WHERE channel_id NOT IN (
+                SELECT DISTINCT channel_id FROM monitored_streamers
+                UNION SELECT DISTINCT custom_channel_id FROM monitored_streamers WHERE custom_channel_id IS NOT NULL
+            )
+        """)
+        return web.json_response({"ok": True, "message": "Orphaned permission_issues cleared."})
+
+    elif action == "fix_bad_streamer_names":
+        rows = await db_fetch("SELECT rowid, streamer_name FROM monitored_streamers WHERE streamer_name LIKE '%/%'")
+        fixed = 0
+        for r in rows:
+            raw = r["streamer_name"]
+            clean = raw.split("/")[-1].split("?")[0].strip().lower()
+            if clean and clean != raw:
+                await db_execute("UPDATE monitored_streamers SET streamer_name = ? WHERE rowid = ?", (clean, r["rowid"]))
+                fixed += 1
+        return web.json_response({"ok": True, "message": f"Fixed {fixed} bad streamer name(s)."})
+
+    elif action == "trim_notification_log":
+        days = int(body.get("days", 30))
+        await db_execute(f"DELETE FROM notification_log WHERE sent_at < datetime('now', '-{days} days')")
+        return web.json_response({"ok": True, "message": f"Trimmed notification_log to last {days} days."})
+
+    elif action == "clear_live_streamers":
+        if _bot_ref:
+            count = len(_bot_ref.live_streamers)
+            _bot_ref.live_streamers.clear()
+            return web.json_response({"ok": True, "message": f"Cleared {count} live_streamers from memory."})
+        return web.json_response({"ok": False, "message": "Bot not available."})
+
+    elif action == "sync_eventsub":
+        if _bot_ref:
+            asyncio.create_task(_bot_ref._sync_eventsub_subscriptions())
+            return web.json_response({"ok": True, "message": "EventSub sync triggered."})
+        return web.json_response({"ok": False, "message": "Bot not available."})
+
+    raise web.HTTPBadRequest(reason=f"Unknown action: {action}")
+
+
 async def auth_dev(request):
     """Password-protected dev login — creates a full-access session."""
     password = request.rel_url.query.get("password", "")
@@ -1921,6 +2100,9 @@ def create_dashboard_app(bot=None):
     app.router.add_delete("/api/guild/{guild_id}/cleanup/{channel_id}", delete_cleanup_config)
     app.router.add_get  ("/api/guild/{guild_id}/permission-issues",     get_permission_issues)
     app.router.add_post ("/api/guild/{guild_id}/permission-issues/recheck", recheck_permissions)
+    app.router.add_get  ("/api/dev/global-stats",   get_global_stats)
+    app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
+    app.router.add_post ("/api/dev/db-tools",       db_tools_action)
     app.router.add_get   ("/api/guild/{guild_id}/stat-channels",            get_stat_channels)
     app.router.add_post  ("/api/guild/{guild_id}/stat-channels",            set_stat_channel)
     app.router.add_delete("/api/guild/{guild_id}/stat-channels/{channel_id}", delete_stat_channel)

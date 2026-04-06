@@ -158,13 +158,56 @@ class TwitchNotifierBot(discord.Client):
             self.update_stat_channels.start()
             logger.info("Stat channel update loop started")
 
+        # Start milestone check loop (separate from EventSub)
+        if not self.check_milestones.is_running():
+            self.check_milestones.start()
+            logger.info("Milestone check loop started")
+
         guild_count = len(self.guilds)
         await self.log_to_channel(
             "🤖", "Bot Started",
             f"ExcelProtocol is online.\n**Servers:** {guild_count}",
             color=0x00CC66
         )
+
+        # Sync EventSub subscriptions on startup (async so it doesn't block ready)
+        asyncio.create_task(self._initial_eventsub_sync())
     
+    async def _register_eventsub_for_user(self, user_id: str, user_login: str):
+        """Register stream.online and stream.offline EventSub for a single user."""
+        callback_url, secret = await self._eventsub_config()
+        for event_type in ("stream.online", "stream.offline"):
+            result = await self.twitch.register_stream_subscription(
+                user_id, event_type, callback_url, secret
+            )
+            if result and not result.get("already_exists"):
+                logger.info(f"Registered {event_type} EventSub for {user_login}")
+            elif not result:
+                logger.warning(f"Failed to register {event_type} EventSub for {user_login}")
+                await self.log_to_channel(
+                    "⚠️", "EventSub Registration Failed",
+                    f"Could not register `{event_type}` for **{user_login}**.\nStream notifications may not work.",
+                    color=0xFF6B35
+                )
+
+    async def _initial_eventsub_sync(self):
+        """Run EventSub sync on startup with a small delay to let things settle."""
+        await asyncio.sleep(5)
+        try:
+            await self._sync_eventsub_subscriptions()
+            await self.log_to_channel(
+                "📡", "EventSub Subscriptions Synced",
+                "Stream online/offline subscriptions registered for all monitored streamers.",
+                color=0x00CC66
+            )
+        except Exception as e:
+            logger.error(f"Initial EventSub sync failed: {e}", exc_info=True)
+            await self.log_to_channel(
+                "❌", "EventSub Initial Sync Failed",
+                f"`{type(e).__name__}: {str(e)[:300]}`\n\nStream notifications may not work until the next sync attempt (30 min).",
+                color=0xFF4444
+            )
+
     async def close(self):
         """Called when bot is shutting down cleanly."""
         try:
@@ -329,11 +372,239 @@ class TwitchNotifierBot(discord.Client):
                 color=0xFF6B35
             )
     
+    # ── EventSub Stream Notifications ────────────────────────────────────────
+
+    @tasks.loop(minutes=30)
+    async def check_streams(self):
+        """Keep EventSub subscriptions healthy — re-register any missing ones every 30 min."""
+        try:
+            await self._sync_eventsub_subscriptions()
+        except Exception as e:
+            logger.error(f"Error in EventSub sync loop: {e}", exc_info=True)
+            await self.log_to_channel(
+                "⚠️", "EventSub Sync Error",
+                f"**Error syncing EventSub subscriptions**\n`{type(e).__name__}: {str(e)[:300]}`",
+                color=0xFF6B35
+            )
+
     @check_streams.before_loop
     async def before_check_streams(self):
         """Wait until bot is ready before starting the loop"""
         await self.wait_until_ready()
-    
+
+    async def _eventsub_config(self):
+        """Return (callback_url, secret) for EventSub."""
+        base = os.getenv("DASHBOARD_BASE_URL", "https://excelprotocol.fly.dev")
+        secret = os.getenv("EVENTSUB_SECRET", "excelprotocol_eventsub_secret")
+        return f"{base}/api/eventsub/callback", secret
+
+    async def _sync_eventsub_subscriptions(self):
+        """Register stream.online / stream.offline subscriptions for all monitored streamers."""
+        callback_url, secret = await self._eventsub_config()
+
+        # Get all unique streamers from DB
+        streamers = self.db.get_all_streamers()
+        unique_logins = list({s['streamer_name'].lower() for s in streamers})
+        if not unique_logins:
+            return
+
+        # Get existing subscriptions so we don't double-register
+        existing = await self.twitch.get_subscriptions()
+        existing_keys = set()
+        for sub in existing:
+            if sub.get("type") in ("stream.online", "stream.offline"):
+                uid = sub.get("condition", {}).get("broadcaster_user_id", "")
+                existing_keys.add((sub["type"], uid))
+
+        # Resolve logins → user IDs in batches
+        registered = 0
+        failed = 0
+        for i in range(0, len(unique_logins), 100):
+            batch = unique_logins[i:i+100]
+            session = await self.twitch.get_session()
+            headers = await self.twitch._headers()
+            params = [("login", login) for login in batch]
+            try:
+                async with session.get(
+                    "https://api.twitch.tv/helix/users",
+                    headers=headers, params=params
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Failed to resolve user IDs for EventSub batch: {resp.status}")
+                        continue
+                    data = await resp.json()
+                    users = data.get("data", [])
+            except Exception as e:
+                logger.error(f"Error resolving user IDs for EventSub: {e}")
+                continue
+
+            for user in users:
+                uid = user["id"]
+                for event_type in ("stream.online", "stream.offline"):
+                    if (event_type, uid) in existing_keys:
+                        continue
+                    result = await self.twitch.register_stream_subscription(
+                        uid, event_type, callback_url, secret
+                    )
+                    if result and not result.get("already_exists"):
+                        registered += 1
+                    elif not result:
+                        failed += 1
+                        logger.warning(f"Failed to register {event_type} for {user['login']} ({uid})")
+
+        if registered or failed:
+            logger.info(f"EventSub sync: registered {registered} new subscriptions, {failed} failed")
+            if failed:
+                await self.log_to_channel(
+                    "📡", "EventSub Sync",
+                    f"Registered **{registered}** new subscriptions.\n⚠️ **{failed}** failed to register.",
+                    color=0xFF6B35
+                )
+
+    async def handle_stream_online(self, user_login: str, user_id: str):
+        """Called by the dashboard webhook when a stream.online event is received."""
+        try:
+            logger.info(f"EventSub stream.online: {user_login}")
+            self.live_streamers.add(user_login.lower())
+
+            # Fetch full stream data
+            stream = await self.twitch.get_stream_info_by_user_id(user_id)
+            if not stream:
+                logger.warning(f"stream.online for {user_login} but no stream data returned (may be very new)")
+                # Retry once after a short delay
+                await asyncio.sleep(10)
+                stream = await self.twitch.get_stream_info_by_user_id(user_id)
+                if not stream:
+                    logger.error(f"Still no stream data for {user_login} after retry — skipping notification")
+                    return
+
+            # Wait for thumbnail
+            logger.info(f"Waiting 15s for {user_login} thumbnail...")
+            await asyncio.sleep(15)
+
+            # Re-fetch after wait to get fresh thumbnail URL
+            stream = await self.twitch.get_stream_info_by_user_id(user_id) or stream
+
+            # Find all servers monitoring this streamer
+            streamers = self.db.get_all_streamers()
+            monitoring_servers = [
+                s for s in streamers
+                if s['streamer_name'].lower() == user_login.lower()
+            ]
+
+            for server_data in monitoring_servers:
+                await self.send_notification(server_data, stream)
+
+            await self.log_to_channel(
+                "🟢", "Stream Online (EventSub)",
+                f"**{stream.get('user_name', user_login)}** went live — notified {len(monitoring_servers)} server(s).",
+                color=0x00CC66
+            )
+
+        except Exception as e:
+            logger.error(f"Error handling stream.online for {user_login}: {e}", exc_info=True)
+            await self.log_to_channel(
+                "❌", "Stream Online Error",
+                f"**Error handling stream.online for `{user_login}`**\n`{type(e).__name__}: {str(e)[:300]}`",
+                color=0xFF4444
+            )
+
+    async def handle_stream_offline(self, user_login: str):
+        """Called by the dashboard webhook when a stream.offline event is received."""
+        try:
+            logger.info(f"EventSub stream.offline: {user_login}")
+            name_lower = user_login.lower()
+            if name_lower in self.live_streamers:
+                self.live_streamers.discard(name_lower)
+
+            # Clear milestones
+            streamers = self.db.get_all_streamers()
+            for s in streamers:
+                if s['streamer_name'].lower() == name_lower:
+                    self.db.clear_milestones_for_streamer(s['guild_id'], name_lower)
+
+            await self.delete_offline_notifications(user_login)
+
+        except Exception as e:
+            logger.error(f"Error handling stream.offline for {user_login}: {e}", exc_info=True)
+            await self.log_to_channel(
+                "❌", "Stream Offline Error",
+                f"**Error handling stream.offline for `{user_login}`**\n`{type(e).__name__}: {str(e)[:300]}`",
+                color=0xFF4444
+            )
+
+    # ── Milestone Check (lightweight poll — EventSub doesn't cover this) ──────
+
+    @tasks.loop(minutes=5)
+    async def check_milestones(self):
+        """Check 5h/10h stream milestones for currently live streamers."""
+        try:
+            if not self.live_streamers:
+                return
+            streamers = self.db.get_all_streamers()
+            live_list = list(self.live_streamers)
+            for i in range(0, len(live_list), 100):
+                batch = live_list[i:i+100]
+                live_streams = await self.twitch.get_live_streams(batch)
+                for stream in live_streams:
+                    streamer_name = stream['user_login']
+                    stream_start = datetime.strptime(stream['started_at'], '%Y-%m-%dT%H:%M:%SZ')
+                    hours_live = (datetime.utcnow() - stream_start).total_seconds() / 3600
+                    for milestone_hours, description in [
+                        (5, f"⏱️ **{stream['user_name']}** has been live for **5 HOURS!** They're not stopping anytime soon!"),
+                        (10, f"💀 **{stream['user_name']}** has been live for **10 HOURS STRAIGHT.** Send help. 👀"),
+                    ]:
+                        if hours_live >= milestone_hours:
+                            monitoring_servers = [
+                                s for s in streamers
+                                if s['streamer_name'].lower() == streamer_name.lower()
+                            ]
+                            for server_data in monitoring_servers:
+                                guild_id = server_data['guild_id']
+                                if not self.db.get_milestone_notifications(guild_id):
+                                    continue
+                                if self.db.has_milestone_been_sent(guild_id, streamer_name, milestone_hours):
+                                    continue
+                                channel_id = server_data.get('custom_channel_id') or server_data['channel_id']
+                                channel = self.get_channel(channel_id)
+                                if not channel:
+                                    continue
+                                try:
+                                    embed_color = self.db.get_embed_color(guild_id)
+                                    embed = discord.Embed(
+                                        description=description,
+                                        color=embed_color,
+                                        timestamp=datetime.utcnow()
+                                    )
+                                    embed.set_author(
+                                        name=stream['user_name'],
+                                        url=f"https://twitch.tv/{stream['user_login']}",
+                                        icon_url=stream.get('profile_image_url', '')
+                                    )
+                                    embed.add_field(name="Game", value=stream['game_name'] or "No category", inline=True)
+                                    embed.add_field(name="Viewers", value=f"{stream['viewer_count']:,}", inline=True)
+                                    thumbnail_url = stream['thumbnail_url'].replace('{width}', '440').replace('{height}', '248')
+                                    embed.set_image(url=thumbnail_url)
+                                    embed.set_footer(text="Twitch", icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png")
+                                    view = discord.ui.View()
+                                    view.add_item(discord.ui.Button(
+                                        label="Watch Stream",
+                                        url=f"https://twitch.tv/{stream['user_login']}",
+                                        style=discord.ButtonStyle.link,
+                                        emoji="🔴"
+                                    ))
+                                    await channel.send(embed=embed, view=view)
+                                    self.db.record_milestone_sent(guild_id, streamer_name, milestone_hours)
+                                    logger.info(f"Sent {milestone_hours}h milestone for {streamer_name} in guild {guild_id}")
+                                except Exception as e:
+                                    logger.error(f"Error sending milestone notification: {e}")
+        except Exception as e:
+            logger.error(f"Error in milestone check: {e}", exc_info=True)
+
+    @check_milestones.before_loop
+    async def before_check_milestones(self):
+        await self.wait_until_ready()
+
     async def alert_permission_issue(self, guild: discord.Guild, channel_id: int, issue: str):
         """DM the guild owner and bot owner when a permission issue is detected."""
         guild_owner = guild.owner
@@ -1076,7 +1347,6 @@ async def add_streamer(interaction: discord.Interaction, streamer: str, channel:
         custom = " (custom channel)" if channel else ""
         await interaction.followup.send(
             f"✅ Now monitoring **{user_info['display_name']}** (twitch.tv/{user_info['login']})\nNotifications will be sent to <#{channel_id}>{custom}",
-
             ephemeral=True
         )
         await bot.log_to_channel(
@@ -1084,6 +1354,8 @@ async def add_streamer(interaction: discord.Interaction, streamer: str, channel:
             f"**{user_info['display_name']}** added in **{interaction.guild.name}**\n"
             f"Channel: <#{channel_id}>{custom}\nBy: {interaction.user} (`{interaction.user.id}`)"
         )
+        # Register EventSub subscriptions for this streamer if not already done
+        asyncio.create_task(bot._register_eventsub_for_user(user_info['id'], user_info['login']))
     else:
         await interaction.followup.send(
             f"ℹ️ Already monitoring **{user_info['display_name']}** in this server.",
@@ -1321,7 +1593,7 @@ async def bot_stats(interaction: discord.Interaction):
         inline=True
     )
     
-    embed.set_footer(text="Twitch Notifier Bot")
+    embed.set_footer(text="ExcelProtocol")
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
