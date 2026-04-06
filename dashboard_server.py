@@ -38,6 +38,9 @@ TWITCH_API            = "https://api.twitch.tv/helix"
 # WebSocket connections for overlays: {guild_id: set of ws}
 _overlay_connections: dict = {}
 
+# EventSub message dedup: {message_id: received_at} — Twitch recommends deduping by message ID
+_eventsub_seen: dict = {}
+
 # Bot reference — set by create_dashboard_app() so we can reload views
 _bot_ref = None
 
@@ -525,6 +528,10 @@ async def add_streamer(request):
     # Register EventSub for this streamer
     if _bot_ref and user_info:
         asyncio.create_task(_bot_ref._register_eventsub_for_user(user_info["id"], twitch_username))
+        await _bot_ref.log_to_channel(
+            "➕", "Streamer Added (Dashboard)",
+            f"**{user_info.get('display_name', twitch_username)}** added to guild `{guild_id}`"
+        )
 
     return web.json_response({"ok": True})
 
@@ -1488,6 +1495,18 @@ async def eventsub_callback(request):
     # Twitch sends a challenge to verify the webhook
     if msg_type == "webhook_callback_verification":
         return web.Response(text=data["challenge"], content_type="text/plain")
+
+    # Deduplicate by message ID — Twitch may re-deliver the same event
+    now = datetime.utcnow()
+    if msg_id in _eventsub_seen:
+        logger.debug(f"Dropping duplicate EventSub message {msg_id}")
+        return web.Response(status=204)
+    _eventsub_seen[msg_id] = now
+    # Clean up entries older than 10 minutes
+    cutoff = now.timestamp() - 600
+    stale = [k for k, v in _eventsub_seen.items() if v.timestamp() < cutoff]
+    for k in stale:
+        del _eventsub_seen[k]
 
     if msg_type == "notification":
         sub_type = data.get("subscription", {}).get("type", "")

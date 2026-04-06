@@ -176,13 +176,17 @@ class TwitchNotifierBot(discord.Client):
     async def _register_eventsub_for_user(self, user_id: str, user_login: str):
         """Register stream.online and stream.offline EventSub for a single user."""
         callback_url, secret = await self._eventsub_config()
+        success = True
         for event_type in ("stream.online", "stream.offline"):
             result = await self.twitch.register_stream_subscription(
                 user_id, event_type, callback_url, secret
             )
             if result and not result.get("already_exists"):
                 logger.info(f"Registered {event_type} EventSub for {user_login}")
-            elif not result:
+            elif result and result.get("already_exists"):
+                logger.debug(f"{event_type} EventSub already exists for {user_login}")
+            else:
+                success = False
                 logger.warning(f"Failed to register {event_type} EventSub for {user_login}")
                 await self.log_to_channel(
                     "⚠️", "EventSub Registration Failed",
