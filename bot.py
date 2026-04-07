@@ -404,13 +404,33 @@ class TwitchNotifierBot(discord.Client):
 
     async def _sync_eventsub_subscriptions(self, alert_on_mismatch: bool = True):
         """Register stream.online / stream.offline subscriptions for all monitored streamers."""
+        # Prevent concurrent syncs (startup + loop overlap on boot)
+        if getattr(self, '_eventsub_syncing', False):
+            logger.debug("EventSub sync already in progress, skipping")
+            return
+        self._eventsub_syncing = True
+        try:
+            await self.__do_eventsub_sync(alert_on_mismatch)
+        finally:
+            self._eventsub_syncing = False
+
+    async def __do_eventsub_sync(self, alert_on_mismatch: bool = True):
+        """Internal EventSub sync logic."""
         callback_url, secret = await self._eventsub_config()
 
-        # Get all unique streamers from DB
+        # Get all unique streamers from DB with guild info
         streamers = self.db.get_all_streamers()
         unique_logins = list({s['streamer_name'].lower() for s in streamers})
         if not unique_logins:
             return
+
+        # Build login → guild names lookup for error reporting
+        login_guilds: dict[str, list[str]] = {}
+        for s in streamers:
+            login = s['streamer_name'].lower()
+            guild = self.get_guild(s['guild_id'])
+            guild_name = guild.name if guild else str(s['guild_id'])
+            login_guilds.setdefault(login, []).append(guild_name)
 
         # Get existing subscriptions so we don't double-register
         existing = await self.twitch.get_subscriptions()
@@ -420,11 +440,10 @@ class TwitchNotifierBot(discord.Client):
                 uid = sub.get("condition", {}).get("broadcaster_user_id", "")
                 existing_keys.add((sub["type"], uid))
 
-        # Resolve logins → user IDs in batches
         registered = 0
         failed = 0
         failed_names = []
-        unresolvable = []  # logins Twitch doesn't recognise (banned/deleted/renamed)
+        unresolvable = []
 
         for i in range(0, len(unique_logins), 100):
             batch = unique_logins[i:i+100]
@@ -445,12 +464,13 @@ class TwitchNotifierBot(discord.Client):
                 logger.error(f"Error resolving user IDs for EventSub: {e}")
                 continue
 
-            # Find logins that Twitch returned no user for
             resolved_logins = {u["login"].lower() for u in users}
             for login in batch:
                 if login not in resolved_logins:
-                    unresolvable.append(login)
-                    logger.warning(f"EventSub: Twitch returned no user for '{login}' — account may be banned, deleted or renamed")
+                    guilds = login_guilds.get(login, [])
+                    guild_str = ", ".join(set(guilds))
+                    unresolvable.append(f"{login} ({guild_str})")
+                    logger.warning(f"EventSub: no Twitch user for '{login}' in [{guild_str}] — banned/deleted/renamed?")
 
             for user in users:
                 uid = user["id"]
@@ -470,7 +490,7 @@ class TwitchNotifierBot(discord.Client):
         if registered or failed:
             logger.info(f"EventSub sync: registered {registered} new, {failed} failed, {len(unresolvable)} unresolvable")
 
-        if failed or unresolvable:
+        if alert_on_mismatch and (failed or unresolvable):
             lines = []
             if failed:
                 lines.append(f"⚠️ **{failed}** registration failure(s):\n" + "\n".join(f"• {n}" for n in failed_names[:10]))
@@ -482,14 +502,12 @@ class TwitchNotifierBot(discord.Client):
                 color=0xFF6B35
             )
 
-        # Mismatch check — only alert if meaningfully off (>10% or >20 missing)
-        # and only when requested (skip on startup sync to avoid double-alert with loop)
         if alert_on_mismatch:
             resolvable_count = len(unique_logins) - len(unresolvable)
             expected = resolvable_count * 2
             actual = len([s for s in existing if s.get("type") in ("stream.online", "stream.offline")]) + registered
             missing = expected - actual
-            threshold = max(20, int(expected * 0.10))  # 10% or 20, whichever is larger
+            threshold = max(20, int(expected * 0.10))
             if missing > threshold:
                 await self.log_to_channel(
                     "🚨", "EventSub Subscription Mismatch",
