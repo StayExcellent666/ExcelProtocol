@@ -1815,6 +1815,15 @@ async def get_permission_issues(request):
         })
     return web.json_response(result)
 
+async def get_unresolvable_streamers(request):
+    """Return streamers that Twitch can no longer resolve for this guild."""
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch(
+        "SELECT streamer_name, detected_at FROM unresolvable_streamers WHERE guild_id = ? ORDER BY streamer_name",
+        (guild_id,)
+    )
+    return web.json_response([{"streamer_name": r["streamer_name"], "detected_at": r["detected_at"]} for r in rows])
+
 async def recheck_permissions(request):
     """Trigger an immediate permission re-check for a guild via the bot."""
     guild_id = request.match_info["guild_id"]
@@ -2124,6 +2133,7 @@ def create_dashboard_app(bot=None):
     app.router.add_delete("/api/guild/{guild_id}/cleanup/{channel_id}", delete_cleanup_config)
     app.router.add_get  ("/api/guild/{guild_id}/permission-issues",     get_permission_issues)
     app.router.add_post ("/api/guild/{guild_id}/permission-issues/recheck", recheck_permissions)
+    app.router.add_get  ("/api/guild/{guild_id}/unresolvable-streamers", get_unresolvable_streamers)
     app.router.add_get  ("/api/dev/global-stats",   get_global_stats)
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
     app.router.add_post ("/api/dev/db-tools",       db_tools_action)

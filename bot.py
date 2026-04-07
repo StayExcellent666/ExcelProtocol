@@ -424,13 +424,18 @@ class TwitchNotifierBot(discord.Client):
         if not unique_logins:
             return
 
-        # Build login → guild names lookup for error reporting
+        # Build login → guild ids+names lookup for error reporting
         login_guilds: dict[str, list[str]] = {}
+        login_guild_ids: dict[str, list[int]] = {}
         for s in streamers:
             login = s['streamer_name'].lower()
             guild = self.get_guild(s['guild_id'])
             guild_name = guild.name if guild else str(s['guild_id'])
             login_guilds.setdefault(login, []).append(guild_name)
+            login_guild_ids.setdefault(login, []).append(s['guild_id'])
+
+        # Clear stale unresolvable records — will repopulate fresh below
+        self.db.clear_unresolvable_streamers()
 
         # Get existing subscriptions so we don't double-register
         existing = await self.twitch.get_subscriptions()
@@ -471,6 +476,9 @@ class TwitchNotifierBot(discord.Client):
                     guild_str = ", ".join(set(guilds))
                     unresolvable.append(f"{login} ({guild_str})")
                     logger.warning(f"EventSub: no Twitch user for '{login}' in [{guild_str}] — banned/deleted/renamed?")
+                    # Persist to DB so dashboard can show warning per guild
+                    for gid in login_guild_ids.get(login, []):
+                        self.db.add_unresolvable_streamer(login, gid)
 
             for user in users:
                 uid = user["id"]

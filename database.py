@@ -360,6 +360,17 @@ class Database:
             )
         ''')
 
+        # Unresolvable streamers — accounts that Twitch no longer recognises (banned/deleted/renamed)
+        # Cleared and repopulated on every EventSub sync
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS unresolvable_streamers (
+                streamer_name TEXT NOT NULL,
+                guild_id      INTEGER NOT NULL,
+                detected_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (streamer_name, guild_id)
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -462,6 +473,51 @@ class Database:
         )
         conn.commit()
         conn.close()
+
+    # ----------------------------------------------------------------
+    # Unresolvable streamers
+    # ----------------------------------------------------------------
+
+    def clear_unresolvable_streamers(self):
+        """Wipe all unresolvable streamer records — called at start of each EventSub sync."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM unresolvable_streamers')
+        conn.commit()
+        conn.close()
+
+    def add_unresolvable_streamer(self, streamer_name: str, guild_id: int):
+        """Record a streamer that Twitch can no longer resolve."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO unresolvable_streamers (streamer_name, guild_id, detected_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(streamer_name, guild_id) DO UPDATE SET detected_at = CURRENT_TIMESTAMP
+        ''', (streamer_name.lower(), guild_id))
+        conn.commit()
+        conn.close()
+
+    def get_unresolvable_streamers(self, guild_id: int) -> list:
+        """Return list of unresolvable streamer names for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT streamer_name, detected_at FROM unresolvable_streamers WHERE guild_id = ? ORDER BY streamer_name',
+            (guild_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'streamer_name': r[0], 'detected_at': r[1]} for r in rows]
+
+    def get_all_unresolvable_streamers(self) -> list:
+        """Return all unresolvable streamers across all guilds."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT streamer_name, guild_id, detected_at FROM unresolvable_streamers ORDER BY streamer_name')
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'streamer_name': r[0], 'guild_id': r[1], 'detected_at': r[2]} for r in rows]
 
     def add_streamer(self, guild_id: int, streamer_name: str, channel_id: int, custom_channel_id: int = None) -> bool:
         """
@@ -1378,6 +1434,7 @@ class Database:
         cursor.execute('DELETE FROM stream_events WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM permission_issues WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM stat_channels WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM unresolvable_streamers WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()
