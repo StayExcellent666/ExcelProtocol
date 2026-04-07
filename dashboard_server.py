@@ -244,7 +244,7 @@ def _session_can_access_guild(session: dict, guild_id: str) -> bool:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    public = ("/health", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/dev", "/auth/twitch/callback", "/api/eventsub/callback")
+    public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/dev", "/auth/twitch/callback", "/api/eventsub/callback")
     if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/auth/twitch/login"):
         return await handler(request)
 
@@ -1836,6 +1836,136 @@ async def recheck_permissions(request):
     _asyncio.create_task(_bot_ref._check_guild_permissions(guild))
     return web.json_response({"ok": True})
 
+
+async def fix_permissions(request):
+    """Attempt to auto-fix missing channel permissions by adding overwrites."""
+    guild_id = request.match_info["guild_id"]
+    channel_id = int(request.match_info["channel_id"])
+
+    if _bot_ref is None:
+        raise web.HTTPServiceUnavailable(reason="Bot not available")
+    guild = _bot_ref.get_guild(int(guild_id))
+    if not guild:
+        raise web.HTTPNotFound(reason="Guild not found")
+
+    channel = guild.get_channel(channel_id)
+    if not channel:
+        return web.json_response({"ok": False, "message": "Channel not found."})
+
+    guild_perms = guild.me.guild_permissions
+
+    # Check if we have manage_roles or manage_channels — needed to set overwrites
+    can_fix = guild_perms.manage_roles or guild_perms.manage_channels or guild_perms.administrator
+    if not can_fix:
+        return web.json_response({
+            "ok": False,
+            "can_fix": False,
+            "message": (
+                "ExcelProtocol doesn't have **Manage Roles** or **Manage Channels** "
+                "so it can't fix this automatically.\n\n"
+                "**To fix manually in Discord:**\n"
+                "1. Go to your server **Settings → Channels**\n"
+                f"2. Select the channel **#{channel.name}**\n"
+                "3. Click **Permissions → + Add member or role**\n"
+                "4. Select **ExcelProtocol**\n"
+                "5. Enable: **View Channel**, **Send Messages**, **Embed Links**, **Manage Messages**\n"
+                "6. Save and click **Re-check** to confirm."
+            )
+        })
+
+    # Attempt to set channel overwrites
+    import discord as _discord
+    try:
+        overwrite = channel.overwrites_for(guild.me)
+        overwrite.view_channel    = True
+        overwrite.send_messages   = True
+        overwrite.embed_links     = True
+        overwrite.manage_messages = True
+        await channel.set_permissions(guild.me, overwrite=overwrite, reason="ExcelProtocol auto-fix permissions")
+
+        # Trigger a re-check to clear the warning if it worked
+        asyncio.create_task(_bot_ref._check_guild_permissions(guild))
+
+        return web.json_response({
+            "ok": True,
+            "can_fix": True,
+            "message": f"Permissions updated for #{channel.name}. Running a re-check now..."
+        })
+    except _discord.Forbidden:
+        return web.json_response({
+            "ok": False,
+            "can_fix": False,
+            "message": (
+                "Fix failed — ExcelProtocol's role may be too low in the hierarchy to set permissions.\n\n"
+                "**To fix manually in Discord:**\n"
+                "1. Go to your server **Settings → Channels**\n"
+                f"2. Select the channel **#{channel.name}**\n"
+                "3. Click **Permissions → + Add member or role**\n"
+                "4. Select **ExcelProtocol**\n"
+                "5. Enable: **View Channel**, **Send Messages**, **Embed Links**, **Manage Messages**\n"
+                "6. Save and click **Re-check** to confirm."
+            )
+        })
+    except Exception as e:
+        logger.error(f"Error auto-fixing permissions for channel {channel_id}: {e}")
+        return web.json_response({"ok": False, "can_fix": False, "message": f"Unexpected error: {str(e)[:200]}"})
+
+
+async def fix_permissions(request):
+    """Attempt to auto-fix permission issues in a channel by adding channel overwrites."""
+    guild_id  = request.match_info["guild_id"]
+    channel_id = request.match_info["channel_id"]
+
+    if _bot_ref is None:
+        raise web.HTTPServiceUnavailable(reason="Bot not available")
+
+    guild = _bot_ref.get_guild(int(guild_id))
+    if not guild:
+        raise web.HTTPNotFound(reason="Guild not found")
+
+    channel = guild.get_channel(int(channel_id))
+    if not channel:
+        raise web.HTTPNotFound(reason="Channel not found")
+
+    guild_perms = guild.me.guild_permissions
+
+    # Check if we have the ability to set channel overwrites
+    can_fix = guild_perms.manage_roles or guild_perms.manage_channels
+    if not can_fix:
+        return web.json_response({
+            "ok": False,
+            "reason": "missing_perms",
+            "message": "ExcelProtocol needs **Manage Roles** or **Manage Channels** to auto-fix permissions."
+        })
+
+    # Attempt to add channel overwrites for the bot
+    import discord as _discord
+    try:
+        overwrite = channel.overwrites_for(guild.me)
+        overwrite.send_messages    = True
+        overwrite.embed_links      = True
+        overwrite.manage_messages  = True
+        overwrite.view_channel     = True
+        overwrite.read_message_history = True
+        await channel.set_permissions(guild.me, overwrite=overwrite, reason="ExcelProtocol auto-fix permissions")
+
+        # Re-check and clear the issue if resolved
+        await _bot_ref._check_guild_permissions(guild)
+
+        return web.json_response({"ok": True, "message": "Permissions fixed successfully."})
+    except _discord.Forbidden:
+        return web.json_response({
+            "ok": False,
+            "reason": "forbidden",
+            "message": "ExcelProtocol was denied when trying to update channel permissions. The bot's role may be too low in the server hierarchy."
+        })
+    except Exception as e:
+        return web.json_response({
+            "ok": False,
+            "reason": "error",
+            "message": f"Unexpected error: {str(e)[:200]}"
+        })
+
 # ── Stat Channels ─────────────────────────────────────────────────────────────
 async def get_stat_channels(request):
     guild_id = request.match_info["guild_id"]
@@ -2111,6 +2241,498 @@ def _legal_html(title, subtitle, body_html):
 </html>"""
 
 
+async def landing_page(request):
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ExcelProtocol — Twitch Stream Notifications for Discord</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:       #080c12;
+      --bg2:      #0d1420;
+      --cyan:     #00f5d4;
+      --cyan2:    #00c4aa;
+      --cyan-dim: rgba(0,245,212,0.08);
+      --green:    #39d98a;
+      --text:     #f0f4f8;
+      --text2:    #94a3b8;
+      --text3:    #4a5568;
+      --border:   rgba(0,245,212,0.12);
+      --purple:   #a78bfa;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body {
+      font-family:'Outfit',sans-serif;
+      background:var(--bg);
+      color:var(--text);
+      overflow-x:hidden;
+    }
+
+    /* ── Canvas background ── */
+    #bg-canvas {
+      position:fixed; inset:0; z-index:0; pointer-events:none;
+      opacity:0.4;
+    }
+
+    /* ── Nav ── */
+    nav {
+      position:fixed; top:0; left:0; right:0; z-index:100;
+      display:flex; align-items:center; justify-content:space-between;
+      padding:0 40px; height:60px;
+      background:rgba(8,12,18,0.85);
+      backdrop-filter:blur(16px);
+      border-bottom:1px solid var(--border);
+    }
+    .nav-logo {
+      display:flex; align-items:center; gap:10px;
+      font-family:'Syne',sans-serif; font-weight:800; font-size:17px;
+      color:var(--text); text-decoration:none; letter-spacing:-0.3px;
+    }
+    .nav-logo img { width:30px; height:30px; border-radius:50%; border:1px solid var(--cyan); }
+    .nav-links { display:flex; align-items:center; gap:8px; }
+    .nav-link {
+      padding:7px 16px; border-radius:8px; font-size:13px; font-weight:500;
+      color:var(--text2); text-decoration:none; transition:color 0.2s;
+      font-family:'Outfit',sans-serif;
+    }
+    .nav-link:hover { color:var(--text); }
+    .nav-btn {
+      padding:7px 18px; border-radius:8px; font-size:13px; font-weight:600;
+      background:var(--cyan-dim); color:var(--cyan);
+      border:1px solid rgba(0,245,212,0.3); text-decoration:none;
+      transition:all 0.2s; font-family:'Outfit',sans-serif;
+    }
+    .nav-btn:hover { background:rgba(0,245,212,0.15); box-shadow:0 0 16px rgba(0,245,212,0.2); }
+
+    /* ── Hero ── */
+    .hero {
+      position:relative; z-index:1;
+      min-height:100vh;
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      text-align:center; padding:80px 24px 60px;
+    }
+    .hero-badge {
+      display:inline-flex; align-items:center; gap:7px;
+      padding:5px 14px; border-radius:20px;
+      background:rgba(57,217,138,0.08); border:1px solid rgba(57,217,138,0.25);
+      font-size:11px; font-weight:600; color:var(--green);
+      font-family:'JetBrains Mono',monospace; letter-spacing:1px;
+      text-transform:uppercase; margin-bottom:28px;
+      animation:fadeUp 0.6s ease both;
+    }
+    .pulse-dot {
+      width:6px; height:6px; border-radius:50%; background:var(--green);
+      animation:pulse 2s ease infinite;
+      box-shadow:0 0 6px rgba(57,217,138,0.8);
+    }
+    @keyframes pulse {
+      0%,100% { opacity:1; transform:scale(1); }
+      50% { opacity:0.6; transform:scale(0.85); }
+    }
+    .hero-title {
+      font-family:'Syne',sans-serif; font-weight:800;
+      font-size:clamp(44px, 8vw, 88px);
+      line-height:1.0; letter-spacing:-2px;
+      color:var(--text);
+      animation:fadeUp 0.6s 0.1s ease both;
+      margin-bottom:6px;
+    }
+    .hero-title span {
+      background:linear-gradient(135deg, var(--cyan) 0%, var(--purple) 100%);
+      -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+      background-clip:text;
+    }
+    .hero-sub {
+      font-size:clamp(16px, 2.5vw, 20px); color:var(--text2); font-weight:300;
+      max-width:540px; margin:20px auto 40px; line-height:1.6;
+      animation:fadeUp 0.6s 0.2s ease both;
+    }
+    .hero-actions {
+      display:flex; gap:12px; flex-wrap:wrap; justify-content:center;
+      animation:fadeUp 0.6s 0.3s ease both;
+    }
+    .btn-primary {
+      display:inline-flex; align-items:center; gap:8px;
+      padding:14px 28px; border-radius:10px; font-size:15px; font-weight:700;
+      background:var(--cyan); color:#080c12; text-decoration:none;
+      font-family:'Outfit',sans-serif; letter-spacing:-0.2px;
+      transition:all 0.2s; box-shadow:0 4px 24px rgba(0,245,212,0.3);
+    }
+    .btn-primary:hover { transform:translateY(-2px); box-shadow:0 8px 32px rgba(0,245,212,0.45); }
+    .btn-secondary {
+      display:inline-flex; align-items:center; gap:8px;
+      padding:14px 28px; border-radius:10px; font-size:15px; font-weight:600;
+      background:transparent; color:var(--text);
+      border:1px solid rgba(255,255,255,0.15); text-decoration:none;
+      font-family:'Outfit',sans-serif;
+      transition:all 0.2s;
+    }
+    .btn-secondary:hover { background:rgba(255,255,255,0.05); border-color:rgba(255,255,255,0.25); }
+    .hero-stats {
+      display:flex; gap:40px; margin-top:64px; flex-wrap:wrap; justify-content:center;
+      animation:fadeUp 0.6s 0.4s ease both;
+    }
+    .stat { text-align:center; }
+    .stat-num {
+      font-family:'Syne',sans-serif; font-weight:800; font-size:32px;
+      color:var(--cyan); line-height:1;
+    }
+    .stat-label { font-size:12px; color:var(--text3); margin-top:4px; font-family:'JetBrains Mono',monospace; letter-spacing:0.5px; }
+
+    /* ── Section ── */
+    section {
+      position:relative; z-index:1;
+      padding:100px 24px;
+    }
+    .section-inner { max-width:1100px; margin:0 auto; }
+    .section-label {
+      font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500;
+      color:var(--cyan); letter-spacing:3px; text-transform:uppercase;
+      margin-bottom:12px;
+    }
+    .section-title {
+      font-family:'Syne',sans-serif; font-weight:800;
+      font-size:clamp(28px, 4vw, 42px); line-height:1.1;
+      letter-spacing:-1px; color:var(--text); margin-bottom:16px;
+    }
+    .section-sub { font-size:16px; color:var(--text2); max-width:520px; line-height:1.6; }
+
+    /* ── Feature grid ── */
+    .feature-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));
+      gap:16px; margin-top:56px;
+    }
+    .feature-card {
+      padding:28px; border-radius:14px;
+      background:rgba(13,20,32,0.8);
+      border:1px solid var(--border);
+      transition:all 0.3s;
+      position:relative; overflow:hidden;
+    }
+    .feature-card::before {
+      content:''; position:absolute; inset:0;
+      background:radial-gradient(circle at top left, rgba(0,245,212,0.05) 0%, transparent 60%);
+      opacity:0; transition:opacity 0.3s;
+    }
+    .feature-card:hover { border-color:rgba(0,245,212,0.25); transform:translateY(-3px); }
+    .feature-card:hover::before { opacity:1; }
+    .feature-icon { font-size:26px; margin-bottom:14px; }
+    .feature-title {
+      font-family:'Syne',sans-serif; font-weight:700; font-size:16px;
+      color:var(--text); margin-bottom:8px;
+    }
+    .feature-desc { font-size:14px; color:var(--text2); line-height:1.6; }
+    .feature-tag {
+      display:inline-block; margin-top:12px;
+      padding:3px 8px; border-radius:4px; font-size:10px;
+      font-family:'JetBrains Mono',monospace; font-weight:500;
+      background:rgba(0,245,212,0.08); color:var(--cyan);
+      border:1px solid rgba(0,245,212,0.15);
+    }
+
+    /* ── How it works ── */
+    .steps { display:flex; flex-direction:column; gap:0; margin-top:56px; max-width:600px; }
+    .step { display:flex; gap:24px; position:relative; padding-bottom:40px; }
+    .step:last-child { padding-bottom:0; }
+    .step-left { display:flex; flex-direction:column; align-items:center; }
+    .step-num {
+      width:40px; height:40px; border-radius:50%; flex-shrink:0;
+      background:var(--cyan-dim); border:1px solid rgba(0,245,212,0.3);
+      display:flex; align-items:center; justify-content:center;
+      font-family:'JetBrains Mono',monospace; font-weight:700; font-size:13px;
+      color:var(--cyan);
+    }
+    .step-line {
+      width:1px; flex:1; background:linear-gradient(to bottom, rgba(0,245,212,0.2), transparent);
+      margin-top:8px;
+    }
+    .step:last-child .step-line { display:none; }
+    .step-content { padding-top:8px; }
+    .step-title { font-family:'Syne',sans-serif; font-weight:700; font-size:16px; color:var(--text); margin-bottom:6px; }
+    .step-desc { font-size:14px; color:var(--text2); line-height:1.6; }
+
+    /* ── CTA ── */
+    .cta-section {
+      padding:100px 24px;
+      position:relative; z-index:1;
+    }
+    .cta-inner {
+      max-width:700px; margin:0 auto; text-align:center;
+      padding:64px 40px;
+      background:linear-gradient(135deg, rgba(0,245,212,0.06) 0%, rgba(167,139,250,0.06) 100%);
+      border-radius:24px; border:1px solid rgba(0,245,212,0.15);
+      position:relative; overflow:hidden;
+    }
+    .cta-inner::before {
+      content:''; position:absolute; top:-60px; left:50%; transform:translateX(-50%);
+      width:300px; height:300px; border-radius:50%;
+      background:radial-gradient(circle, rgba(0,245,212,0.08) 0%, transparent 70%);
+      pointer-events:none;
+    }
+    .cta-title {
+      font-family:'Syne',sans-serif; font-weight:800;
+      font-size:clamp(28px, 4vw, 40px); line-height:1.1;
+      letter-spacing:-1px; margin-bottom:14px;
+    }
+    .cta-sub { font-size:16px; color:var(--text2); margin-bottom:36px; line-height:1.6; }
+
+    /* ── Footer ── */
+    footer {
+      position:relative; z-index:1;
+      border-top:1px solid var(--border);
+      padding:32px 40px;
+      display:flex; align-items:center; justify-content:space-between;
+      flex-wrap:wrap; gap:16px;
+    }
+    .footer-left { font-size:13px; color:var(--text3); font-family:'JetBrains Mono',monospace; }
+    .footer-links { display:flex; gap:20px; }
+    .footer-link { font-size:13px; color:var(--text3); text-decoration:none; transition:color 0.2s; }
+    .footer-link:hover { color:var(--cyan); }
+
+    @keyframes fadeUp {
+      from { opacity:0; transform:translateY(20px); }
+      to   { opacity:1; transform:translateY(0); }
+    }
+
+    /* ── Divider ── */
+    .divider {
+      height:1px; background:linear-gradient(to right, transparent, var(--border), transparent);
+      max-width:1100px; margin:0 auto;
+    }
+  </style>
+</head>
+<body>
+
+<canvas id="bg-canvas"></canvas>
+
+<!-- Nav -->
+<nav>
+  <a class="nav-logo" href="/">
+    <img src="data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAoACgDASIAAhEBAxEB/8QAGgAAAgMBAQAAAAAAAAAAAAAAAAUDBAYCB//EACsQAAIBAwMDBAIDAQAAAAAAAAECAwAEEQUSITFBUWETInGRBhQyQoH/xAAYAQADAQEAAAAAAAAAAAAAAAABAgMABP/EAB0RAAICAwEBAAAAAAAAAAAAAAABAhEDEiEx/9oADAMBAAIRAxEAPwDo7bxHp1xJHCLpFuG5ERO0sPkVZstYtL8kQy5deHjYbWX7FcLq+izalp8j2rW8MjSKRIVG8DuAf3UUFrLBe21vpVrLbxwKVmaRQ2wdlHqazm4rBrjNnYrrJPRSJPOlAFxPYucGVE4PqK1FJPO0JEFxGjHhv3B/tULDWrm006FXW3nlRAsRVtjEjr36fFRLrbtvaOa6uMSgvHJGpBhxydvp26VhzLNaJbQtzCr3MMkghlZkVgSCCwHLdqV/4pDFdTG8VmGRG+F65wf8AVIX9xNd3LPdSM06jaeOAPakaFVpCXK0hU1JHpGo2F1bpHqVwJFk27Hj+7ntWq1mT3KBc/i3V00T6pbXqhLhFgkXDKfUH5rRWFpFp9jBaQ52RLgE9z3J+a2pSiluZzcr3MooopRAXGl2lxIJTCEn6SxjaxH5/deJZVfVreJWVkhVmfHqT0/OjRUyhJ9yfmyCi7HlHFFFYqMkbNiiiipEf/9k=" alt="ExcelProtocol">
+    ExcelProtocol
+  </a>
+  <div class="nav-links">
+    <a class="nav-link" href="#features">Features</a>
+    <a class="nav-link" href="#how-it-works">How it works</a>
+    <a class="nav-link" href="/terms">Terms</a>
+    <a class="nav-link" href="/privacy">Privacy</a>
+    <a class="nav-btn" href="/app/">Dashboard</a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-badge">
+    <div class="pulse-dot"></div>
+    Powered by Twitch EventSub — instant notifications
+  </div>
+  <h1 class="hero-title">Never miss a<br><span>live stream</span></h1>
+  <p class="hero-sub">ExcelProtocol brings real-time Twitch stream notifications to your Discord server — with a full web dashboard to manage everything.</p>
+  <div class="hero-actions">
+    <a class="btn-primary" href="https://discord.com/oauth2/authorize?client_id=1472217050104729701&permissions=1497740488784&scope=bot+applications.commands">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057c.002.022.015.043.03.056a19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/></svg>
+      Add to Discord
+    </a>
+    <a class="btn-secondary" href="/app/">
+      Open Dashboard →
+    </a>
+  </div>
+  <div class="hero-stats">
+    <div class="stat">
+      <div class="stat-num">instant</div>
+      <div class="stat-label">notification speed</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">EventSub</div>
+      <div class="stat-label">webhook powered</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">18+</div>
+      <div class="stat-label">features</div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- Features -->
+<section id="features">
+  <div class="section-inner">
+    <div class="section-label">What it does</div>
+    <h2 class="section-title">Everything your streaming<br>community needs</h2>
+    <p class="section-sub">From instant live alerts to reaction roles, ExcelProtocol handles the Discord side so you can focus on streaming.</p>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon">📺</div>
+        <div class="feature-title">Instant Stream Notifications</div>
+        <div class="feature-desc">Powered by Twitch EventSub webhooks — notifications fire the moment a streamer goes live, not after a polling delay.</div>
+        <span class="feature-tag">EventSub</span>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">⚙️</div>
+        <div class="feature-title">Web Dashboard</div>
+        <div class="feature-desc">Manage everything from a sleek web dashboard. Add streamers, configure channels, set ping roles — no commands needed.</div>
+        <span class="feature-tag">No-code setup</span>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🎭</div>
+        <div class="feature-title">Reaction Roles</div>
+        <div class="feature-desc">Create fully customisable role panels with single-choice, multi-choice, or add-only modes. Fully managed from the dashboard.</div>
+        <span class="feature-tag">Roles</span>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🟣</div>
+        <div class="feature-title">Channel Point Rewards</div>
+        <div class="feature-desc">Connect your Twitch account to trigger OBS video overlays from channel point redemptions in real time.</div>
+        <span class="feature-tag">Twitch OAuth</span>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📊</div>
+        <div class="feature-title">Server Stats</div>
+        <div class="feature-desc">Display live member counts in voice channel names, auto-updating every 15 minutes.</div>
+        <span class="feature-tag">Auto-update</span>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔔</div>
+        <div class="feature-title">Smart Deduplication</div>
+        <div class="feature-desc">Built-in duplicate prevention via Twitch message ID dedup and DB-level checks — no double notifications ever.</div>
+        <span class="feature-tag">Reliability</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- How it works -->
+<section id="how-it-works">
+  <div class="section-inner" style="display:flex; gap:80px; align-items:flex-start; flex-wrap:wrap;">
+    <div style="flex:1; min-width:280px;">
+      <div class="section-label">Setup in minutes</div>
+      <h2 class="section-title">How it works</h2>
+      <p class="section-sub">Get stream notifications running in your server in under five minutes.</p>
+    </div>
+    <div class="steps" style="flex:1; min-width:280px;">
+      <div class="step">
+        <div class="step-left">
+          <div class="step-num">1</div>
+          <div class="step-line"></div>
+        </div>
+        <div class="step-content">
+          <div class="step-title">Add ExcelProtocol to your server</div>
+          <div class="step-desc">Click "Add to Discord" and select your server. The bot joins with all required permissions.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-left">
+          <div class="step-num">2</div>
+          <div class="step-line"></div>
+        </div>
+        <div class="step-content">
+          <div class="step-title">Log into the dashboard</div>
+          <div class="step-desc">Sign in with Discord OAuth at excelprotocol.fly.dev. Your servers appear automatically.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-left">
+          <div class="step-num">3</div>
+          <div class="step-line"></div>
+        </div>
+        <div class="step-content">
+          <div class="step-title">Add your streamers</div>
+          <div class="step-desc">Search for any Twitch username and pick which channel to post notifications to.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-left">
+          <div class="step-num">4</div>
+          <div class="step-line"></div>
+        </div>
+        <div class="step-content">
+          <div class="step-title">Go live — get notified instantly</div>
+          <div class="step-desc">EventSub subscriptions are registered automatically. The moment a streamer goes live, your server knows.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- CTA -->
+<section class="cta-section">
+  <div class="cta-inner">
+    <h2 class="cta-title">Ready to level up your server?</h2>
+    <p class="cta-sub">Add ExcelProtocol in seconds and start sending instant stream notifications to your community.</p>
+    <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+      <a class="btn-primary" href="https://discord.com/oauth2/authorize?client_id=1472217050104729701&permissions=1497740488784&scope=bot+applications.commands">
+        Add to Discord — it's free
+      </a>
+      <a class="btn-secondary" href="/app/">Open Dashboard</a>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <div class="footer-left">© 2026 ExcelProtocol · Built by stayexcellent</div>
+  <div class="footer-links">
+    <a class="footer-link" href="/app/">Dashboard</a>
+    <a class="footer-link" href="/terms">Terms</a>
+    <a class="footer-link" href="/privacy">Privacy</a>
+  </div>
+</footer>
+
+<script>
+  // Animated particle canvas
+  const canvas = document.getElementById('bg-canvas');
+  const ctx = canvas.getContext('2d');
+  let W, H, particles = [];
+
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  for (let i = 0; i < 60; i++) {
+    particles.push({
+      x: Math.random() * window.innerWidth,
+      y: Math.random() * window.innerHeight,
+      r: Math.random() * 1.5 + 0.3,
+      dx: (Math.random() - 0.5) * 0.3,
+      dy: (Math.random() - 0.5) * 0.3,
+      o: Math.random() * 0.4 + 0.1
+    });
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    particles.forEach(p => {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(0,245,212,${p.o})`;
+      ctx.fill();
+      p.x += p.dx; p.y += p.dy;
+      if (p.x < 0 || p.x > W) p.dx *= -1;
+      if (p.y < 0 || p.y > H) p.dy *= -1;
+    });
+    requestAnimationFrame(draw);
+  }
+  draw();
+</script>
+</body>
+</html>"""
+    return web.Response(text=html, content_type="text/html")
+
+
 async def terms_page(request):
     html = _legal_html(
         "Terms of Service",
@@ -2297,6 +2919,7 @@ def create_dashboard_app(bot=None):
     app = web.Application(middlewares=[error_logging_middleware, auth_middleware])
 
     app.router.add_get("/health",        health)
+    app.router.add_get("/",              landing_page)
     app.router.add_get("/terms",         terms_page)
     app.router.add_get("/privacy",       privacy_page)
     app.router.add_get("/auth/login",    auth_login)
@@ -2353,6 +2976,7 @@ def create_dashboard_app(bot=None):
     app.router.add_delete("/api/guild/{guild_id}/cleanup/{channel_id}", delete_cleanup_config)
     app.router.add_get  ("/api/guild/{guild_id}/permission-issues",     get_permission_issues)
     app.router.add_post ("/api/guild/{guild_id}/permission-issues/recheck", recheck_permissions)
+    app.router.add_post ("/api/guild/{guild_id}/permission-issues/{channel_id}/fix", fix_permissions)
     app.router.add_get  ("/api/guild/{guild_id}/unresolvable-streamers", get_unresolvable_streamers)
     app.router.add_get  ("/api/dev/global-stats",   get_global_stats)
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
