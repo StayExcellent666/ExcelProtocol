@@ -36,7 +36,7 @@ A Discord bot built for Twitch streaming communities. ExcelProtocol delivers ins
 - Full channel rewards management from the dashboard
 
 ### ⚙️ Server Management
-- Web dashboard at [excelprotocol.fly.dev](https://excelprotocol.fly.dev) — no commands needed
+- Web dashboard at [excelprotocol.fly.dev](https://excelprotocol.fly.dev/app) — no commands needed
 - Permission checker with yellow warning banners for misconfigured channels
 - Birthday tracking with automated announcements
 - Twitch chat commands and custom chat bot integration
