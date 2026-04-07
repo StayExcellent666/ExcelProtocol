@@ -2249,7 +2249,7 @@ async def landing_page(request):
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ExcelProtocol — Twitch Stream Notifications for Discord</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600;800&family=Space+Grotesk:wght@700;800&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg:       #080c12;
@@ -2335,9 +2335,9 @@ async def landing_page(request):
       50% { opacity:0.6; transform:scale(0.85); }
     }
     .hero-title {
-      font-family:'Syne',sans-serif; font-weight:800;
+      font-family:'Space Grotesk',sans-serif; font-weight:800;
       font-size:clamp(44px, 8vw, 88px);
-      line-height:1.0; letter-spacing:-2px;
+      line-height:1.1; letter-spacing:-1px;
       color:var(--text);
       animation:fadeUp 0.6s 0.1s ease both;
       margin-bottom:6px;
