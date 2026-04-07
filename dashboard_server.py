@@ -2249,7 +2249,7 @@ async def landing_page(request):
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ExcelProtocol — Twitch Stream Notifications for Discord</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600;800&family=Space+Grotesk:wght@700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800;900&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg:       #080c12;
@@ -2290,7 +2290,7 @@ async def landing_page(request):
     }
     .nav-logo {
       display:flex; align-items:center; gap:10px;
-      font-family:'Syne',sans-serif; font-weight:800; font-size:17px;
+      font-family:'Orbitron',sans-serif; font-weight:800; font-size:17px;
       color:var(--text); text-decoration:none; letter-spacing:-0.3px;
     }
     .nav-logo img { width:30px; height:30px; border-radius:50%; border:1px solid var(--cyan); }
@@ -2335,9 +2335,9 @@ async def landing_page(request):
       50% { opacity:0.6; transform:scale(0.85); }
     }
     .hero-title {
-      font-family:'Space Grotesk',sans-serif; font-weight:800;
-      font-size:clamp(44px, 8vw, 88px);
-      line-height:1.1; letter-spacing:-1px;
+      font-family:'Orbitron',sans-serif; font-weight:900;
+      font-size:clamp(36px, 6vw, 72px);
+      line-height:1.15; letter-spacing:0px;
       color:var(--text);
       animation:fadeUp 0.6s 0.1s ease both;
       margin-bottom:6px;
@@ -2379,7 +2379,7 @@ async def landing_page(request):
     }
     .stat { text-align:center; }
     .stat-num {
-      font-family:'Syne',sans-serif; font-weight:800; font-size:32px;
+      font-family:'Orbitron',sans-serif; font-weight:800; font-size:32px;
       color:var(--cyan); line-height:1;
     }
     .stat-label { font-size:12px; color:var(--text3); margin-top:4px; font-family:'JetBrains Mono',monospace; letter-spacing:0.5px; }
@@ -2396,9 +2396,9 @@ async def landing_page(request):
       margin-bottom:12px;
     }
     .section-title {
-      font-family:'Syne',sans-serif; font-weight:800;
-      font-size:clamp(28px, 4vw, 42px); line-height:1.1;
-      letter-spacing:-1px; color:var(--text); margin-bottom:16px;
+      font-family:'Orbitron',sans-serif; font-weight:800;
+      font-size:clamp(22px, 3vw, 34px); line-height:1.2;
+      letter-spacing:0px; color:var(--text); margin-bottom:16px;
     }
     .section-sub { font-size:16px; color:var(--text2); max-width:520px; line-height:1.6; }
 
@@ -2424,7 +2424,7 @@ async def landing_page(request):
     .feature-card:hover::before { opacity:1; }
     .feature-icon { font-size:26px; margin-bottom:14px; }
     .feature-title {
-      font-family:'Syne',sans-serif; font-weight:700; font-size:16px;
+      font-family:'Orbitron',sans-serif; font-weight:700; font-size:16px;
       color:var(--text); margin-bottom:8px;
     }
     .feature-desc { font-size:14px; color:var(--text2); line-height:1.6; }
@@ -2454,7 +2454,7 @@ async def landing_page(request):
     }
     .step:last-child .step-line { display:none; }
     .step-content { padding-top:8px; }
-    .step-title { font-family:'Syne',sans-serif; font-weight:700; font-size:16px; color:var(--text); margin-bottom:6px; }
+    .step-title { font-family:'Orbitron',sans-serif; font-weight:700; font-size:16px; color:var(--text); margin-bottom:6px; }
     .step-desc { font-size:14px; color:var(--text2); line-height:1.6; }
 
     /* ── CTA ── */
@@ -2476,9 +2476,9 @@ async def landing_page(request):
       pointer-events:none;
     }
     .cta-title {
-      font-family:'Syne',sans-serif; font-weight:800;
-      font-size:clamp(28px, 4vw, 40px); line-height:1.1;
-      letter-spacing:-1px; margin-bottom:14px;
+      font-family:'Orbitron',sans-serif; font-weight:800;
+      font-size:clamp(22px, 3vw, 34px); line-height:1.2;
+      letter-spacing:0px; margin-bottom:14px;
     }
     .cta-sub { font-size:16px; color:var(--text2); margin-bottom:36px; line-height:1.6; }
 
