@@ -2063,6 +2063,224 @@ async def db_tools_action(request):
     raise web.HTTPBadRequest(reason=f"Unknown action: {action}")
 
 
+# ── Legal Pages ───────────────────────────────────────────────────────────────
+_LEGAL_CSS = """
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+         background: #0a0f16; color: #e2e8f0; line-height: 1.7; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 48px 28px 80px; }
+  .logo { font-size: 13px; font-weight: 700; color: #00f5d4; letter-spacing: 2px;
+          text-transform: uppercase; margin-bottom: 8px; }
+  h1.title { font-size: 36px; font-weight: 800; color: #fff; margin-bottom: 6px; }
+  .subtitle { font-size: 13px; color: #64748b; margin-bottom: 48px; }
+  h2 { font-size: 18px; font-weight: 700; color: #00f5d4; margin: 36px 0 10px;
+       padding-bottom: 6px; border-bottom: 1px solid rgba(0,245,212,0.15); }
+  p { margin-bottom: 14px; color: #cbd5e1; font-size: 15px; }
+  ul { margin: 0 0 14px 24px; }
+  li { color: #cbd5e1; font-size: 15px; margin-bottom: 6px; }
+  .footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid #1e293b;
+            font-size: 12px; color: #475569; }
+  a { color: #00f5d4; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .back { display: inline-block; margin-bottom: 32px; font-size: 13px;
+          color: #64748b; }
+  .back:hover { color: #00f5d4; }
+"""
+
+def _legal_html(title, subtitle, body_html):
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title} — ExcelProtocol</title>
+  <style>{_LEGAL_CSS}</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo">ExcelProtocol</div>
+    <h1 class="title">{title}</h1>
+    <div class="subtitle">{subtitle}</div>
+    {body_html}
+    <div class="footer">
+      ExcelProtocol is an independent project and is not affiliated with Discord Inc. or Twitch Interactive, Inc.<br>
+      <a href="/terms">Terms of Service</a> &nbsp;·&nbsp; <a href="/privacy">Privacy Policy</a>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+async def terms_page(request):
+    html = _legal_html(
+        "Terms of Service",
+        "Last updated: April 7, 2026",
+        """
+        <h2>1. Acceptance of Terms</h2>
+        <p>By adding ExcelProtocol to your Discord server, using the ExcelProtocol dashboard at excelprotocol.fly.dev, or otherwise interacting with any ExcelProtocol service, you agree to be bound by these Terms of Service. If you do not agree, you must remove the bot from your server and discontinue use immediately.</p>
+        <p>ExcelProtocol is operated by an independent developer ("we", "us", "our"). These terms constitute a legally binding agreement between you and us.</p>
+
+        <h2>2. Eligibility</h2>
+        <p>You must be at least 18 years of age to use ExcelProtocol. By using the service, you confirm that you meet this requirement. We do not knowingly collect data from or provide services to individuals under 18.</p>
+
+        <h2>3. Description of Service</h2>
+        <p>ExcelProtocol is a Discord bot and associated web dashboard that provides the following features:</p>
+        <ul>
+          <li>Twitch stream live notifications to Discord channels</li>
+          <li>Reaction roles and server role management</li>
+          <li>Twitch channel point reward integrations via EventSub webhooks</li>
+          <li>Server statistics tracking and display</li>
+          <li>Birthday tracking, chat commands, and other community utilities</li>
+        </ul>
+        <p>We reserve the right to modify, suspend, or discontinue any feature at any time without notice.</p>
+
+        <h2>4. User Responsibilities</h2>
+        <p>As a server administrator or user of ExcelProtocol, you agree to:</p>
+        <ul>
+          <li>Use the service only for lawful purposes and in compliance with Discord's Terms of Service and Community Guidelines</li>
+          <li>Not attempt to abuse, exploit, reverse-engineer, or circumvent any feature or security measure of the bot or dashboard</li>
+          <li>Not use the service to send unsolicited messages, spam, or harassing content</li>
+          <li>Ensure that your use of the bot complies with applicable laws in your jurisdiction</li>
+          <li>Take responsibility for all activity that occurs under your Discord server's use of ExcelProtocol</li>
+        </ul>
+
+        <h2>5. Dashboard Access and Authentication</h2>
+        <p>The ExcelProtocol dashboard uses Discord OAuth2 for authentication. You must have a valid Discord account and the necessary server permissions to access server-specific settings. You are responsible for maintaining the security of your Discord account.</p>
+        <p>We do not store your Discord password. Authentication tokens are used solely to verify your identity and manage your server settings.</p>
+
+        <h2>6. Twitch Integration</h2>
+        <p>ExcelProtocol integrates with Twitch's API and EventSub webhook service to provide stream notifications. By using stream notification features, you acknowledge that:</p>
+        <ul>
+          <li>Twitch usernames entered into the bot are stored in our database and used to register webhook subscriptions with Twitch</li>
+          <li>Stream data (titles, game categories, thumbnails, viewer counts) is fetched from Twitch's public API and displayed in Discord</li>
+          <li>We are not affiliated with Twitch Interactive, Inc.</li>
+          <li>Notification accuracy depends on Twitch's API availability and EventSub delivery, which we do not control</li>
+        </ul>
+
+        <h2>7. Optional Tips and Donations</h2>
+        <p>ExcelProtocol offers an optional tip feature accessible via the /tip command. Any tips or donations made are entirely voluntary and non-refundable. Tips do not grant any additional features, access, or service guarantees. We are not responsible for any issues arising from third-party payment processors used to facilitate tips.</p>
+
+        <h2>8. Data and Privacy</h2>
+        <p>Your use of ExcelProtocol is also governed by our <a href="/privacy">Privacy Policy</a>, which is incorporated into these Terms by reference. By using the service, you consent to the data practices described in the Privacy Policy.</p>
+
+        <h2>9. Intellectual Property</h2>
+        <p>ExcelProtocol, its name, logo, and associated materials are the intellectual property of the developer. You may not reproduce, distribute, or create derivative works without explicit written permission.</p>
+
+        <h2>10. Disclaimer of Warranties</h2>
+        <p>ExcelProtocol is provided "as is" and "as available" without warranties of any kind, either express or implied. We do not warrant that the service will be uninterrupted, error-free, or free of harmful components. Notification delivery depends on third-party services (Discord, Twitch) that we do not control.</p>
+
+        <h2>11. Limitation of Liability</h2>
+        <p>To the maximum extent permitted by applicable law, we shall not be liable for any indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use ExcelProtocol, including but not limited to missed stream notifications, loss of data, or server disruption.</p>
+
+        <h2>12. Termination</h2>
+        <p>We reserve the right to terminate or restrict access to ExcelProtocol for any server or user at our sole discretion, without notice, for conduct that we believe violates these Terms or is harmful to other users, us, or third parties.</p>
+        <p>You may terminate your use at any time by removing the bot from your Discord server and contacting us to request data deletion.</p>
+
+        <h2>13. Changes to Terms</h2>
+        <p>We may update these Terms at any time. Continued use of ExcelProtocol after changes are posted constitutes acceptance of the revised Terms. We will endeavour to notify users of significant changes via the bot's support channels.</p>
+
+        <h2>14. Contact</h2>
+        <p>For questions about these Terms, contact us via Discord: <strong>stayexcellent</strong></p>
+        """
+    )
+    return web.Response(text=html, content_type="text/html")
+
+
+async def privacy_page(request):
+    html = _legal_html(
+        "Privacy Policy",
+        "Last updated: April 7, 2026",
+        """
+        <h2>1. Overview</h2>
+        <p>This Privacy Policy explains what data ExcelProtocol collects, how it is used, and your rights regarding that data. We are committed to being transparent and only collecting what is necessary to operate the service.</p>
+        <p>ExcelProtocol is hosted on Fly.io (Frankfurt, EU region). Data is stored in a SQLite database on persistent Fly.io storage volumes.</p>
+
+        <h2>2. What Data We Collect</h2>
+        <p><strong>Discord Data</strong> — When you add ExcelProtocol to a Discord server, we collect and store:</p>
+        <ul>
+          <li>Discord Server (Guild) ID — to associate settings with your server</li>
+          <li>Discord Channel IDs — to know which channels to send notifications to</li>
+          <li>Discord Role IDs — for reaction roles and ping role features</li>
+          <li>Discord User IDs — for birthday tracking and command usage</li>
+          <li>Discord Message IDs — to track sent notification messages for auto-deletion</li>
+        </ul>
+        <p>We do not store Discord message content, usernames, profile pictures, or any personal user data beyond what is listed above.</p>
+
+        <p><strong>Twitch Data</strong> — To provide stream notifications, we store:</p>
+        <ul>
+          <li>Twitch usernames (login names) of streamers added to a server</li>
+          <li>Twitch user IDs — used internally to register EventSub webhooks with Twitch</li>
+          <li>Broadcaster OAuth tokens — only if you connect your Twitch account for Channel Rewards; stored and used solely to manage channel point rewards on your behalf</li>
+        </ul>
+        <p>Stream data (titles, categories, thumbnails, viewer counts) is fetched from Twitch's API in real time and is not permanently stored.</p>
+
+        <p><strong>Dashboard Authentication</strong> — When you log in via Discord OAuth2, we receive a temporary access token to verify your identity and server permissions. This is stored as a short-lived session cookie and not persisted in our database.</p>
+
+        <p><strong>Notification Logs</strong> — We maintain a log of when stream notifications were sent (streamer name, guild ID, timestamp, status). This is used for debugging and is automatically trimmed to the most recent 30 days.</p>
+
+        <p><strong>Tips and Donations</strong> — ExcelProtocol does not directly process payments. If you tip via the /tip command, you are redirected to a third-party platform. We do not receive or store your payment information.</p>
+
+        <h2>3. How We Use Your Data</h2>
+        <p>Data collected by ExcelProtocol is used exclusively to:</p>
+        <ul>
+          <li>Deliver stream notifications to the correct Discord channels</li>
+          <li>Manage reaction roles and server configuration</li>
+          <li>Display server statistics in stat channels</li>
+          <li>Process Twitch channel point reward triggers for connected streamers</li>
+          <li>Track and send birthday notifications where enabled</li>
+          <li>Debug delivery failures and monitor service health</li>
+        </ul>
+        <p>We do not sell, rent, or share your data with third parties for commercial purposes.</p>
+
+        <h2>4. Data Sharing</h2>
+        <p>We share data with the following third parties only as required to operate the service:</p>
+        <ul>
+          <li><strong>Discord Inc.</strong> — to send messages, manage roles, and authenticate users</li>
+          <li><strong>Twitch Interactive, Inc.</strong> — to register EventSub webhooks and fetch stream data</li>
+          <li><strong>Fly.io</strong> — our hosting provider, which stores the database on its infrastructure</li>
+        </ul>
+        <p>We do not share your data with advertisers, analytics platforms, or any other third parties.</p>
+
+        <h2>5. Data Retention</h2>
+        <ul>
+          <li>Server settings, streamer lists, and role configurations are retained until you remove the bot or request deletion</li>
+          <li>Notification message IDs are removed automatically when streamers go offline</li>
+          <li>Notification logs are trimmed automatically after 30 days</li>
+          <li>Broadcaster OAuth tokens are retained until you disconnect your Twitch account or remove the bot</li>
+        </ul>
+        <p>When you remove ExcelProtocol from your Discord server, all data associated with that server is automatically deleted from our database.</p>
+
+        <h2>6. Your Rights</h2>
+        <p>You have the right to:</p>
+        <ul>
+          <li>Request a copy of the data we hold about your server</li>
+          <li>Request deletion — remove the bot to trigger automatic deletion, or contact us directly</li>
+          <li>Correct inaccurate data — use the dashboard or slash commands at any time</li>
+        </ul>
+        <p>To exercise any of these rights, contact us via Discord: <strong>stayexcellent</strong></p>
+
+        <h2>7. Security</h2>
+        <p>We take reasonable technical measures to protect your data, including:</p>
+        <ul>
+          <li>HTTPS-only access to the dashboard and webhook endpoints</li>
+          <li>HMAC-SHA256 signature verification on all incoming Twitch EventSub webhook requests</li>
+          <li>Session-based authentication with short-lived tokens for the dashboard</li>
+        </ul>
+        <p>No system is completely secure. We are not liable for unauthorised access resulting from factors outside our control.</p>
+
+        <h2>8. Children's Privacy</h2>
+        <p>ExcelProtocol is not intended for use by anyone under 18 years of age. We do not knowingly collect personal data from minors. If you believe a minor has used ExcelProtocol, please contact us and we will delete the relevant data.</p>
+
+        <h2>9. Changes to This Policy</h2>
+        <p>We may update this Privacy Policy from time to time. The "Last updated" date at the top will reflect any changes. Continued use of ExcelProtocol after changes constitutes acceptance of the revised policy.</p>
+
+        <h2>10. Contact</h2>
+        <p>For any privacy-related questions or data requests, contact us via Discord: <strong>stayexcellent</strong></p>
+        """
+    )
+    return web.Response(text=html, content_type="text/html")
+
+
 async def auth_dev(request):
     """Password-protected dev login — creates a full-access session."""
     password = request.rel_url.query.get("password", "")
@@ -2079,6 +2297,8 @@ def create_dashboard_app(bot=None):
     app = web.Application(middlewares=[error_logging_middleware, auth_middleware])
 
     app.router.add_get("/health",        health)
+    app.router.add_get("/terms",         terms_page)
+    app.router.add_get("/privacy",       privacy_page)
     app.router.add_get("/auth/login",    auth_login)
     app.router.add_get("/auth/callback", auth_callback)
     app.router.add_get("/auth/dev",      auth_dev)
