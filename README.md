@@ -95,7 +95,7 @@ The web dashboard gives server admins full control without needing slash command
 
 ## Support
 
-Have a question or found a bug? Reach out on Discord: **stayexcellent**
+Have a question or found a bug? Reach out over the dashboard via the **Contact** tab!
 
 ---
 
