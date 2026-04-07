@@ -465,6 +465,25 @@ class TwitchNotifierBot(discord.Client):
                     color=0xFF6B35
                 )
 
+        # Mismatch check — alert if subs count is significantly less than expected
+        expected = len(unique_logins) * 2  # one online + one offline per streamer
+        actual = len([s for s in existing if s.get("type") in ("stream.online", "stream.offline")]) + registered
+        missing = expected - actual
+        if missing > 5:
+            await self.log_to_channel(
+                "🚨", "EventSub Subscription Mismatch",
+                f"Expected **{expected}** stream subscriptions ({len(unique_logins)} streamers × 2) but only **{actual}** are registered.\n"
+                f"**{missing}** subscriptions are missing — some streamers may not send live notifications.\n"
+                f"Re-running a full sync now.",
+                color=0xFF4444
+            )
+            await self.send_owner_alert(
+                "EventSub Mismatch",
+                f"**{missing} stream subscriptions are missing!**\n\n"
+                f"Expected {expected}, found {actual}.\n"
+                f"Twitch may have revoked subscriptions. A re-sync has been triggered automatically."
+            )
+
     async def handle_stream_online(self, user_login: str, user_id: str):
         """Called by the dashboard webhook when a stream.online event is received."""
         try:
