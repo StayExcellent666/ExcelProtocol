@@ -549,6 +549,11 @@ async def delete_streamer(request):
         "DELETE FROM monitored_streamers WHERE guild_id = ? AND streamer_name = ?",
         (guild_id, username.lower()),
     )
+    if _bot_ref:
+        await _bot_ref.log_to_channel(
+            "➖", "Streamer Removed (Dashboard)",
+            f"**{username}** removed from guild `{guild_id}`"
+        )
     return web.json_response({"ok": True})
 
 # ── Reaction Roles ────────────────────────────────────────────────────────────
