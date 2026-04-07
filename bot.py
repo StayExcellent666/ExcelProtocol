@@ -198,7 +198,7 @@ class TwitchNotifierBot(discord.Client):
         """Run EventSub sync on startup with a small delay to let things settle."""
         await asyncio.sleep(5)
         try:
-            await self._sync_eventsub_subscriptions()
+            await self._sync_eventsub_subscriptions(alert_on_mismatch=False)
             await self.log_to_channel(
                 "📡", "EventSub Subscriptions Synced",
                 "Stream online/offline subscriptions registered for all monitored streamers.",
@@ -402,7 +402,7 @@ class TwitchNotifierBot(discord.Client):
         secret = os.getenv("EVENTSUB_SECRET", "excelprotocol_eventsub_secret")
         return f"{base}/api/eventsub/callback", secret
 
-    async def _sync_eventsub_subscriptions(self):
+    async def _sync_eventsub_subscriptions(self, alert_on_mismatch: bool = True):
         """Register stream.online / stream.offline subscriptions for all monitored streamers."""
         callback_url, secret = await self._eventsub_config()
 
@@ -423,6 +423,9 @@ class TwitchNotifierBot(discord.Client):
         # Resolve logins → user IDs in batches
         registered = 0
         failed = 0
+        failed_names = []
+        unresolvable = []  # logins Twitch doesn't recognise (banned/deleted/renamed)
+
         for i in range(0, len(unique_logins), 100):
             batch = unique_logins[i:i+100]
             session = await self.twitch.get_session()
@@ -442,6 +445,13 @@ class TwitchNotifierBot(discord.Client):
                 logger.error(f"Error resolving user IDs for EventSub: {e}")
                 continue
 
+            # Find logins that Twitch returned no user for
+            resolved_logins = {u["login"].lower() for u in users}
+            for login in batch:
+                if login not in resolved_logins:
+                    unresolvable.append(login)
+                    logger.warning(f"EventSub: Twitch returned no user for '{login}' — account may be banned, deleted or renamed")
+
             for user in users:
                 uid = user["id"]
                 for event_type in ("stream.online", "stream.offline"):
@@ -454,35 +464,44 @@ class TwitchNotifierBot(discord.Client):
                         registered += 1
                     elif not result:
                         failed += 1
+                        failed_names.append(f"{user['login']} ({event_type})")
                         logger.warning(f"Failed to register {event_type} for {user['login']} ({uid})")
 
         if registered or failed:
-            logger.info(f"EventSub sync: registered {registered} new subscriptions, {failed} failed")
-            if failed:
-                await self.log_to_channel(
-                    "📡", "EventSub Sync",
-                    f"Registered **{registered}** new subscriptions.\n⚠️ **{failed}** failed to register.",
-                    color=0xFF6B35
-                )
+            logger.info(f"EventSub sync: registered {registered} new, {failed} failed, {len(unresolvable)} unresolvable")
 
-        # Mismatch check — alert if subs count is significantly less than expected
-        expected = len(unique_logins) * 2  # one online + one offline per streamer
-        actual = len([s for s in existing if s.get("type") in ("stream.online", "stream.offline")]) + registered
-        missing = expected - actual
-        if missing > 5:
+        if failed or unresolvable:
+            lines = []
+            if failed:
+                lines.append(f"⚠️ **{failed}** registration failure(s):\n" + "\n".join(f"• {n}" for n in failed_names[:10]))
+            if unresolvable:
+                lines.append(f"👻 **{len(unresolvable)}** unresolvable account(s) — likely banned, deleted or renamed:\n" + "\n".join(f"• {n}" for n in unresolvable[:10]))
             await self.log_to_channel(
-                "🚨", "EventSub Subscription Mismatch",
-                f"Expected **{expected}** stream subscriptions ({len(unique_logins)} streamers × 2) but only **{actual}** are registered.\n"
-                f"**{missing}** subscriptions are missing — some streamers may not send live notifications.\n"
-                f"Re-running a full sync now.",
-                color=0xFF4444
+                "📡", "EventSub Sync Issues",
+                "\n\n".join(lines),
+                color=0xFF6B35
             )
-            await self.send_owner_alert(
-                "EventSub Mismatch",
-                f"**{missing} stream subscriptions are missing!**\n\n"
-                f"Expected {expected}, found {actual}.\n"
-                f"Twitch may have revoked subscriptions. A re-sync has been triggered automatically."
-            )
+
+        # Mismatch check — only alert if meaningfully off (>10% or >20 missing)
+        # and only when requested (skip on startup sync to avoid double-alert with loop)
+        if alert_on_mismatch:
+            resolvable_count = len(unique_logins) - len(unresolvable)
+            expected = resolvable_count * 2
+            actual = len([s for s in existing if s.get("type") in ("stream.online", "stream.offline")]) + registered
+            missing = expected - actual
+            threshold = max(20, int(expected * 0.10))  # 10% or 20, whichever is larger
+            if missing > threshold:
+                await self.log_to_channel(
+                    "🚨", "EventSub Subscription Mismatch",
+                    f"Expected **{expected}** subscriptions ({resolvable_count} active streamers × 2) but only **{actual}** registered.\n"
+                    f"**{missing}** missing — Twitch may have revoked subscriptions.",
+                    color=0xFF4444
+                )
+                await self.send_owner_alert(
+                    "EventSub Mismatch",
+                    f"**{missing} stream subscriptions missing!**\n\nExpected {expected}, found {actual}.\n"
+                    f"Twitch may have revoked subscriptions. Next 30-min sync will attempt to re-register."
+                )
 
     async def handle_stream_online(self, user_login: str, user_id: str):
         """Called by the dashboard webhook when a stream.online event is received."""
