@@ -377,9 +377,12 @@ async def auth_callback(request):
     managed = [
         {"id": g["id"], "name": g["name"], "icon": g.get("icon")}
         for g in guilds
-        if int(g.get("permissions", 0)) & 0x20
+        if (int(g.get("permissions", 0)) & 0x20  # Manage Guild
+            or int(g.get("permissions", 0)) & 0x8   # Administrator
+            or g.get("owner", False))               # Server owner
         and (not bot_guild_ids or g["id"] in bot_guild_ids)
     ]
+    logger.info(f"Auth: user has {len(guilds)} guilds, {len(managed)} managed, bot in {len(bot_guild_ids)} guilds")
     session_token = secrets.token_hex(32)
     is_owner = BOT_OWNER_ID and str(user["id"]) == str(BOT_OWNER_ID)
     _sessions[session_token] = {
