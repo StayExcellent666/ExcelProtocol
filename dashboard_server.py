@@ -46,13 +46,17 @@ _bot_ref = None
 
 # ── DB Helper ─────────────────────────────────────────────────────────────────
 async def db_fetch(query: str, params: tuple = ()):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
         db.row_factory = aiosqlite.Row
         async with db.execute(query, params) as cursor:
             return [dict(r) for r in await cursor.fetchall()]
 
 async def db_execute(query: str, params: tuple = ()):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
         await db.execute(query, params)
         await db.commit()
 
@@ -194,6 +198,14 @@ async def get_twitch_users(usernames: list) -> dict:
 
 # ── Session Store ─────────────────────────────────────────────────────────────
 _sessions: dict = {}
+_SESSION_TTL_SECONDS = 86400 * 7  # 7 days
+
+def _prune_sessions():
+    """Remove sessions older than TTL. Called on each session lookup."""
+    cutoff = datetime.now(timezone.utc).timestamp() - _SESSION_TTL_SECONDS
+    stale = [k for k, v in list(_sessions.items()) if v.get("_created_at", 0) < cutoff]
+    for k in stale:
+        del _sessions[k]
 
 def get_session(request: web.Request) -> dict | None:
     # Try cookie first (new secure method)
@@ -209,6 +221,7 @@ def get_session(request: web.Request) -> dict | None:
         if forwarded:
             return None
         return {"dev": True}
+    _prune_sessions()
     return _sessions.get(token)
 
 # ── Error Logging Middleware ──────────────────────────────────────────────────
@@ -285,9 +298,17 @@ logger = logging.getLogger(__name__)
 # In-memory state store for CSRF protection — {state: True}
 _oauth_states: dict = {}
 
+# Twitch OAuth state store — {state: {guild_id, session_token, expires_at}}
+_twitch_oauth_states: dict = {}
+
 async def auth_login(request):
     state = secrets.token_hex(16)
-    _oauth_states[state] = True
+    _oauth_states[state] = datetime.now(timezone.utc).timestamp()
+    # Clean up states older than 10 minutes
+    cutoff = datetime.now(timezone.utc).timestamp() - 600
+    stale = [k for k, v in list(_oauth_states.items()) if v < cutoff]
+    for k in stale:
+        del _oauth_states[k]
     url = (
         f"https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
@@ -340,11 +361,12 @@ async def auth_callback(request):
     session_token = secrets.token_hex(32)
     is_owner = BOT_OWNER_ID and str(user["id"]) == str(BOT_OWNER_ID)
     _sessions[session_token] = {
-        "user_id":  user["id"],
-        "username": user["username"],
-        "avatar":   user.get("avatar"),
-        "guilds":   managed,
-        "dev":      is_owner,
+        "user_id":      user["id"],
+        "username":     user["username"],
+        "avatar":       user.get("avatar"),
+        "guilds":       managed,
+        "dev":          is_owner,
+        "_created_at":  datetime.now(timezone.utc).timestamp(),
     }
     response = web.HTTPFound("/app/")
     response.set_cookie(
@@ -1400,25 +1422,64 @@ async def set_command_limit(request):
 
 # ── Broadcaster OAuth ─────────────────────────────────────────────────────────
 async def twitch_broadcaster_login(request):
-    """Redirect streamer to Twitch OAuth — stores guild_id in state param."""
+    """Redirect streamer to Twitch OAuth — stores secure state mapped to guild+session."""
     guild_id = request.match_info["guild_id"]
+
+    # Verify the session actually has access to this guild
+    session = request["session"]
+    if not _session_can_access_guild(session, guild_id):
+        raise web.HTTPForbidden(reason="You do not have access to this guild")
+
+    # Generate a random state and store guild_id + session cookie so callback can verify both
+    state = secrets.token_hex(16)
+    session_token = request.cookies.get("ep_session", "")
+    _twitch_oauth_states[state] = {
+        "guild_id":      guild_id,
+        "session_token": session_token,
+        "expires_at":    (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+    }
+
     import urllib.parse
     params = urllib.parse.urlencode({
-        "client_id": TWITCH_CLIENT_ID,
+        "client_id":    TWITCH_CLIENT_ID,
         "redirect_uri": TWITCH_REDIRECT_URI,
         "response_type": "code",
-        "scope": "channel:read:redemptions channel:manage:redemptions",
-        "state": guild_id,
+        "scope":        "channel:read:redemptions channel:manage:redemptions",
+        "state":        state,
         "force_verify": "true",
     })
     raise web.HTTPFound(f"https://id.twitch.tv/oauth2/authorize?{params}")
 
 async def twitch_broadcaster_callback(request):
     """Handle Twitch OAuth callback — exchange code for tokens."""
-    code     = request.rel_url.query.get("code")
-    guild_id = request.rel_url.query.get("state")
-    if not code or not guild_id:
+    code  = request.rel_url.query.get("code")
+    state = request.rel_url.query.get("state")
+    if not code or not state:
         raise web.HTTPBadRequest(reason="Missing code or state")
+
+    # Validate state and retrieve guild_id — prevents CSRF and account mixup
+    state_data = _twitch_oauth_states.pop(state, None)
+    if not state_data:
+        raise web.HTTPBadRequest(reason="Invalid or expired state — please try connecting again")
+
+    # Clean up expired states opportunistically
+    now = datetime.now(timezone.utc)
+    stale = [k for k, v in list(_twitch_oauth_states.items())
+             if datetime.fromisoformat(v["expires_at"]) < now]
+    for k in stale:
+        del _twitch_oauth_states[k]
+
+    # Verify the session cookie matches what initiated the flow
+    session_token = request.cookies.get("ep_session", "")
+    if state_data["session_token"] != session_token:
+        raise web.HTTPForbidden(reason="Session mismatch — please log in again and retry")
+
+    guild_id = state_data["guild_id"]
+
+    # Verify the session still has access to this guild
+    session = _sessions.get(session_token, {})
+    if not _session_can_access_guild(session, guild_id):
+        raise web.HTTPForbidden(reason="You no longer have access to this guild")
 
     async with http_client.ClientSession() as sess:
         # Exchange code for tokens

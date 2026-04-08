@@ -24,8 +24,11 @@ class Database:
         self.init_database()
     
     def get_connection(self):
-        """Create a database connection"""
-        return sqlite3.connect(self.db_path)
+        """Create a database connection with WAL mode and busy timeout."""
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
     
     def init_database(self):
         """Initialize database tables"""
