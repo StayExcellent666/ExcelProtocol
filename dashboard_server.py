@@ -403,17 +403,35 @@ async def auth_callback(request):
 async def auth_me(request):
     session = request["session"]
     if session.get("dev"):
-        rows = await db_fetch("SELECT DISTINCT guild_id FROM monitored_streamers")
+        # Use the bot's actual guild list so all servers show up, even ones with no streamers yet
         guilds = []
-        for r in rows:
-            info = await get_guild_info(str(r["guild_id"]))
-            guilds.append({
-                "id":   str(r["guild_id"]),
-                "name": info.get("name", str(r["guild_id"])),
-                "icon": info.get("icon"),
-                "approximate_member_count": info.get("approximate_member_count"),
-            })
-        return web.json_response({"username": "Dev", "avatar": None, "guilds": guilds, "is_dev": True})
+        if _bot_ref:
+            for g in _bot_ref.guilds:
+                guilds.append({
+                    "id":   str(g.id),
+                    "name": g.name,
+                    "icon": str(g.icon) if g.icon else None,
+                    "approximate_member_count": g.member_count,
+                })
+        else:
+            # Fallback to DB if bot ref not available
+            rows = await db_fetch("SELECT DISTINCT guild_id FROM monitored_streamers")
+            for r in rows:
+                info = await get_guild_info(str(r["guild_id"]))
+                guilds.append({
+                    "id":   str(r["guild_id"]),
+                    "name": info.get("name", str(r["guild_id"])),
+                    "icon": info.get("icon"),
+                    "approximate_member_count": info.get("approximate_member_count"),
+                })
+        guilds.sort(key=lambda g: g["name"].lower())
+        return web.json_response({
+            "user_id":  session.get("user_id"),
+            "username": session.get("username"),
+            "avatar":   session.get("avatar"),
+            "guilds":   guilds,
+            "is_dev":   True,
+        })
     session_guilds = session.get("guilds", [])
     enriched = []
     for g in session_guilds:
