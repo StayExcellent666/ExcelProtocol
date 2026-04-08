@@ -196,15 +196,18 @@ async def get_twitch_users(usernames: list) -> dict:
 _sessions: dict = {}
 
 def get_session(request: web.Request) -> dict | None:
-    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    # Try cookie first (new secure method)
+    token = request.cookies.get("ep_session", "")
+    # Fall back to Authorization header for API clients
+    if not token:
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not token:
+        return None
     # DEV_TOKEN is only for internal server use — never expose to browser clients
-    # It's blocked for any request coming from outside (i.e. must use OAuth2)
     if DEV_TOKEN and token == DEV_TOKEN:
-        # Only allow from localhost / internal — reject if X-Forwarded-For is present
-        # (Fly.io proxy sets this header for all external requests)
         forwarded = request.headers.get("X-Forwarded-For", "")
         if forwarded:
-            return None  # External request trying to use dev token — reject
+            return None
         return {"dev": True}
     return _sessions.get(token)
 
@@ -244,7 +247,7 @@ def _session_can_access_guild(session: dict, guild_id: str) -> bool:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/dev", "/auth/twitch/callback", "/api/eventsub/callback")
+    public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/dev", "/auth/twitch/callback", "/api/eventsub/callback")
     if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/auth/twitch/login"):
         return await handler(request)
 
@@ -279,20 +282,31 @@ import logging
 logger = logging.getLogger(__name__)
 
 # ── OAuth2 ────────────────────────────────────────────────────────────────────
+# In-memory state store for CSRF protection — {state: True}
+_oauth_states: dict = {}
+
 async def auth_login(request):
+    state = secrets.token_hex(16)
+    _oauth_states[state] = True
     url = (
         f"https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
         f"&redirect_uri={DISCORD_REDIRECT_URI}"
         f"&response_type=code"
         f"&scope=identify+guilds"
+        f"&state={state}"
     )
     raise web.HTTPFound(url)
 
 async def auth_callback(request):
-    code = request.rel_url.query.get("code")
+    code  = request.rel_url.query.get("code")
+    state = request.rel_url.query.get("state")
     if not code:
         raise web.HTTPBadRequest(reason="Missing code")
+    # Validate CSRF state
+    if not state or state not in _oauth_states:
+        raise web.HTTPBadRequest(reason="Invalid or missing state — possible CSRF attempt")
+    del _oauth_states[state]
     async with http_client.ClientSession() as session:
         token_resp = await session.post(
             f"{DISCORD_API}/oauth2/token",
@@ -330,7 +344,12 @@ async def auth_callback(request):
         "avatar":   user.get("avatar"),
         "guilds":   managed,
     }
-    raise web.HTTPFound(f"/app/?token={session_token}")
+    response = web.HTTPFound("/app/")
+    response.set_cookie(
+        "ep_session", session_token,
+        httponly=True, samesite="Lax", secure=True, max_age=86400 * 7
+    )
+    raise response
 
 async def auth_me(request):
     session = request["session"]
@@ -1452,7 +1471,10 @@ async def twitch_broadcaster_disconnect(request):
 async def _register_eventsub(broadcaster_user_id: str):
     """Register EventSub subscription for channel point redeems."""
     callback_url = f"{os.getenv('DASHBOARD_BASE_URL', 'https://excelprotocol.fly.dev')}/api/eventsub/callback"
-    secret = os.getenv("EVENTSUB_SECRET", "excelprotocol_eventsub_secret")
+    secret = os.getenv("EVENTSUB_SECRET")
+    if not secret:
+        logger.error("EVENTSUB_SECRET env var is not set — cannot register EventSub subscription")
+        return
     try:
         async with http_client.ClientSession() as sess:
             logger.info(f"Registering EventSub for broadcaster {broadcaster_user_id} with callback {callback_url}")
@@ -1482,7 +1504,11 @@ async def eventsub_callback(request):
     """Receive EventSub events from Twitch and push to overlay websockets."""
     import hmac, hashlib
     body = await request.read()
-    secret = os.getenv("EVENTSUB_SECRET", "excelprotocol_eventsub_secret").encode()
+    secret = os.getenv("EVENTSUB_SECRET")
+    if not secret:
+        logger.error("EVENTSUB_SECRET env var not set — rejecting EventSub callback")
+        raise web.HTTPInternalServerError(reason="Server misconfiguration")
+    secret = secret.encode()
 
     # Verify signature
     msg_id        = request.headers.get("Twitch-Eventsub-Message-Id", "")
@@ -1910,61 +1936,6 @@ async def fix_permissions(request):
         logger.error(f"Error auto-fixing permissions for channel {channel_id}: {e}")
         return web.json_response({"ok": False, "can_fix": False, "message": f"Unexpected error: {str(e)[:200]}"})
 
-
-async def fix_permissions(request):
-    """Attempt to auto-fix permission issues in a channel by adding channel overwrites."""
-    guild_id  = request.match_info["guild_id"]
-    channel_id = request.match_info["channel_id"]
-
-    if _bot_ref is None:
-        raise web.HTTPServiceUnavailable(reason="Bot not available")
-
-    guild = _bot_ref.get_guild(int(guild_id))
-    if not guild:
-        raise web.HTTPNotFound(reason="Guild not found")
-
-    channel = guild.get_channel(int(channel_id))
-    if not channel:
-        raise web.HTTPNotFound(reason="Channel not found")
-
-    guild_perms = guild.me.guild_permissions
-
-    # Check if we have the ability to set channel overwrites
-    can_fix = guild_perms.manage_roles or guild_perms.manage_channels
-    if not can_fix:
-        return web.json_response({
-            "ok": False,
-            "reason": "missing_perms",
-            "message": "ExcelProtocol needs **Manage Roles** or **Manage Channels** to auto-fix permissions."
-        })
-
-    # Attempt to add channel overwrites for the bot
-    import discord as _discord
-    try:
-        overwrite = channel.overwrites_for(guild.me)
-        overwrite.send_messages    = True
-        overwrite.embed_links      = True
-        overwrite.manage_messages  = True
-        overwrite.view_channel     = True
-        overwrite.read_message_history = True
-        await channel.set_permissions(guild.me, overwrite=overwrite, reason="ExcelProtocol auto-fix permissions")
-
-        # Re-check and clear the issue if resolved
-        await _bot_ref._check_guild_permissions(guild)
-
-        return web.json_response({"ok": True, "message": "Permissions fixed successfully."})
-    except _discord.Forbidden:
-        return web.json_response({
-            "ok": False,
-            "reason": "forbidden",
-            "message": "ExcelProtocol was denied when trying to update channel permissions. The bot's role may be too low in the server hierarchy."
-        })
-    except Exception as e:
-        return web.json_response({
-            "ok": False,
-            "reason": "error",
-            "message": f"Unexpected error: {str(e)[:200]}"
-        })
 
 # ── Stat Channels ─────────────────────────────────────────────────────────────
 async def get_stat_channels(request):
@@ -2903,14 +2874,34 @@ async def privacy_page(request):
     return web.Response(text=html, content_type="text/html")
 
 
+async def auth_logout(request):
+    """Clear the session cookie."""
+    session = request.get("session", {})
+    token = request.cookies.get("ep_session", "")
+    if token and token in _sessions:
+        del _sessions[token]
+    response = web.json_response({"ok": True})
+    response.del_cookie("ep_session")
+    return response
+
+
 async def auth_dev(request):
-    """Password-protected dev login — creates a full-access session."""
-    password = request.rel_url.query.get("password", "")
+    """Password-protected dev login — accepts POST with JSON body {password}."""
+    try:
+        body = await request.json()
+        password = body.get("password", "")
+    except Exception:
+        raise web.HTTPBadRequest(reason="Expected JSON body with password field")
     if not DEV_TOKEN or password != DEV_TOKEN:
         raise web.HTTPForbidden(reason="Invalid dev password")
     session_token = secrets.token_hex(32)
     _sessions[session_token] = {"dev": True}
-    raise web.HTTPFound(f"/app/?token={session_token}")
+    response = web.json_response({"ok": True})
+    response.set_cookie(
+        "ep_session", session_token,
+        httponly=True, samesite="Lax", secure=True, max_age=86400 * 7
+    )
+    return response
 
 # ── App Factory ───────────────────────────────────────────────────────────────
 def create_dashboard_app(bot=None):
@@ -2922,9 +2913,10 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/",              landing_page)
     app.router.add_get("/terms",         terms_page)
     app.router.add_get("/privacy",       privacy_page)
-    app.router.add_get("/auth/login",    auth_login)
-    app.router.add_get("/auth/callback", auth_callback)
-    app.router.add_get("/auth/dev",      auth_dev)
+    app.router.add_get ("/auth/login",    auth_login)
+    app.router.add_get ("/auth/callback", auth_callback)
+    app.router.add_post("/auth/logout",   auth_logout)
+    app.router.add_post("/auth/dev",      auth_dev)
     app.router.add_get("/auth/twitch/login/{guild_id}",  twitch_broadcaster_login)
     app.router.add_get("/auth/twitch/callback",          twitch_broadcaster_callback)
     app.router.add_delete("/api/guild/{guild_id}/broadcaster",              twitch_broadcaster_disconnect)

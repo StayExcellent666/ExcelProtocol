@@ -223,6 +223,17 @@ class TwitchNotifierBot(discord.Client):
             await asyncio.sleep(1)
         except Exception:
             pass
+        # Clean up Twitch API session
+        try:
+            await self.twitch.close()
+        except Exception as e:
+            logger.error(f"Error closing Twitch API session: {e}")
+        # Clean up Twitch chat bot
+        try:
+            if hasattr(self, 'twitch_chat_bot') and self.twitch_chat_bot:
+                await self.twitch_chat_bot.close()
+        except Exception as e:
+            logger.error(f"Error closing Twitch chat bot: {e}")
         await super().close()
 
     async def on_guild_remove(self, guild):
@@ -230,151 +241,6 @@ class TwitchNotifierBot(discord.Client):
         logger.info(f"Bot removed from guild: {guild.name} (ID: {guild.id})")
         self.db.cleanup_guild(guild.id)
         logger.info(f"Cleaned up all data for guild {guild.id}")
-    
-    @tasks.loop(seconds=CHECK_INTERVAL_SECONDS)
-    async def check_streams(self):
-        """Periodically check Twitch for live streams"""
-        try:
-            # Get all monitored streamers from database
-            streamers = self.db.get_all_streamers()
-            
-            if not streamers:
-                logger.debug("No streamers to monitor")
-                return
-            
-            # Get unique streamer names (remove duplicates across servers)
-            unique_streamers = list(set(s['streamer_name'] for s in streamers))
-            
-            logger.debug(f"Checking {len(unique_streamers)} streamers...")
-            
-            # Batch check streamers (Twitch API supports up to 100 per request)
-            # Split into batches of 100 if needed
-            for i in range(0, len(unique_streamers), 100):
-                batch = unique_streamers[i:i+100]
-                live_streams = await self.twitch.get_live_streams(batch)
-                
-                # Process each live stream
-                for stream in live_streams:
-                    streamer_name = stream['user_login']
-                    
-                    # Check if we already notified about this stream
-                    if streamer_name in self.live_streamers:
-                        # Check stream milestones (5h, 10h) for servers that have it enabled
-                        stream_start = datetime.strptime(stream['started_at'], '%Y-%m-%dT%H:%M:%SZ')
-                        hours_live = (datetime.utcnow() - stream_start).total_seconds() / 3600
-
-                        for milestone_hours, description in [
-                            (5, f"⏱️ **{stream['user_name']}** has been live for **5 HOURS!** They're not stopping anytime soon!"),
-                            (10, f"💀 **{stream['user_name']}** has been live for **10 HOURS STRAIGHT.** Send help. 👀"),
-                        ]:
-                            if hours_live >= milestone_hours:
-                                monitoring_servers = [
-                                    s for s in streamers
-                                    if s['streamer_name'].lower() == streamer_name.lower()
-                                ]
-                                for server_data in monitoring_servers:
-                                    guild_id = server_data['guild_id']
-                                    if not self.db.get_milestone_notifications(guild_id):
-                                        continue
-                                    if self.db.has_milestone_been_sent(guild_id, streamer_name, milestone_hours):
-                                        continue
-                                    channel_id = server_data.get('custom_channel_id') or server_data['channel_id']
-                                    channel = self.get_channel(channel_id)
-                                    if not channel:
-                                        continue
-                                    try:
-                                        embed_color = self.db.get_embed_color(guild_id)
-                                        embed = discord.Embed(
-                                            description=description,
-                                            color=embed_color,
-                                            timestamp=datetime.utcnow()
-                                        )
-                                        embed.set_author(
-                                            name=stream['user_name'],
-                                            url=f"https://twitch.tv/{stream['user_login']}",
-                                            icon_url=stream.get('profile_image_url', '')
-                                        )
-                                        embed.add_field(name="Game", value=stream['game_name'] or "No category", inline=True)
-                                        embed.add_field(name="Viewers", value=f"{stream['viewer_count']:,}", inline=True)
-                                        thumbnail_url = stream['thumbnail_url'].replace('{width}', '440').replace('{height}', '248')
-                                        embed.set_image(url=thumbnail_url)
-                                        embed.set_footer(text="Twitch", icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png")
-                                        view = discord.ui.View()
-                                        view.add_item(discord.ui.Button(
-                                            label="Watch Stream",
-                                            url=f"https://twitch.tv/{stream['user_login']}",
-                                            style=discord.ButtonStyle.link,
-                                            emoji="🔴"
-                                        ))
-                                        await channel.send(embed=embed, view=view)
-                                        self.db.record_milestone_sent(guild_id, streamer_name, milestone_hours)
-                                        logger.info(f"Sent {milestone_hours}h milestone for {streamer_name} in guild {guild_id}")
-                                    except Exception as e:
-                                        logger.error(f"Error sending milestone notification: {e}")
-                        continue
-                    
-                    # Check if stream just started (within the last 5 minutes)
-                    # This prevents re-notifying about old streams after bot restart
-                    stream_start = datetime.strptime(stream['started_at'], '%Y-%m-%dT%H:%M:%SZ')
-                    time_since_start = datetime.utcnow() - stream_start
-                    
-                    # Only notify if stream started recently (within 5 minutes)
-                    # This accounts for bot restarts and prevents spam
-                    if time_since_start.total_seconds() > 300:  # 5 minutes = 300 seconds
-                        logger.info(f"Skipping {streamer_name} - stream started {int(time_since_start.total_seconds()/60)} minutes ago")
-                        self.live_streamers.add(streamer_name)  # Still mark as seen
-                        continue
-                    
-                    # Mark as notified
-                    self.live_streamers.add(streamer_name)
-                    
-                    # Wait for Twitch to generate thumbnail (prevents grey placeholder)
-                    logger.info(f"Waiting 15 seconds for {streamer_name} thumbnail to generate...")
-                    await asyncio.sleep(15)
-                    
-                    # Find all servers monitoring this streamer
-                    monitoring_servers = [
-                        s for s in streamers 
-                        if s['streamer_name'].lower() == streamer_name.lower()
-                    ]
-                    
-                    # Send notification to each server
-                    for server_data in monitoring_servers:
-                        await self.send_notification(server_data, stream)
-                
-                # Remove streamers from live set if they went offline
-                batch_lower = [s.lower() for s in batch]
-                live_names = [s['user_login'].lower() for s in live_streams]
-                
-                for streamer in batch_lower:
-                    if streamer in self.live_streamers and streamer not in live_names:
-                        self.live_streamers.remove(streamer)
-                        logger.info(f"{streamer} went offline")
-                        
-                        # Clear milestone records so they fire fresh next stream
-                        for s in streamers:
-                            if s['streamer_name'].lower() == streamer:
-                                self.db.clear_milestones_for_streamer(s['guild_id'], streamer)
-
-                        # Delete notification messages if auto-delete is enabled
-                        await self.delete_offline_notifications(streamer)
-        
-        except Exception as e:
-            logger.error(f"Error in check_streams loop: {e}", exc_info=True)
-            
-            # Send alert for critical stream checking failures
-            await self.send_owner_alert(
-                "Stream Check Failed",
-                f"**Critical error in stream checking loop!**\n\n"
-                f"Error: `{str(e)[:200]}`\n\n"
-                f"This might mean Twitch API is down or there's a code bug.\n"
-                f"Stream notifications may not be working."
-            )
-            await self.log_to_channel(
-                "⚠️", "Stream Check Error",
-                f"**Error in stream checking loop**\n`{type(e).__name__}: {str(e)[:300]}`\n\nStream notifications may not be working.",
-                color=0xFF6B35
-            )
     
     # ── EventSub Stream Notifications ────────────────────────────────────────
 
@@ -399,7 +265,9 @@ class TwitchNotifierBot(discord.Client):
     async def _eventsub_config(self):
         """Return (callback_url, secret) for EventSub."""
         base = os.getenv("DASHBOARD_BASE_URL", "https://excelprotocol.fly.dev")
-        secret = os.getenv("EVENTSUB_SECRET", "excelprotocol_eventsub_secret")
+        secret = os.getenv("EVENTSUB_SECRET")
+        if not secret:
+            raise RuntimeError("EVENTSUB_SECRET env var is not set — cannot register EventSub subscriptions safely")
         return f"{base}/api/eventsub/callback", secret
 
     async def _sync_eventsub_subscriptions(self, alert_on_mismatch: bool = True):
@@ -592,6 +460,12 @@ class TwitchNotifierBot(discord.Client):
                     self.db.clear_milestones_for_streamer(s['guild_id'], name_lower)
 
             await self.delete_offline_notifications(user_login)
+
+            await self.log_to_channel(
+                "🔴", "Stream Offline (EventSub)",
+                f"**{user_login}** went offline — notifications cleaned up.",
+                color=0xFF4444
+            )
 
         except Exception as e:
             logger.error(f"Error handling stream.offline for {user_login}: {e}", exc_info=True)
