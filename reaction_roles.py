@@ -3,15 +3,26 @@ from discord import app_commands
 import json
 import os
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 RR_DATA_PATH = "/data/reaction_roles.json"
 DEFAULT_COLOR = 0x00FFFF
 
-# {user_id: {guild_id, channel_id, title, type, only_add, max_roles, roles, editing_message_id}}
+# {user_id: {guild_id, channel_id, title, type, only_add, max_roles, roles, editing_message_id, _created_at}}
 _sessions: dict[int, dict] = {}
 _bot = None  # stored reference for color lookups
+
+_SESSION_TTL = 3600  # 1 hour — abandon after this
+
+def _prune_sessions():
+    """Remove reaction role sessions older than TTL."""
+    cutoff = time.monotonic() - _SESSION_TTL
+    stale = [uid for uid, s in list(_sessions.items()) if s.get("_created_at", 0) < cutoff]
+    for uid in stale:
+        del _sessions[uid]
+        logger.debug(f"Pruned stale reaction role session for user {uid}")
 
 
 # ------------------------------------------------------------------
@@ -127,6 +138,7 @@ class CreateSettingsModal(discord.ui.Modal, title="Create Reaction Role"):
         except ValueError:
             max_val = None
 
+        _prune_sessions()
         _sessions[interaction.user.id] = {
             "guild_id": interaction.guild_id,
             "channel_id": interaction.channel_id,
@@ -136,7 +148,8 @@ class CreateSettingsModal(discord.ui.Modal, title="Create Reaction Role"):
             "only_add": only_add_val,
             "max_roles": max_val,
             "roles": [],
-            "editing_message_id": None
+            "editing_message_id": None,
+            "_created_at": time.monotonic(),
         }
 
         view = discord.ui.View()
@@ -205,7 +218,9 @@ class EditSettingsModal(discord.ui.Modal, title="Edit Reaction Role"):
             "max_roles": max_val,
             "editing_message_id": self.message_id,
             "channel_id": self.entry["channel_id"],
+            "_created_at": time.monotonic(),
         }
+        _prune_sessions()
         _sessions[interaction.user.id] = updated
 
         roles_list = "\n".join(

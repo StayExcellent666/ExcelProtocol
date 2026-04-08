@@ -60,6 +60,15 @@ async def db_execute(query: str, params: tuple = ()):
         await db.execute(query, params)
         await db.commit()
 
+# ── Shared HTTP Session ───────────────────────────────────────────────────────
+_http_session: http_client.ClientSession | None = None
+
+def get_http_session() -> http_client.ClientSession:
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        _http_session = http_client.ClientSession()
+    return _http_session
+
 # ── Discord API Helper ────────────────────────────────────────────────────────
 _discord_cache: dict = {}
 
@@ -69,15 +78,15 @@ async def discord_get(path: str, token: str = None, use_bot: bool = True) -> dic
         return _discord_cache[cache_key]
     t = token or DISCORD_TOKEN
     prefix = "Bot" if use_bot else "Bearer"
-    async with http_client.ClientSession() as session:
-        async with session.get(
-            f"{DISCORD_API}{path}",
-            headers={"Authorization": f"{prefix} {t}"}
-        ) as resp:
-            data = await resp.json()
-            if resp.status == 200:
-                _discord_cache[cache_key] = data
-            return data
+    session = get_http_session()
+    async with session.get(
+        f"{DISCORD_API}{path}",
+        headers={"Authorization": f"{prefix} {t}"}
+    ) as resp:
+        data = await resp.json()
+        if resp.status == 200:
+            _discord_cache[cache_key] = data
+        return data
 
 async def get_channel_name(channel_id: str) -> str:
     try:
@@ -89,15 +98,15 @@ async def get_channel_name(channel_id: str) -> str:
 async def get_guild_roles(guild_id: str) -> dict:
     """Returns {role_id: {name, color}} for all roles in a guild. Not cached — roles can be renamed."""
     try:
-        async with http_client.ClientSession() as session:
-            async with session.get(
-                f"{DISCORD_API}/guilds/{guild_id}/roles",
-                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
-            ) as resp:
-                if resp.status != 200:
-                    return {}
-                roles = await resp.json()
-                return {str(r["id"]): {"name": r["name"], "color": r["color"]} for r in roles}
+        session = get_http_session()
+        async with session.get(
+            f"{DISCORD_API}/guilds/{guild_id}/roles",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+        ) as resp:
+            if resp.status != 200:
+                return {}
+            roles = await resp.json()
+            return {str(r["id"]): {"name": r["name"], "color": r["color"]} for r in roles}
     except Exception:
         return {}
 
@@ -109,41 +118,39 @@ async def get_guild_info(guild_id: str) -> dict:
 
 async def get_guild_channels(guild_id: str) -> list:
     """Return list of text channels for a guild: [{id, name, position}]"""
-    # Don't cache channels — they can change
     try:
-        async with http_client.ClientSession() as session:
-            async with session.get(
-                f"{DISCORD_API}/guilds/{guild_id}/channels",
-                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                channels = await resp.json()
-                # Type 0 = text channel, type 2 = voice channel, type 4 = category
-                text = [
-                    {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0), "parent_id": str(c.get("parent_id") or "")}
-                    for c in channels if c.get("type") == 0
-                ]
-                return sorted(text, key=lambda c: c["position"])
+        session = get_http_session()
+        async with session.get(
+            f"{DISCORD_API}/guilds/{guild_id}/channels",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+        ) as resp:
+            if resp.status != 200:
+                return []
+            channels = await resp.json()
+            text = [
+                {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0), "parent_id": str(c.get("parent_id") or "")}
+                for c in channels if c.get("type") == 0
+            ]
+            return sorted(text, key=lambda c: c["position"])
     except Exception:
         return []
 
 async def get_guild_voice_channels(guild_id: str) -> list:
     """Return list of voice channels for a guild: [{id, name, position}]"""
     try:
-        async with http_client.ClientSession() as session:
-            async with session.get(
-                f"{DISCORD_API}/guilds/{guild_id}/channels",
-                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                channels = await resp.json()
-                voice = [
-                    {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0)}
-                    for c in channels if c.get("type") == 2
-                ]
-                return sorted(voice, key=lambda c: c["position"])
+        session = get_http_session()
+        async with session.get(
+            f"{DISCORD_API}/guilds/{guild_id}/channels",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+        ) as resp:
+            if resp.status != 200:
+                return []
+            channels = await resp.json()
+            voice = [
+                {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0)}
+                for c in channels if c.get("type") == 2
+            ]
+            return sorted(voice, key=lambda c: c["position"])
     except Exception:
         return []
 
@@ -155,19 +162,19 @@ async def get_twitch_token() -> str:
     now = datetime.utcnow()
     if _twitch_token["token"] and _twitch_token["expires_at"] and now < _twitch_token["expires_at"] - timedelta(seconds=60):
         return _twitch_token["token"]
-    async with http_client.ClientSession() as session:
-        async with session.post(
-            "https://id.twitch.tv/oauth2/token",
-            params={
-                "client_id": TWITCH_CLIENT_ID,
-                "client_secret": TWITCH_CLIENT_SECRET,
-                "grant_type": "client_credentials",
-            }
-        ) as resp:
-            data = await resp.json()
-            _twitch_token["token"] = data["access_token"]
-            _twitch_token["expires_at"] = now + timedelta(seconds=data["expires_in"])
-            return _twitch_token["token"]
+    session = get_http_session()
+    async with session.post(
+        "https://id.twitch.tv/oauth2/token",
+        params={
+            "client_id": TWITCH_CLIENT_ID,
+            "client_secret": TWITCH_CLIENT_SECRET,
+            "grant_type": "client_credentials",
+        }
+    ) as resp:
+        data = await resp.json()
+        _twitch_token["token"] = data["access_token"]
+        _twitch_token["expires_at"] = now + timedelta(seconds=data["expires_in"])
+        return _twitch_token["token"]
 
 async def get_twitch_users(usernames: list) -> dict:
     """Returns {username_lower: {display_name, profile_image_url, description}}"""
@@ -178,20 +185,20 @@ async def get_twitch_users(usernames: list) -> dict:
         try:
             token = await get_twitch_token()
             params = [("login", u.lower()) for u in missing]
-            async with http_client.ClientSession() as session:
-                async with session.get(
-                    "https://api.twitch.tv/helix/users",
-                    headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"},
-                    params=params,
-                ) as resp:
-                    data = await resp.json()
-                    for u in data.get("data", []):
-                        _twitch_cache[u["login"].lower()] = {
-                            "display_name":      u.get("display_name", u["login"]),
-                            "profile_image_url": u.get("profile_image_url", ""),
-                            "description":       u.get("description", ""),
-                            "broadcaster_type":  u.get("broadcaster_type", ""),
-                        }
+            session = get_http_session()
+            async with session.get(
+                "https://api.twitch.tv/helix/users",
+                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"},
+                params=params,
+            ) as resp:
+                data = await resp.json()
+                for u in data.get("data", []):
+                    _twitch_cache[u["login"].lower()] = {
+                        "display_name":      u.get("display_name", u["login"]),
+                        "profile_image_url": u.get("profile_image_url", ""),
+                        "description":       u.get("description", ""),
+                        "broadcaster_type":  u.get("broadcaster_type", ""),
+                    }
         except Exception:
             pass
     return {u: _twitch_cache.get(u.lower(), {}) for u in usernames}
@@ -248,7 +255,7 @@ async def error_logging_middleware(request: web.Request, handler):
                 )
             except Exception as log_err:
                 logger.error(f"Failed to log dashboard error to Discord: {log_err}")
-        raise web.HTTPInternalServerError(reason=f"{type(e).__name__}: {str(e)[:100]}")
+        raise web.HTTPInternalServerError(reason="Internal server error")
 
 # ── Auth Middleware ───────────────────────────────────────────────────────────
 def _session_can_access_guild(session: dict, guild_id: str) -> bool:
@@ -328,27 +335,27 @@ async def auth_callback(request):
     if not state or state not in _oauth_states:
         raise web.HTTPBadRequest(reason="Invalid or missing state — possible CSRF attempt")
     del _oauth_states[state]
-    async with http_client.ClientSession() as session:
-        token_resp = await session.post(
-            f"{DISCORD_API}/oauth2/token",
-            data={
-                "client_id": DISCORD_CLIENT_ID,
-                "client_secret": DISCORD_CLIENT_SECRET,
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": DISCORD_REDIRECT_URI,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        token_data = await token_resp.json()
-        access_token = token_data.get("access_token")
-        if not access_token:
-            raise web.HTTPInternalServerError(reason="Failed to get access token")
-        headers = {"Authorization": f"Bearer {access_token}"}
-        user_resp   = await session.get(f"{DISCORD_API}/users/@me",        headers=headers)
-        guilds_resp = await session.get(f"{DISCORD_API}/users/@me/guilds", headers=headers)
-        user   = await user_resp.json()
-        guilds = await guilds_resp.json()
+    session = get_http_session()
+    token_resp = await session.post(
+        f"{DISCORD_API}/oauth2/token",
+        data={
+            "client_id": DISCORD_CLIENT_ID,
+            "client_secret": DISCORD_CLIENT_SECRET,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": DISCORD_REDIRECT_URI,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    token_data = await token_resp.json()
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise web.HTTPInternalServerError(reason="Failed to get access token")
+    headers = {"Authorization": f"Bearer {access_token}"}
+    user_resp   = await session.get(f"{DISCORD_API}/users/@me",        headers=headers)
+    guilds_resp = await session.get(f"{DISCORD_API}/users/@me/guilds", headers=headers)
+    user   = await user_resp.json()
+    guilds = await guilds_resp.json()
 
     # Only include guilds where user has Manage Server AND the bot is present
     bot_guild_ids = {str(g.id) for g in _bot_ref.guilds} if _bot_ref else set()
@@ -689,18 +696,18 @@ async def get_channels(request):
 async def get_emojis(request):
     guild_id = request.match_info["guild_id"]
     try:
-        async with http_client.ClientSession() as session:
-            async with session.get(
-                f"{DISCORD_API}/guilds/{guild_id}/emojis",
-                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
-            ) as resp:
-                if resp.status != 200:
-                    return web.json_response([])
-                emojis = await resp.json()
-                return web.json_response([
-                    {"id": str(e["id"]), "name": e["name"], "animated": e.get("animated", False)}
-                    for e in emojis if not e.get("managed")
-                ])
+        session = get_http_session()
+        async with session.get(
+            f"{DISCORD_API}/guilds/{guild_id}/emojis",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+        ) as resp:
+            if resp.status != 200:
+                return web.json_response([])
+            emojis = await resp.json()
+            return web.json_response([
+                {"id": str(e["id"]), "name": e["name"], "animated": e.get("animated", False)}
+                for e in emojis if not e.get("managed")
+            ])
     except Exception:
         return web.json_response([])
 
@@ -708,18 +715,18 @@ async def get_emojis(request):
 async def get_roles_list(request):
     guild_id = request.match_info["guild_id"]
     try:
-        async with http_client.ClientSession() as session:
-            async with session.get(
-                f"{DISCORD_API}/guilds/{guild_id}/roles",
-                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
-            ) as resp:
-                if resp.status != 200:
-                    return web.json_response([])
-                roles = await resp.json()
-                return web.json_response([
-                    {"id": str(r["id"]), "name": r["name"], "color": r["color"]}
-                    for r in roles if r["name"] != "@everyone"
-                ])
+        session = get_http_session()
+        async with session.get(
+            f"{DISCORD_API}/guilds/{guild_id}/roles",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+        ) as resp:
+            if resp.status != 200:
+                return web.json_response([])
+            roles = await resp.json()
+            return web.json_response([
+                {"id": str(r["id"]), "name": r["name"], "color": r["color"]}
+                for r in roles if r["name"] != "@everyone"
+            ])
     except Exception:
         return web.json_response([])
 
@@ -733,19 +740,19 @@ async def _resolve_role_id(guild_id: str, role_id: str, new_role_name: str = Non
     role_payload = {"name": new_role_name.strip()}
     if new_role_color is not None:
         role_payload["color"] = int(new_role_color)
-    async with http_client.ClientSession() as session:
-        resp = await session.post(
-            f"{DISCORD_API}/guilds/{guild_id}/roles",
-            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
-            json=role_payload,
-        )
-        if resp.status not in (200, 201):
-            err = await resp.text()
-            raise web.HTTPInternalServerError(reason=f"Failed to create role: {err}")
-        data = await resp.json()
-        # Bust the roles cache so the new role shows up next time
-        _discord_cache.pop(f"/guilds/{guild_id}/roles", None)
-        return str(data["id"])
+    session = get_http_session()
+    resp = await session.post(
+        f"{DISCORD_API}/guilds/{guild_id}/roles",
+        headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+        json=role_payload,
+    )
+    if resp.status not in (200, 201):
+        err = await resp.text()
+        raise web.HTTPInternalServerError(reason=f"Failed to create role: {err}")
+    data = await resp.json()
+    # Bust the roles cache so the new role shows up next time
+    _discord_cache.pop(f"/guilds/{guild_id}/roles", None)
+    return str(data["id"])
 
 async def create_reaction_role(request):
     """
@@ -934,35 +941,35 @@ async def post_suggestion(request):
     sender = "Dev (dashboard)" if session.get("dev") else session.get("username", "Unknown")
     sender_id = None if session.get("dev") else session.get("user_id")
 
-    async with http_client.ClientSession() as s:
-        dm_resp = await s.post(
-            f"{DISCORD_API}/users/@me/channels",
-            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
-            json={"recipient_id": BOT_OWNER_ID},
-        )
-        dm_data = await dm_resp.json()
-        dm_channel_id = dm_data.get("id")
-        if not dm_channel_id:
-            raise web.HTTPInternalServerError(reason="Failed to open DM channel")
+    s = get_http_session()
+    dm_resp = await s.post(
+        f"{DISCORD_API}/users/@me/channels",
+        headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+        json={"recipient_id": BOT_OWNER_ID},
+    )
+    dm_data = await dm_resp.json()
+    dm_channel_id = dm_data.get("id")
+    if not dm_channel_id:
+        raise web.HTTPInternalServerError(reason="Failed to open DM channel")
 
-        embed = {
-            "title": "\U0001f4a1 New Dashboard Suggestion",
-            "description": text,
-            "color": 0x5865F2,
-            "fields": [
-                {"name": "From", "value": f"{sender}{f' (`{sender_id}`)' if sender_id else ''}", "inline": True},
-                {"name": "Via",  "value": "ExcelProtocol Dashboard", "inline": True},
-            ],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "footer": {"text": "excelprotocol.fly.dev/app"},
-        }
-        msg_resp = await s.post(
-            f"{DISCORD_API}/channels/{dm_channel_id}/messages",
-            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
-            json={"embeds": [embed]},
-        )
-        if msg_resp.status not in (200, 201):
-            raise web.HTTPInternalServerError(reason="Failed to send DM")
+    embed = {
+        "title": "\U0001f4a1 New Dashboard Suggestion",
+        "description": text,
+        "color": 0x5865F2,
+        "fields": [
+            {"name": "From", "value": f"{sender}{f' (`{sender_id}`)' if sender_id else ''}", "inline": True},
+            {"name": "Via",  "value": "ExcelProtocol Dashboard", "inline": True},
+        ],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "excelprotocol.fly.dev/app"},
+    }
+    msg_resp = await s.post(
+        f"{DISCORD_API}/channels/{dm_channel_id}/messages",
+        headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+        json={"embeds": [embed]},
+    )
+    if msg_resp.status not in (200, 201):
+        raise web.HTTPInternalServerError(reason="Failed to send DM")
 
     return web.json_response({"ok": True})
 
@@ -994,40 +1001,40 @@ async def post_support(request):
         except Exception:
             pass
 
-    async with http_client.ClientSession() as s:
-        dm_resp = await s.post(
-            f"{DISCORD_API}/users/@me/channels",
-            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
-            json={"recipient_id": BOT_OWNER_ID},
-        )
-        dm_data = await dm_resp.json()
-        dm_channel_id = dm_data.get("id")
-        if not dm_channel_id:
-            raise web.HTTPInternalServerError(reason="Failed to open DM channel")
+    s = get_http_session()
+    dm_resp = await s.post(
+        f"{DISCORD_API}/users/@me/channels",
+        headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+        json={"recipient_id": BOT_OWNER_ID},
+    )
+    dm_data = await dm_resp.json()
+    dm_channel_id = dm_data.get("id")
+    if not dm_channel_id:
+        raise web.HTTPInternalServerError(reason="Failed to open DM channel")
 
-        user_value = f"{sender}"
-        if sender_id:
-            user_value += f"\n`{sender_id}`"
-            user_value += f"\n<@{sender_id}>"
+    user_value = f"{sender}"
+    if sender_id:
+        user_value += f"\n`{sender_id}`"
+        user_value += f"\n<@{sender_id}>"
 
-        embed = {
-            "title": "🎫 New Support Request",
-            "description": text,
-            "color": 0xFF6B6B,
-            "fields": [
-                {"name": "From",   "value": user_value, "inline": True},
-                {"name": "Server", "value": f"{guild_name}\n`{guild_id}`" if guild_id else "Unknown", "inline": True},
-            ],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "footer": {"text": "excelprotocol.fly.dev/app"},
-        }
-        msg_resp = await s.post(
-            f"{DISCORD_API}/channels/{dm_channel_id}/messages",
-            headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
-            json={"embeds": [embed]},
-        )
-        if msg_resp.status not in (200, 201):
-            raise web.HTTPInternalServerError(reason="Failed to send DM")
+    embed = {
+        "title": "🎫 New Support Request",
+        "description": text,
+        "color": 0xFF6B6B,
+        "fields": [
+            {"name": "From",   "value": user_value, "inline": True},
+            {"name": "Server", "value": f"{guild_name}\n`{guild_id}`" if guild_id else "Unknown", "inline": True},
+        ],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "excelprotocol.fly.dev/app"},
+    }
+    msg_resp = await s.post(
+        f"{DISCORD_API}/channels/{dm_channel_id}/messages",
+        headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+        json={"embeds": [embed]},
+    )
+    if msg_resp.status not in (200, 201):
+        raise web.HTTPInternalServerError(reason="Failed to send DM")
 
     return web.json_response({"ok": True})
 
@@ -1316,27 +1323,27 @@ async def get_twitch_info(request):
     BOT_TWITCH_LOGIN = "excelprotocol"
     try:
         broadcaster = await get_twitch_token()
-        async with http_client.ClientSession() as sess:
-            # Get broadcaster user ID first
-            async with sess.get(
-                "https://api.twitch.tv/helix/users",
-                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {broadcaster}"},
-                params={"login": channel}
-            ) as resp:
-                udata = await resp.json()
-                users = udata.get("data", [])
-                if users:
-                    broadcaster_id = users[0]["id"]
-                    # Check moderators list
-                    async with sess.get(
-                        "https://api.twitch.tv/helix/moderation/moderators",
-                        headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {broadcaster}"},
-                        params={"broadcaster_id": broadcaster_id, "first": 100}
-                    ) as mresp:
-                        if mresp.status == 200:
-                            mdata = await mresp.json()
-                            mod_logins = [m["user_login"].lower() for m in mdata.get("data", [])]
-                            bot_is_modded = BOT_TWITCH_LOGIN in mod_logins
+        sess = get_http_session()
+        # Get broadcaster user ID first
+        async with sess.get(
+            "https://api.twitch.tv/helix/users",
+            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {broadcaster}"},
+            params={"login": channel}
+        ) as resp:
+            udata = await resp.json()
+            users = udata.get("data", [])
+            if users:
+                broadcaster_id = users[0]["id"]
+                # Check moderators list
+                async with sess.get(
+                    "https://api.twitch.tv/helix/moderation/moderators",
+                    headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {broadcaster}"},
+                    params={"broadcaster_id": broadcaster_id, "first": 100}
+                ) as mresp:
+                    if mresp.status == 200:
+                        mdata = await mresp.json()
+                        mod_logins = [m["user_login"].lower() for m in mdata.get("data", [])]
+                        bot_is_modded = BOT_TWITCH_LOGIN in mod_logins
     except Exception as e:
         logger.warning(f"Could not check mod status for {channel}: {e}")
 
@@ -1481,29 +1488,29 @@ async def twitch_broadcaster_callback(request):
     if not _session_can_access_guild(session, guild_id):
         raise web.HTTPForbidden(reason="You no longer have access to this guild")
 
-    async with http_client.ClientSession() as sess:
-        # Exchange code for tokens
-        resp = await sess.post("https://id.twitch.tv/oauth2/token", data={
-            "client_id":     TWITCH_CLIENT_ID,
-            "client_secret": TWITCH_CLIENT_SECRET,
-            "code":          code,
-            "grant_type":    "authorization_code",
-            "redirect_uri":  TWITCH_REDIRECT_URI,
-        })
-        if resp.status != 200:
-            raise web.HTTPInternalServerError(reason="Failed to exchange code for token")
-        token_data = await resp.json()
-        access_token  = token_data["access_token"]
-        refresh_token = token_data["refresh_token"]
-        expires_at    = (datetime.now(timezone.utc) + timedelta(seconds=token_data["expires_in"])).isoformat()
+    sess = get_http_session()
+    # Exchange code for tokens
+    resp = await sess.post("https://id.twitch.tv/oauth2/token", data={
+        "client_id":     TWITCH_CLIENT_ID,
+        "client_secret": TWITCH_CLIENT_SECRET,
+        "code":          code,
+        "grant_type":    "authorization_code",
+        "redirect_uri":  TWITCH_REDIRECT_URI,
+    })
+    if resp.status != 200:
+        raise web.HTTPInternalServerError(reason="Failed to exchange code for token")
+    token_data = await resp.json()
+    access_token  = token_data["access_token"]
+    refresh_token = token_data["refresh_token"]
+    expires_at    = (datetime.now(timezone.utc) + timedelta(seconds=token_data["expires_in"])).isoformat()
 
-        # Get Twitch user info
-        user_resp = await sess.get(f"{TWITCH_API}/users",
-            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"})
-        user_data = await user_resp.json()
-        user = user_data["data"][0] if user_data.get("data") else None
-        if not user:
-            raise web.HTTPInternalServerError(reason="Could not get Twitch user info")
+    # Get Twitch user info
+    user_resp = await sess.get(f"{TWITCH_API}/users",
+        headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"})
+    user_data = await user_resp.json()
+    user = user_data["data"][0] if user_data.get("data") else None
+    if not user:
+        raise web.HTTPInternalServerError(reason="Could not get Twitch user info")
 
     if _bot_ref:
         import asyncio as _asyncio
@@ -1539,26 +1546,26 @@ async def _register_eventsub(broadcaster_user_id: str):
         logger.error("EVENTSUB_SECRET env var is not set — cannot register EventSub subscription")
         return
     try:
-        async with http_client.ClientSession() as sess:
-            logger.info(f"Registering EventSub for broadcaster {broadcaster_user_id} with callback {callback_url}")
-            app_token = await get_twitch_token()
-            resp = await sess.post(
-                f"{TWITCH_API}/eventsub/subscriptions",
-                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {app_token}", "Content-Type": "application/json"},
-                json={
-                    "type": "channel.channel_points_custom_reward_redemption.add",
-                    "version": "1",
-                    "condition": {"broadcaster_user_id": broadcaster_user_id},
-                    "transport": {"method": "webhook", "callback": callback_url, "secret": secret},
-                }
-            )
-            data = await resp.json()
-            if resp.status == 409:
-                logger.info(f"EventSub already subscribed for broadcaster {broadcaster_user_id}")
-            elif resp.status in (200, 202):
-                logger.info(f"EventSub registered for broadcaster {broadcaster_user_id}: {data}")
-            else:
-                logger.warning(f"EventSub registration failed for {broadcaster_user_id}: {resp.status} {data}")
+        sess = get_http_session()
+        logger.info(f"Registering EventSub for broadcaster {broadcaster_user_id} with callback {callback_url}")
+        app_token = await get_twitch_token()
+        resp = await sess.post(
+            f"{TWITCH_API}/eventsub/subscriptions",
+            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {app_token}", "Content-Type": "application/json"},
+            json={
+                "type": "channel.channel_points_custom_reward_redemption.add",
+                "version": "1",
+                "condition": {"broadcaster_user_id": broadcaster_user_id},
+                "transport": {"method": "webhook", "callback": callback_url, "secret": secret},
+            }
+        )
+        data = await resp.json()
+        if resp.status == 409:
+            logger.info(f"EventSub already subscribed for broadcaster {broadcaster_user_id}")
+        elif resp.status in (200, 202):
+            logger.info(f"EventSub registered for broadcaster {broadcaster_user_id}: {data}")
+        else:
+            logger.warning(f"EventSub registration failed for {broadcaster_user_id}: {resp.status} {data}")
     except Exception as e:
         logger.error(f"Error registering EventSub for {broadcaster_user_id}: {e}")
 
@@ -1751,34 +1758,34 @@ async def get_broadcaster_info(request):
     # Fetch channel rewards from Twitch
     rewards = []
     try:
-        async with http_client.ClientSession() as sess:
-            resp = await sess.get(
+        sess = get_http_session()
+        resp = await sess.get(
+            f"{TWITCH_API}/channel_points/custom_rewards",
+            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
+            params={"broadcaster_id": broadcaster_id}
+        )
+        if resp.status == 200:
+            data = await resp.json()
+            # Also fetch app-managed IDs to mark which ones are editable
+            mgmt_resp = await sess.get(
                 f"{TWITCH_API}/channel_points/custom_rewards",
                 headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
-                params={"broadcaster_id": broadcaster_id}
+                params={"broadcaster_id": broadcaster_id, "only_manageable_rewards": "true"}
             )
-            if resp.status == 200:
-                data = await resp.json()
-                # Also fetch app-managed IDs to mark which ones are editable
-                mgmt_resp = await sess.get(
-                    f"{TWITCH_API}/channel_points/custom_rewards",
-                    headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
-                    params={"broadcaster_id": broadcaster_id, "only_manageable_rewards": "true"}
-                )
-                manageable_ids = set()
-                if mgmt_resp.status == 200:
-                    mgmt_data = await mgmt_resp.json()
-                    manageable_ids = {r["id"] for r in mgmt_data.get("data", [])}
-                rewards = [{"id": r["id"], "title": r["title"], "cost": r["cost"],
-                            "is_enabled": r["is_enabled"], "background_color": r.get("background_color", "#9146FF"),
-                            "manageable": r["id"] in manageable_ids}
-                           for r in data.get("data", [])]
-            elif resp.status == 401:
-                return web.json_response({"connected": False, "expired": True})
-            elif resp.status == 403:
-                # Not affiliate/partner
-                rows2 = await db_fetch("SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
-                return web.json_response({"connected": True, "not_affiliate": True, "twitch_login": rows2[0]["twitch_login"] if rows2 else "", "rewards": [], "triggers": []})
+            manageable_ids = set()
+            if mgmt_resp.status == 200:
+                mgmt_data = await mgmt_resp.json()
+                manageable_ids = {r["id"] for r in mgmt_data.get("data", [])}
+            rewards = [{"id": r["id"], "title": r["title"], "cost": r["cost"],
+                        "is_enabled": r["is_enabled"], "background_color": r.get("background_color", "#9146FF"),
+                        "manageable": r["id"] in manageable_ids}
+                       for r in data.get("data", [])]
+        elif resp.status == 401:
+            return web.json_response({"connected": False, "expired": True})
+        elif resp.status == 403:
+            # Not affiliate/partner
+            rows2 = await db_fetch("SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+            return web.json_response({"connected": True, "not_affiliate": True, "twitch_login": rows2[0]["twitch_login"] if rows2 else "", "rewards": [], "triggers": []})
     except Exception as e:
         logger.error(f"Error fetching rewards for guild {guild_id}: {e}")
 
@@ -1824,18 +1831,18 @@ async def create_reward(request):
         raise web.HTTPUnauthorized(reason="No Twitch account connected")
     access_token   = rows[0]["access_token"]
     broadcaster_id = rows[0]["twitch_user_id"]
-    async with http_client.ClientSession() as sess:
-        resp = await sess.post(
-            f"{TWITCH_API}/channel_points/custom_rewards",
-            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-            params={"broadcaster_id": broadcaster_id},
-            json={"title": body.get("title", "New Reward"), "cost": int(body.get("cost", 100)),
-                  "is_enabled": body.get("is_enabled", True)}
-        )
-        data = await resp.json()
-        if resp.status not in (200, 201):
-            raise web.HTTPBadRequest(reason=data.get("message", "Failed to create reward"))
-        reward = data["data"][0]
+    sess = get_http_session()
+    resp = await sess.post(
+        f"{TWITCH_API}/channel_points/custom_rewards",
+        headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        params={"broadcaster_id": broadcaster_id},
+        json={"title": body.get("title", "New Reward"), "cost": int(body.get("cost", 100)),
+              "is_enabled": body.get("is_enabled", True)}
+    )
+    data = await resp.json()
+    if resp.status not in (200, 201):
+        raise web.HTTPBadRequest(reason=data.get("message", "Failed to create reward"))
+    reward = data["data"][0]
     return web.json_response({"ok": True, "reward": {"id": reward["id"], "title": reward["title"], "cost": reward["cost"]}})
 
 async def edit_reward(request):
@@ -1852,16 +1859,16 @@ async def edit_reward(request):
     if "title"      in body: patch["title"]      = body["title"]
     if "cost"       in body: patch["cost"]        = int(body["cost"])
     if "is_enabled" in body: patch["is_enabled"]  = body["is_enabled"]
-    async with http_client.ClientSession() as sess:
-        resp = await sess.patch(
-            f"{TWITCH_API}/channel_points/custom_rewards",
-            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-            params={"broadcaster_id": broadcaster_id, "id": reward_id},
-            json=patch
-        )
-        if resp.status not in (200, 204):
-            data = await resp.json()
-            raise web.HTTPBadRequest(reason=data.get("message", "Failed to edit reward"))
+    sess = get_http_session()
+    resp = await sess.patch(
+        f"{TWITCH_API}/channel_points/custom_rewards",
+        headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        params={"broadcaster_id": broadcaster_id, "id": reward_id},
+        json=patch
+    )
+    if resp.status not in (200, 204):
+        data = await resp.json()
+        raise web.HTTPBadRequest(reason=data.get("message", "Failed to edit reward"))
     return web.json_response({"ok": True})
 
 async def delete_reward(request):
@@ -1873,14 +1880,14 @@ async def delete_reward(request):
         raise web.HTTPUnauthorized(reason="No Twitch account connected")
     access_token   = rows[0]["access_token"]
     broadcaster_id = rows[0]["twitch_user_id"]
-    async with http_client.ClientSession() as sess:
-        resp = await sess.delete(
-            f"{TWITCH_API}/channel_points/custom_rewards",
-            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
-            params={"broadcaster_id": broadcaster_id, "id": reward_id}
-        )
-        if resp.status not in (200, 204):
-            raise web.HTTPBadRequest(reason="Failed to delete reward")
+    sess = get_http_session()
+    resp = await sess.delete(
+        f"{TWITCH_API}/channel_points/custom_rewards",
+        headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
+        params={"broadcaster_id": broadcaster_id, "id": reward_id}
+    )
+    if resp.status not in (200, 204):
+        raise web.HTTPBadRequest(reason="Failed to delete reward")
     # Also remove trigger if exists
     await db_execute("DELETE FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
     return web.json_response({"ok": True})
@@ -3036,10 +3043,16 @@ def create_dashboard_app(bot=None):
     })
     for route in list(app.router.routes()):
         try:
-            # Skip WebSocket routes — CORS breaks the upgrade handshake
             if hasattr(route, 'resource') and route.resource and '/ws' in str(route.resource.canonical):
                 continue
             cors.add(route)
         except Exception:
             pass
+
+    async def on_cleanup(app):
+        global _http_session
+        if _http_session and not _http_session.closed:
+            await _http_session.close()
+    app.on_cleanup.append(on_cleanup)
+
     return app
