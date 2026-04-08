@@ -247,7 +247,7 @@ def _session_can_access_guild(session: dict, guild_id: str) -> bool:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/dev", "/auth/twitch/callback", "/api/eventsub/callback")
+    public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/twitch/callback", "/api/eventsub/callback")
     if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/auth/twitch/login"):
         return await handler(request)
 
@@ -338,11 +338,13 @@ async def auth_callback(request):
         and (not bot_guild_ids or g["id"] in bot_guild_ids)
     ]
     session_token = secrets.token_hex(32)
+    is_owner = BOT_OWNER_ID and str(user["id"]) == str(BOT_OWNER_ID)
     _sessions[session_token] = {
         "user_id":  user["id"],
         "username": user["username"],
         "avatar":   user.get("avatar"),
         "guilds":   managed,
+        "dev":      is_owner,
     }
     response = web.HTTPFound("/app/")
     response.set_cookie(
@@ -378,7 +380,7 @@ async def auth_me(request):
         "username": session["username"],
         "avatar":   session.get("avatar"),
         "guilds":   enriched,
-        "is_dev":   False,
+        "is_dev":   session.get("dev", False),
     })
 
 # ── Guilds ────────────────────────────────────────────────────────────────────
@@ -2885,24 +2887,6 @@ async def auth_logout(request):
     return response
 
 
-async def auth_dev(request):
-    """Password-protected dev login — accepts POST with JSON body {password}."""
-    try:
-        body = await request.json()
-        password = body.get("password", "")
-    except Exception:
-        raise web.HTTPBadRequest(reason="Expected JSON body with password field")
-    if not DEV_TOKEN or password != DEV_TOKEN:
-        raise web.HTTPForbidden(reason="Invalid dev password")
-    session_token = secrets.token_hex(32)
-    _sessions[session_token] = {"dev": True}
-    response = web.json_response({"ok": True})
-    response.set_cookie(
-        "ep_session", session_token,
-        httponly=True, samesite="Lax", secure=True, max_age=86400 * 7
-    )
-    return response
-
 # ── App Factory ───────────────────────────────────────────────────────────────
 def create_dashboard_app(bot=None):
     global _bot_ref
@@ -2916,7 +2900,6 @@ def create_dashboard_app(bot=None):
     app.router.add_get ("/auth/login",    auth_login)
     app.router.add_get ("/auth/callback", auth_callback)
     app.router.add_post("/auth/logout",   auth_logout)
-    app.router.add_post("/auth/dev",      auth_dev)
     app.router.add_get("/auth/twitch/login/{guild_id}",  twitch_broadcaster_login)
     app.router.add_get("/auth/twitch/callback",          twitch_broadcaster_callback)
     app.router.add_delete("/api/guild/{guild_id}/broadcaster",              twitch_broadcaster_disconnect)
