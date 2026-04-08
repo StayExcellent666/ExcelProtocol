@@ -407,10 +407,12 @@ async def auth_me(request):
         guilds = []
         if _bot_ref:
             for g in _bot_ref.guilds:
+                icon_hash = g.icon.key if g.icon else None
+                icon_url = f"https://cdn.discordapp.com/icons/{g.id}/{icon_hash}.{'gif' if icon_hash and icon_hash.startswith('a_') else 'png'}" if icon_hash else None
                 guilds.append({
                     "id":   str(g.id),
                     "name": g.name,
-                    "icon": str(g.icon) if g.icon else None,
+                    "icon": icon_url,
                     "approximate_member_count": g.member_count,
                 })
         else:
