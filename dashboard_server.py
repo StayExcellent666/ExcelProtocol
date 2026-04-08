@@ -358,7 +358,22 @@ async def auth_callback(request):
     guilds = await guilds_resp.json()
 
     # Only include guilds where user has Manage Server AND the bot is present
-    bot_guild_ids = {str(g.id) for g in _bot_ref.guilds} if _bot_ref else set()
+    # Get bot's guild list from Discord API — more reliable than in-memory cache
+    # which may not reflect recently joined guilds
+    try:
+        session = get_http_session()
+        async with session.get(
+            f"{DISCORD_API}/users/@me/guilds",
+            headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+        ) as resp:
+            if resp.status == 200:
+                bot_guilds = await resp.json()
+                bot_guild_ids = {str(g["id"]) for g in bot_guilds}
+            else:
+                # Fall back to in-memory cache
+                bot_guild_ids = {str(g.id) for g in _bot_ref.guilds} if _bot_ref else set()
+    except Exception:
+        bot_guild_ids = {str(g.id) for g in _bot_ref.guilds} if _bot_ref else set()
     managed = [
         {"id": g["id"], "name": g["name"], "icon": g.get("icon")}
         for g in guilds
