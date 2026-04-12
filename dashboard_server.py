@@ -1347,8 +1347,21 @@ async def get_twitch_info(request):
         return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50})
 
     row = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
+
+    # If no /twitchset channel, fall back to the broadcaster OAuth token login
     if not row:
-        return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50})
+        broadcaster_rows = await db_fetch(
+            "SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,)
+        )
+        if broadcaster_rows:
+            twitch_login = broadcaster_rows[0]["twitch_login"]
+            # Auto-link the channel using the broadcaster login
+            await _asyncio.get_event_loop().run_in_executor(
+                None, lambda: _bot_ref.db.set_twitch_channel(int(guild_id), twitch_login)
+            )
+            row = {"twitch_channel": twitch_login}
+        else:
+            return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50, "can_link_via_oauth": True})
 
     channel = row["twitch_channel"]
     commands = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_commands(channel))
