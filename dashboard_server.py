@@ -1481,8 +1481,10 @@ async def twitch_broadcaster_login(request):
     """Redirect streamer to Twitch OAuth — stores secure state mapped to guild+session."""
     guild_id = request.match_info["guild_id"]
 
-    # Verify the session actually has access to this guild
-    session = request["session"]
+    # Route is in public bypass so middleware didn't populate session — get it manually
+    session = get_session(request)
+    if not session:
+        raise web.HTTPFound(f"/auth/login")
     if not _session_can_access_guild(session, guild_id):
         raise web.HTTPForbidden(reason="You do not have access to this guild")
 
