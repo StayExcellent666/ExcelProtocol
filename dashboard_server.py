@@ -603,8 +603,8 @@ async def add_streamer(request):
 
     try:
         await db_execute(
-            "INSERT INTO monitored_streamers (guild_id, streamer_name, channel_id) VALUES (?, ?, ?)",
-            (guild_id, twitch_username, channel_id),
+            "INSERT INTO monitored_streamers (guild_id, streamer_name, channel_id, twitch_user_id) VALUES (?, ?, ?, ?)",
+            (guild_id, twitch_username, channel_id, user_info["id"] if user_info else None),
         )
     except Exception as e:
         if "UNIQUE" in str(e):

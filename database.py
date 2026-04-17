@@ -133,6 +133,16 @@ class Database:
         except Exception:
             pass  # Column already exists
 
+        # Migration: add twitch_user_id if it doesn't exist
+        try:
+            cursor.execute('''
+                ALTER TABLE monitored_streamers ADD COLUMN twitch_user_id TEXT DEFAULT NULL
+            ''')
+            conn.commit()
+            logger.info("Migration: added twitch_user_id to monitored_streamers")
+        except Exception:
+            pass  # Column already exists
+
         # Migration: add streamer_limit to server_settings
         cursor.execute('''
             SELECT COUNT(*) FROM pragma_table_info('server_settings')
@@ -613,10 +623,11 @@ class Database:
         conn.close()
         return [{'channel_id': r[0], 'guild_id': r[1], 'owner_id': r[2]} for r in rows]
 
-    def add_streamer(self, guild_id: int, streamer_name: str, channel_id: int, custom_channel_id: int = None) -> bool:
+    def add_streamer(self, guild_id: int, streamer_name: str, channel_id: int, custom_channel_id: int = None, twitch_user_id: str = None) -> bool:
         """
         Add a streamer to monitor for a guild.
         custom_channel_id: if set, this streamer always posts to this channel regardless of default.
+        twitch_user_id: Twitch user ID — stored so subscriptions survive renames.
         Returns True if added, False if already exists
         """
         conn = self.get_connection()
@@ -624,9 +635,9 @@ class Database:
         
         try:
             cursor.execute('''
-                INSERT INTO monitored_streamers (guild_id, streamer_name, channel_id, custom_channel_id)
-                VALUES (?, ?, ?, ?)
-            ''', (guild_id, streamer_name.lower(), channel_id, custom_channel_id))
+                INSERT INTO monitored_streamers (guild_id, streamer_name, channel_id, custom_channel_id, twitch_user_id)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (guild_id, streamer_name.lower(), channel_id, custom_channel_id, twitch_user_id))
             
             conn.commit()
             logger.info(f"Added streamer {streamer_name} for guild {guild_id} (custom channel: {custom_channel_id})")
@@ -667,7 +678,7 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT streamer_name, channel_id, added_at, custom_channel_id
+            SELECT streamer_name, channel_id, added_at, custom_channel_id, twitch_user_id
             FROM monitored_streamers
             WHERE guild_id = ?
             ORDER BY streamer_name
@@ -681,7 +692,8 @@ class Database:
                 'streamer_name': row[0],
                 'channel_id': row[1],
                 'added_at': row[2],
-                'custom_channel_id': row[3]
+                'custom_channel_id': row[3],
+                'twitch_user_id': row[4],
             }
             for row in rows
         ]
@@ -692,7 +704,7 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT guild_id, streamer_name, channel_id
+            SELECT guild_id, streamer_name, channel_id, custom_channel_id, twitch_user_id
             FROM monitored_streamers
             ORDER BY streamer_name
         ''')
@@ -704,10 +716,61 @@ class Database:
             {
                 'guild_id': row[0],
                 'streamer_name': row[1],
-                'channel_id': row[2]
+                'channel_id': row[2],
+                'custom_channel_id': row[3],
+                'twitch_user_id': row[4],
             }
             for row in rows
         ]
+
+    def update_streamer_user_id(self, guild_id: int, streamer_name: str, twitch_user_id: str):
+        """Store the Twitch user ID for a monitored streamer."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE monitored_streamers SET twitch_user_id = ? WHERE guild_id = ? AND streamer_name = ?',
+            (twitch_user_id, guild_id, streamer_name.lower())
+        )
+        conn.commit()
+        conn.close()
+
+    def update_streamer_login(self, old_login: str, new_login: str):
+        """Update streamer_name across all guilds when a Twitch user renames."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE monitored_streamers SET streamer_name = ? WHERE streamer_name = ?',
+            (new_login.lower(), old_login.lower())
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return affected
+
+    def get_streamers_missing_user_id(self) -> List[Dict]:
+        """Return all monitored_streamers rows that don't have a twitch_user_id yet."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT DISTINCT streamer_name FROM monitored_streamers
+            WHERE twitch_user_id IS NULL
+            ORDER BY streamer_name
+        ''')
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'streamer_name': r[0]} for r in rows]
+
+    def get_all_streamers_with_ids(self) -> List[Dict]:
+        """Return all unique (streamer_name, twitch_user_id) pairs that have an ID stored."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT DISTINCT streamer_name, twitch_user_id FROM monitored_streamers
+            WHERE twitch_user_id IS NOT NULL
+        ''')
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'streamer_name': r[0], 'twitch_user_id': r[1]} for r in rows]
     
     def set_notification_channel(self, guild_id: int, channel_id: int):
         """Set or update the notification channel for a server"""

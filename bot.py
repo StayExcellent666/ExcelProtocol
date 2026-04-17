@@ -173,6 +173,11 @@ class TwitchNotifierBot(discord.Client):
             self.check_milestones.start()
             logger.info("Milestone check loop started")
 
+        # Start daily streamer rename check
+        if not self.check_streamer_renames.is_running():
+            self.check_streamer_renames.start()
+            logger.info("Streamer rename check loop started")
+
         guild_count = len(self.guilds)
         await self.log_to_channel(
             "🤖", "Bot Started",
@@ -381,19 +386,26 @@ class TwitchNotifierBot(discord.Client):
 
         # Get all unique streamers from DB with guild info
         streamers = self.db.get_all_streamers()
-        unique_logins = list({s['streamer_name'].lower() for s in streamers})
-        if not unique_logins:
+        if not streamers:
             return
 
-        # Build login → guild ids+names lookup for error reporting
+        # Build lookup structures
         login_guilds: dict[str, list[str]] = {}
         login_guild_ids: dict[str, list[int]] = {}
+        login_to_stored_id: dict[str, str] = {}  # login → stored twitch_user_id
         for s in streamers:
             login = s['streamer_name'].lower()
             guild = self.get_guild(s['guild_id'])
             guild_name = guild.name if guild else str(s['guild_id'])
             login_guilds.setdefault(login, []).append(guild_name)
             login_guild_ids.setdefault(login, []).append(s['guild_id'])
+            if s.get('twitch_user_id') and login not in login_to_stored_id:
+                login_to_stored_id[login] = s['twitch_user_id']
+
+        # Split into those with stored IDs vs those needing API resolution
+        unique_logins = list({s['streamer_name'].lower() for s in streamers})
+        logins_with_id    = {l for l in unique_logins if l in login_to_stored_id}
+        logins_without_id = [l for l in unique_logins if l not in login_to_stored_id]
 
         # Clear stale unresolvable records — will repopulate fresh below
         self.db.clear_unresolvable_streamers()
@@ -411,8 +423,30 @@ class TwitchNotifierBot(discord.Client):
         failed_names = []
         unresolvable = []
 
-        for i in range(0, len(unique_logins), 100):
-            batch = unique_logins[i:i+100]
+        # Helper to register subscriptions for a resolved user
+        async def _register_if_needed(uid: str, login: str):
+            nonlocal registered, failed
+            for event_type in ("stream.online", "stream.offline"):
+                if (event_type, uid) in existing_keys:
+                    continue
+                result = await self.twitch.register_stream_subscription(
+                    uid, event_type, callback_url, secret
+                )
+                if result and not result.get("already_exists"):
+                    registered += 1
+                elif not result:
+                    failed += 1
+                    failed_names.append(f"{login} ({event_type})")
+                    logger.warning(f"Failed to register {event_type} for {login} ({uid})")
+
+        # ── Register using stored IDs directly (no API call needed) ──────────
+        for login in logins_with_id:
+            uid = login_to_stored_id[login]
+            await _register_if_needed(uid, login)
+
+        # ── Resolve logins without stored IDs via Twitch API ──────────────────
+        for i in range(0, len(logins_without_id), 100):
+            batch = logins_without_id[i:i+100]
             session = await self.twitch.get_session()
             headers = await self.twitch._headers()
             params = [("login", login) for login in batch]
@@ -437,24 +471,16 @@ class TwitchNotifierBot(discord.Client):
                     guild_str = ", ".join(set(guilds))
                     unresolvable.append(f"{login} ({guild_str})")
                     logger.warning(f"EventSub: no Twitch user for '{login}' in [{guild_str}] — banned/deleted/renamed?")
-                    # Persist to DB so dashboard can show warning per guild
                     for gid in login_guild_ids.get(login, []):
                         self.db.add_unresolvable_streamer(login, gid)
 
             for user in users:
                 uid = user["id"]
-                for event_type in ("stream.online", "stream.offline"):
-                    if (event_type, uid) in existing_keys:
-                        continue
-                    result = await self.twitch.register_stream_subscription(
-                        uid, event_type, callback_url, secret
-                    )
-                    if result and not result.get("already_exists"):
-                        registered += 1
-                    elif not result:
-                        failed += 1
-                        failed_names.append(f"{user['login']} ({event_type})")
-                        logger.warning(f"Failed to register {event_type} for {user['login']} ({uid})")
+                login = user["login"].lower()
+                # Backfill the stored ID for all guilds monitoring this streamer
+                for gid in login_guild_ids.get(login, []):
+                    self.db.update_streamer_user_id(gid, login, uid)
+                await _register_if_needed(uid, login)
 
         if registered or failed:
             logger.info(f"EventSub sync: registered {registered} new, {failed} failed, {len(unresolvable)} unresolvable")
@@ -638,6 +664,64 @@ class TwitchNotifierBot(discord.Client):
 
     @check_milestones.before_loop
     async def before_check_milestones(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def check_streamer_renames(self):
+        """Daily task — resolve all stored user IDs to current logins and update any renames."""
+        try:
+            rows = self.db.get_all_streamers_with_ids()
+            if not rows:
+                return
+
+            # Deduplicate by user ID
+            id_to_login: dict[str, str] = {}
+            for r in rows:
+                if r['twitch_user_id'] not in id_to_login:
+                    id_to_login[r['twitch_user_id']] = r['streamer_name']
+
+            uid_list = list(id_to_login.keys())
+            renamed = []
+
+            for i in range(0, len(uid_list), 100):
+                batch = uid_list[i:i+100]
+                session = await self.twitch.get_session()
+                headers = await self.twitch._headers()
+                params = [("id", uid) for uid in batch]
+                try:
+                    async with session.get(
+                        "https://api.twitch.tv/helix/users",
+                        headers=headers, params=params
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                        users = data.get("data", [])
+                except Exception as e:
+                    logger.error(f"Error checking streamer renames: {e}")
+                    continue
+
+                for user in users:
+                    uid = user["id"]
+                    current_login = user["login"].lower()
+                    stored_login = id_to_login.get(uid, "").lower()
+                    if stored_login and current_login != stored_login:
+                        # Rename detected — update all rows across all guilds
+                        affected = self.db.update_streamer_login(stored_login, current_login)
+                        renamed.append(f"{stored_login} → {current_login} ({affected} guild(s))")
+                        logger.info(f"Streamer renamed: {stored_login} → {current_login} ({affected} guilds updated)")
+
+            if renamed:
+                await self.log_to_channel(
+                    "🔄", "Streamer Renames Detected",
+                    f"Updated {len(renamed)} streamer login(s):\n" + "\n".join(f"• {r}" for r in renamed),
+                    color=0x00CC66
+                )
+        except Exception as e:
+            logger.error(f"Error in check_streamer_renames: {e}", exc_info=True)
+
+    @check_streamer_renames.before_loop
+    async def before_check_streamer_renames(self):
         await self.wait_until_ready()
 
     async def alert_permission_issue(self, guild: discord.Guild, channel_id: int, issue: str):
@@ -1532,7 +1616,7 @@ async def add_streamer(interaction: discord.Interaction, streamer: str, channel:
         )
         return
 
-    success = bot.db.add_streamer(interaction.guild_id, user_info['login'], channel_id, custom_channel_id=channel.id if channel else None)
+    success = bot.db.add_streamer(interaction.guild_id, user_info['login'], channel_id, custom_channel_id=channel.id if channel else None, twitch_user_id=user_info['id'])
 
     if success:
         custom = " (custom channel)" if channel else ""
