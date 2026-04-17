@@ -273,7 +273,7 @@ class TwitchNotifierBot(discord.Client):
                         return
 
                 # Build channel name from template
-                name = settings['name_template'].replace('{username}', member.display_name)
+                name = "🔵 " + settings['name_template'].replace('{username}', member.display_name)
 
                 # Create VC in the same category as trigger channel
                 category = after.channel.category
@@ -319,12 +319,16 @@ class TwitchNotifierBot(discord.Client):
             title="🎙️ Your Voice Channel",
             description=(
                 f"**{channel.name}**\n\n"
-                "Use the buttons below to manage your channel.\n"
-                "Only you can use these controls."
+                "You're the owner of this channel. Use the buttons below to manage it:\n\n"
+                "✏️ **Rename** — change the channel name\n"
+                "👥 **Set Limit** — cap how many people can join (0 = unlimited)\n"
+                "🔒 **Lock** — stop new members from joining\n"
+                "🔓 **Unlock** — allow anyone to join again\n"
+                "👢 **Kick** — remove a member from the channel"
             ),
             color=0x00f5d4,
         )
-        embed.set_footer(text="Channel deletes automatically when everyone leaves")
+        embed.set_footer(text="Channel deletes automatically when everyone leaves • Only you can use these controls")
         view = VCControlView(channel.id, owner.id)
         try:
             await channel.send(embed=embed, view=view)
@@ -1323,8 +1327,12 @@ class VCRenameModal(discord.ui.Modal, title="Rename Channel"):
             await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
             return
         try:
-            await channel.edit(name=self.new_name.value, reason="ExcelProtocol VC rename")
-            await interaction.response.send_message(f"✅ Renamed to **{self.new_name.value}**", ephemeral=True)
+            new_name = self.new_name.value.strip()
+            # Always keep the blue circle prefix so bot-created VCs stay identifiable
+            if not new_name.startswith("🔵"):
+                new_name = "🔵 " + new_name
+            await channel.edit(name=new_name, reason="ExcelProtocol VC rename")
+            await interaction.response.send_message(f"✅ Renamed to **{new_name}**", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ Failed: {e}", ephemeral=True)
 

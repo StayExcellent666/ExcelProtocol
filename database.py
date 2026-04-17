@@ -379,7 +379,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS vc_settings (
                 guild_id           INTEGER PRIMARY KEY,
                 trigger_channel_id INTEGER NOT NULL,
-                name_template      TEXT NOT NULL DEFAULT '{username}''s VC',
+                name_template      TEXT NOT NULL DEFAULT '🔵 {username}''s VC',
                 category_id        INTEGER DEFAULT NULL
             )
         ''')
@@ -553,7 +553,7 @@ class Database:
             return None
         return {'trigger_channel_id': row[0], 'name_template': row[1], 'category_id': row[2]}
 
-    def set_vc_settings(self, guild_id: int, trigger_channel_id: int, name_template: str = "{username}'s VC", category_id: int = None):
+    def set_vc_settings(self, guild_id: int, trigger_channel_id: int, name_template: str = "🔵 {username}'s VC", category_id: int = None):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
