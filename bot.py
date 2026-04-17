@@ -257,6 +257,90 @@ class TwitchNotifierBot(discord.Client):
         self.db.cleanup_guild(guild.id)
         logger.info(f"Cleaned up all data for guild {guild.id}")
 
+    async def on_member_join(self, member: discord.Member):
+        """Check new members against safety filters."""
+        try:
+            settings = self.db.get_safety_settings(member.guild.id)
+            if not settings or not settings['enabled']:
+                return
+
+            # Skip bots
+            if member.bot:
+                return
+
+            # Skip if member has bypass role
+            if settings['bypass_role_id']:
+                bypass_role = member.guild.get_role(settings['bypass_role_id'])
+                if bypass_role and bypass_role in member.roles:
+                    return
+
+            account_age_days = (datetime.utcnow() - member.created_at.replace(tzinfo=None)).days
+            reasons = []
+
+            # Check account age
+            if account_age_days < settings['min_account_age_days']:
+                reasons.append(f"account created {account_age_days} day(s) ago (minimum: {settings['min_account_age_days']})")
+
+            # Check no avatar
+            if settings['check_no_avatar'] and not member.avatar:
+                reasons.append("no profile picture")
+
+            # Check suspicious username pattern (word_word_numbers)
+            if settings['check_username_pattern']:
+                import re
+                if re.match(r'^[a-z]+_[a-z]+_\d{3,}$', member.name.lower()):
+                    reasons.append(f"suspicious username pattern ({member.name})")
+
+            if not reasons:
+                return
+
+            reason_str = ", ".join(reasons)
+            action = settings['action']
+
+            # DM the user before actioning
+            if settings['dm_on_kick']:
+                try:
+                    embed = discord.Embed(
+                        title=f"{'Kicked' if action == 'kick' else 'Banned'} from {member.guild.name}",
+                        description=(
+                            f"You were automatically {'kicked' if action == 'kick' else 'banned'} from **{member.guild.name}** "
+                            f"by ExcelProtocol's safety filter.\n\n"
+                            f"**Reason:** {reason_str}\n\n"
+                            f"{'You can rejoin once your account is older or contact a server admin.' if action == 'kick' else 'Please contact a server admin if you believe this was an error.'}"
+                        ),
+                        color=0xFF4444
+                    )
+                    await member.send(embed=embed)
+                except Exception:
+                    pass  # DMs disabled
+
+            # Take action
+            try:
+                if action == 'ban':
+                    await member.ban(reason=f"ExcelProtocol Safety: {reason_str}", delete_message_days=1)
+                else:
+                    await member.kick(reason=f"ExcelProtocol Safety: {reason_str}")
+            except discord.Forbidden:
+                logger.warning(f"Safety: missing permissions to {action} {member} in {member.guild.name}")
+                return
+            except Exception as e:
+                logger.error(f"Safety: error actioning {member}: {e}")
+                return
+
+            # Log to DB
+            self.db.log_safety_kick(member.guild.id, member.id, str(member), reason_str, action)
+            logger.info(f"Safety {action}: {member} in {member.guild.name} — {reason_str}")
+
+            # Log to bot owner log channel only
+            await self.log_to_channel(
+                "🛡️", f"Safety Filter — {action.capitalize()}",
+                f"**{member}** (`{member.id}`) in **{member.guild.name}**\n**Reason:** {reason_str}",
+                color=0xFF6B35
+            )
+
+        except Exception as e:
+            logger.error(f"Error in safety on_member_join for {member}: {e}", exc_info=True)
+
     async def on_voice_state_update(self, member, before, after):
         """Handle VC creator — create channels on join, delete when empty."""
         guild = member.guild

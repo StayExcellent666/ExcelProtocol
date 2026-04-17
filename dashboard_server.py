@@ -2059,6 +2059,76 @@ async def fix_permissions(request):
 
 
 # ── Stat Channels ─────────────────────────────────────────────────────────────
+# ── Safety ────────────────────────────────────────────────────────────────────
+async def get_safety_settings(request):
+    guild_id = request.match_info["guild_id"]
+    import asyncio as _asyncio
+    if _bot_ref:
+        settings = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_safety_settings(int(guild_id)))
+    else:
+        rows = await db_fetch("SELECT * FROM safety_settings WHERE guild_id = ?", (guild_id,))
+        settings = rows[0] if rows else None
+    if not settings:
+        return web.json_response({"enabled": False, "min_account_age_days": 7, "check_username_pattern": True,
+                                   "check_no_avatar": True, "action": "kick",
+                                   "bypass_role_id": None, "dm_on_kick": True})
+    return web.json_response({
+        "enabled":               bool(settings["enabled"]),
+        "min_account_age_days":  settings["min_account_age_days"],
+        "check_username_pattern": bool(settings["check_username_pattern"]),
+        "check_no_avatar":       bool(settings["check_no_avatar"]),
+        "action":                settings["action"],
+        "bypass_role_id":        str(settings["bypass_role_id"]) if settings["bypass_role_id"] else None,
+        "dm_on_kick":            bool(settings["dm_on_kick"]),
+    })
+
+async def set_safety_settings(request):
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    import asyncio as _asyncio
+    if _bot_ref:
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_safety_settings(
+            int(guild_id),
+            enabled=bool(body.get("enabled", False)),
+            min_account_age_days=int(body.get("min_account_age_days", 7)),
+            check_username_pattern=bool(body.get("check_username_pattern", True)),
+            check_no_avatar=bool(body.get("check_no_avatar", True)),
+            action=body.get("action", "kick"),
+            bypass_role_id=int(body["bypass_role_id"]) if body.get("bypass_role_id") else None,
+            dm_on_kick=bool(body.get("dm_on_kick", True)),
+        ))
+    else:
+        await db_execute('''
+            INSERT INTO safety_settings
+                (guild_id, enabled, min_account_age_days, check_username_pattern,
+                 check_no_avatar, action, bypass_role_id, dm_on_kick)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                enabled=excluded.enabled, min_account_age_days=excluded.min_account_age_days,
+                check_username_pattern=excluded.check_username_pattern, check_no_avatar=excluded.check_no_avatar,
+                action=excluded.action, bypass_role_id=excluded.bypass_role_id, dm_on_kick=excluded.dm_on_kick
+        ''', (guild_id, int(body.get("enabled", False)), int(body.get("min_account_age_days", 7)),
+              int(body.get("check_username_pattern", True)), int(body.get("check_no_avatar", True)),
+              body.get("action", "kick"),
+              int(body["bypass_role_id"]) if body.get("bypass_role_id") else None,
+              int(body.get("dm_on_kick", True))))
+    return web.json_response({"ok": True})
+
+async def get_safety_kicks(request):
+    guild_id = request.match_info["guild_id"]
+    import asyncio as _asyncio
+    if _bot_ref:
+        kicks = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_safety_kicks(int(guild_id), limit=100))
+    else:
+        rows = await db_fetch(
+            "SELECT user_id, username, reason, action, kicked_at FROM safety_kicks WHERE guild_id = ? ORDER BY kicked_at DESC LIMIT 100",
+            (guild_id,)
+        )
+        kicks = [{"user_id": str(r["user_id"]), "username": r["username"], "reason": r["reason"],
+                  "action": r["action"], "kicked_at": r["kicked_at"]} for r in rows]
+    return web.json_response(kicks)
+
+
 # ── VC Creator ────────────────────────────────────────────────────────────────
 async def get_vc_settings(request):
     guild_id = request.match_info["guild_id"]
@@ -3128,6 +3198,9 @@ def create_dashboard_app(bot=None):
     app.router.add_get   ("/api/guild/{guild_id}/vc-settings",              get_vc_settings)
     app.router.add_post  ("/api/guild/{guild_id}/vc-settings",              set_vc_settings)
     app.router.add_delete("/api/guild/{guild_id}/vc-settings",              delete_vc_settings)
+    app.router.add_get   ("/api/guild/{guild_id}/safety-settings",          get_safety_settings)
+    app.router.add_post  ("/api/guild/{guild_id}/safety-settings",          set_safety_settings)
+    app.router.add_get   ("/api/guild/{guild_id}/safety-kicks",             get_safety_kicks)
     app.router.add_post  ("/api/guild/{guild_id}/stat-channels",            set_stat_channel)
     app.router.add_delete("/api/guild/{guild_id}/stat-channels/{channel_id}", delete_stat_channel)
 

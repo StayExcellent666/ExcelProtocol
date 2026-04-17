@@ -403,6 +403,33 @@ class Database:
             )
         ''')
 
+        # Safety settings — new account filter config per guild
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS safety_settings (
+                guild_id            INTEGER PRIMARY KEY,
+                enabled             INTEGER NOT NULL DEFAULT 0,
+                min_account_age_days INTEGER NOT NULL DEFAULT 7,
+                check_username_pattern INTEGER NOT NULL DEFAULT 1,
+                check_no_avatar     INTEGER NOT NULL DEFAULT 1,
+                action              TEXT NOT NULL DEFAULT 'kick',
+                bypass_role_id      INTEGER DEFAULT NULL,
+                dm_on_kick          INTEGER NOT NULL DEFAULT 1
+            )
+        ''')
+
+        # Safety kick log — record of every kick/ban action
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS safety_kicks (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                username    TEXT NOT NULL,
+                reason      TEXT NOT NULL,
+                action      TEXT NOT NULL DEFAULT 'kick',
+                kicked_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -622,6 +649,66 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [{'channel_id': r[0], 'guild_id': r[1], 'owner_id': r[2]} for r in rows]
+
+    # ── Safety ────────────────────────────────────────────────────────────────
+
+    def get_safety_settings(self, guild_id: int) -> dict | None:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM safety_settings WHERE guild_id = ?', (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        keys = ['guild_id','enabled','min_account_age_days','check_username_pattern',
+                'check_no_avatar','action','bypass_role_id','dm_on_kick']
+        return dict(zip(keys, row))
+
+    def set_safety_settings(self, guild_id: int, enabled: bool, min_account_age_days: int = 7,
+                             check_username_pattern: bool = True, check_no_avatar: bool = True,
+                             action: str = 'kick', bypass_role_id: int = None, dm_on_kick: bool = True):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO safety_settings
+                (guild_id, enabled, min_account_age_days, check_username_pattern,
+                 check_no_avatar, action, bypass_role_id, dm_on_kick)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                enabled=excluded.enabled,
+                min_account_age_days=excluded.min_account_age_days,
+                check_username_pattern=excluded.check_username_pattern,
+                check_no_avatar=excluded.check_no_avatar,
+                action=excluded.action,
+                bypass_role_id=excluded.bypass_role_id,
+                dm_on_kick=excluded.dm_on_kick
+        ''', (guild_id, int(enabled), min_account_age_days, int(check_username_pattern),
+              int(check_no_avatar), action, bypass_role_id, int(dm_on_kick)))
+        conn.commit()
+        conn.close()
+
+    def log_safety_kick(self, guild_id: int, user_id: int, username: str, reason: str, action: str = 'kick'):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO safety_kicks (guild_id, user_id, username, reason, action) VALUES (?, ?, ?, ?, ?)',
+            (guild_id, user_id, username, reason, action)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_safety_kicks(self, guild_id: int, limit: int = 100) -> list:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''SELECT user_id, username, reason, action, kicked_at FROM safety_kicks
+               WHERE guild_id = ? AND kicked_at >= datetime('now', '-7 days')
+               ORDER BY kicked_at DESC LIMIT ?''',
+            (guild_id, limit)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'user_id': str(r[0]), 'username': r[1], 'reason': r[2], 'action': r[3], 'kicked_at': r[4]} for r in rows]
 
     def add_streamer(self, guild_id: int, streamer_name: str, channel_id: int, custom_channel_id: int = None, twitch_user_id: str = None) -> bool:
         """
@@ -1594,6 +1681,8 @@ class Database:
         cursor.execute('DELETE FROM unresolvable_streamers WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM vc_settings WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM active_vcs WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM safety_settings WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM safety_kicks WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()
