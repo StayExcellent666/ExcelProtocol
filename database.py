@@ -374,6 +374,25 @@ class Database:
             )
         ''')
 
+        # VC Creator — "Join to Create" voice channel feature
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vc_settings (
+                guild_id           INTEGER PRIMARY KEY,
+                trigger_channel_id INTEGER NOT NULL,
+                name_template      TEXT NOT NULL DEFAULT '{username}''s VC',
+                category_id        INTEGER DEFAULT NULL
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS active_vcs (
+                channel_id  INTEGER PRIMARY KEY,
+                guild_id    INTEGER NOT NULL,
+                owner_id    INTEGER NOT NULL,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -521,6 +540,78 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [{'streamer_name': r[0], 'guild_id': r[1], 'detected_at': r[2]} for r in rows]
+
+    # ── VC Creator ────────────────────────────────────────────────────────────
+
+    def get_vc_settings(self, guild_id: int) -> dict | None:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT trigger_channel_id, name_template, category_id FROM vc_settings WHERE guild_id = ?', (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {'trigger_channel_id': row[0], 'name_template': row[1], 'category_id': row[2]}
+
+    def set_vc_settings(self, guild_id: int, trigger_channel_id: int, name_template: str = "{username}'s VC", category_id: int = None):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO vc_settings (guild_id, trigger_channel_id, name_template, category_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                trigger_channel_id = excluded.trigger_channel_id,
+                name_template      = excluded.name_template,
+                category_id        = excluded.category_id
+        ''', (guild_id, trigger_channel_id, name_template, category_id))
+        conn.commit()
+        conn.close()
+
+    def clear_vc_settings(self, guild_id: int):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM vc_settings WHERE guild_id = ?', (guild_id,))
+        conn.commit()
+        conn.close()
+
+    def add_active_vc(self, channel_id: int, guild_id: int, owner_id: int):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR REPLACE INTO active_vcs (channel_id, guild_id, owner_id) VALUES (?, ?, ?)',
+                       (channel_id, guild_id, owner_id))
+        conn.commit()
+        conn.close()
+
+    def remove_active_vc(self, channel_id: int):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM active_vcs WHERE channel_id = ?', (channel_id,))
+        conn.commit()
+        conn.close()
+
+    def get_active_vc_by_owner(self, guild_id: int, owner_id: int) -> dict | None:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT channel_id FROM active_vcs WHERE guild_id = ? AND owner_id = ?', (guild_id, owner_id))
+        row = cursor.fetchone()
+        conn.close()
+        return {'channel_id': row[0]} if row else None
+
+    def get_active_vc(self, channel_id: int) -> dict | None:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT guild_id, owner_id FROM active_vcs WHERE channel_id = ?', (channel_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return {'guild_id': row[0], 'owner_id': row[1]} if row else None
+
+    def get_all_active_vcs(self) -> list:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT channel_id, guild_id, owner_id FROM active_vcs')
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'channel_id': r[0], 'guild_id': r[1], 'owner_id': r[2]} for r in rows]
 
     def add_streamer(self, guild_id: int, streamer_name: str, channel_id: int, custom_channel_id: int = None) -> bool:
         """
@@ -1438,6 +1529,8 @@ class Database:
         cursor.execute('DELETE FROM permission_issues WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM stat_channels WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM unresolvable_streamers WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM vc_settings WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM active_vcs WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()

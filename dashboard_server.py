@@ -2059,6 +2059,55 @@ async def fix_permissions(request):
 
 
 # ── Stat Channels ─────────────────────────────────────────────────────────────
+# ── VC Creator ────────────────────────────────────────────────────────────────
+async def get_vc_settings(request):
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch("SELECT trigger_channel_id, name_template, category_id FROM vc_settings WHERE guild_id = ?", (guild_id,))
+    if not rows:
+        return web.json_response({"enabled": False})
+    r = rows[0]
+    # Get channel name for display
+    trigger_name = str(r["trigger_channel_id"])
+    if _bot_ref:
+        guild = _bot_ref.get_guild(int(guild_id))
+        if guild:
+            ch = guild.get_channel(r["trigger_channel_id"])
+            if ch:
+                trigger_name = ch.name
+    return web.json_response({
+        "enabled": True,
+        "trigger_channel_id": str(r["trigger_channel_id"]),
+        "trigger_channel_name": trigger_name,
+        "name_template": r["name_template"],
+        "category_id": str(r["category_id"]) if r["category_id"] else None,
+    })
+
+async def set_vc_settings(request):
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    trigger_channel_id = body.get("trigger_channel_id")
+    name_template      = body.get("name_template", "{username}'s VC").strip() or "{username}'s VC"
+    if not trigger_channel_id:
+        raise web.HTTPBadRequest(reason="trigger_channel_id is required")
+    import asyncio as _asyncio
+    if _bot_ref:
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_vc_settings(
+            int(guild_id), int(trigger_channel_id), name_template
+        ))
+    else:
+        await db_execute(
+            "INSERT INTO vc_settings (guild_id, trigger_channel_id, name_template) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET trigger_channel_id=excluded.trigger_channel_id, name_template=excluded.name_template",
+            (guild_id, trigger_channel_id, name_template)
+        )
+    return web.json_response({"ok": True})
+
+async def delete_vc_settings(request):
+    guild_id = request.match_info["guild_id"]
+    await db_execute("DELETE FROM vc_settings WHERE guild_id = ?", (guild_id,))
+    return web.json_response({"ok": True})
+
+
 async def get_stat_channels(request):
     guild_id = request.match_info["guild_id"]
     rows = await db_fetch(
@@ -3076,6 +3125,9 @@ def create_dashboard_app(bot=None):
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
     app.router.add_post ("/api/dev/db-tools",       db_tools_action)
     app.router.add_get   ("/api/guild/{guild_id}/stat-channels",            get_stat_channels)
+    app.router.add_get   ("/api/guild/{guild_id}/vc-settings",              get_vc_settings)
+    app.router.add_post  ("/api/guild/{guild_id}/vc-settings",              set_vc_settings)
+    app.router.add_delete("/api/guild/{guild_id}/vc-settings",              delete_vc_settings)
     app.router.add_post  ("/api/guild/{guild_id}/stat-channels",            set_stat_channel)
     app.router.add_delete("/api/guild/{guild_id}/stat-channels/{channel_id}", delete_stat_channel)
 

@@ -158,6 +158,16 @@ class TwitchNotifierBot(discord.Client):
             self.update_stat_channels.start()
             logger.info("Stat channel update loop started")
 
+        # Restore persistent VC control views
+        try:
+            active_vcs = self.db.get_all_active_vcs()
+            for vc in active_vcs:
+                self.add_view(VCControlView(vc['channel_id'], vc['owner_id']))
+            if active_vcs:
+                logger.info(f"Restored {len(active_vcs)} VC control view(s)")
+        except Exception as e:
+            logger.error(f"Failed to restore VC control views: {e}")
+
         # Start milestone check loop (separate from EventSub)
         if not self.check_milestones.is_running():
             self.check_milestones.start()
@@ -241,6 +251,85 @@ class TwitchNotifierBot(discord.Client):
         logger.info(f"Bot removed from guild: {guild.name} (ID: {guild.id})")
         self.db.cleanup_guild(guild.id)
         logger.info(f"Cleaned up all data for guild {guild.id}")
+
+    async def on_voice_state_update(self, member, before, after):
+        """Handle VC creator — create channels on join, delete when empty."""
+        guild = member.guild
+
+        # ── User joined a channel ──────────────────────────────────────────
+        if after.channel and after.channel != before.channel:
+            settings = self.db.get_vc_settings(guild.id)
+            if settings and after.channel.id == settings['trigger_channel_id']:
+                # Check max 1 active VC per user
+                existing = self.db.get_active_vc_by_owner(guild.id, member.id)
+                if existing:
+                    # Move them back to their existing VC
+                    existing_channel = guild.get_channel(existing['channel_id'])
+                    if existing_channel:
+                        try:
+                            await member.move_to(existing_channel)
+                        except Exception:
+                            pass
+                        return
+
+                # Build channel name from template
+                name = settings['name_template'].replace('{username}', member.display_name)
+
+                # Create VC in the same category as trigger channel
+                category = after.channel.category
+                try:
+                    new_vc = await guild.create_voice_channel(
+                        name=name,
+                        category=category,
+                        reason=f"ExcelProtocol VC Creator for {member.display_name}"
+                    )
+                    # Give owner manage permissions
+                    await new_vc.set_permissions(member,
+                        manage_channels=True, move_members=True, mute_members=True,
+                        reason="ExcelProtocol VC Creator — owner permissions"
+                    )
+                    # Move owner in
+                    await member.move_to(new_vc)
+                    # Record in DB
+                    self.db.add_active_vc(new_vc.id, guild.id, member.id)
+                    # Post control embed in VC text channel
+                    await self._post_vc_controls(new_vc, member)
+                    logger.info(f"Created VC '{name}' for {member} in {guild.name}")
+                except discord.Forbidden:
+                    logger.warning(f"Missing permissions to create VC for {member} in {guild.name}")
+                except Exception as e:
+                    logger.error(f"Error creating VC for {member}: {e}")
+
+        # ── User left a channel ────────────────────────────────────────────
+        if before.channel and before.channel != after.channel:
+            vc_data = self.db.get_active_vc(before.channel.id)
+            if vc_data:
+                channel = guild.get_channel(before.channel.id)
+                if channel and len(channel.members) == 0:
+                    try:
+                        await channel.delete(reason="ExcelProtocol VC Creator — channel empty")
+                        self.db.remove_active_vc(before.channel.id)
+                        logger.info(f"Deleted empty VC '{channel.name}' in {guild.name}")
+                    except Exception as e:
+                        logger.error(f"Error deleting empty VC {before.channel.id}: {e}")
+
+    async def _post_vc_controls(self, channel: discord.VoiceChannel, owner: discord.Member):
+        """Post the VC control embed in the voice channel's text chat."""
+        embed = discord.Embed(
+            title="🎙️ Your Voice Channel",
+            description=(
+                f"**{channel.name}**\n\n"
+                "Use the buttons below to manage your channel.\n"
+                "Only you can use these controls."
+            ),
+            color=0x00f5d4,
+        )
+        embed.set_footer(text="Channel deletes automatically when everyone leaves")
+        view = VCControlView(channel.id, owner.id)
+        try:
+            await channel.send(embed=embed, view=view)
+        except Exception as e:
+            logger.debug(f"Could not post VC controls in {channel.name}: {e}")
     
     # ── EventSub Stream Notifications ────────────────────────────────────────
 
@@ -1215,6 +1304,149 @@ class TwitchNotifierBot(discord.Client):
         except Exception as e:
             logger.error(f"Error cleaning up channel {channel_id}: {e}", exc_info=True)
             return 0
+
+# ── VC Control View ───────────────────────────────────────────────────────────
+class VCRenameModal(discord.ui.Modal, title="Rename Channel"):
+    new_name = discord.ui.TextInput(label="New name", max_length=100, placeholder="e.g. Gaming Session")
+
+    def __init__(self, channel_id: int, owner_id: int):
+        super().__init__()
+        self.channel_id = channel_id
+        self.owner_id   = owner_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("❌ Only the channel owner can rename it.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+            return
+        try:
+            await channel.edit(name=self.new_name.value, reason="ExcelProtocol VC rename")
+            await interaction.response.send_message(f"✅ Renamed to **{self.new_name.value}**", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed: {e}", ephemeral=True)
+
+
+class VCLimitModal(discord.ui.Modal, title="Set User Limit"):
+    limit = discord.ui.TextInput(label="Max users (0 = unlimited)", max_length=3, placeholder="e.g. 5")
+
+    def __init__(self, channel_id: int, owner_id: int):
+        super().__init__()
+        self.channel_id = channel_id
+        self.owner_id   = owner_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("❌ Only the channel owner can change the limit.", ephemeral=True)
+            return
+        try:
+            val = int(self.limit.value.strip())
+        except ValueError:
+            await interaction.response.send_message("❌ Please enter a number.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+            return
+        try:
+            await channel.edit(user_limit=val, reason="ExcelProtocol VC limit")
+            label = f"{val} users" if val > 0 else "unlimited"
+            await interaction.response.send_message(f"✅ Limit set to **{label}**", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed: {e}", ephemeral=True)
+
+
+class VCControlView(discord.ui.View):
+    def __init__(self, channel_id: int, owner_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
+        self.owner_id   = owner_id
+
+    def _check_owner(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.owner_id
+
+    @discord.ui.button(label="Rename", emoji="✏️", style=discord.ButtonStyle.secondary, custom_id="vc_rename")
+    async def rename(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message("❌ Only the channel owner can do this.", ephemeral=True)
+            return
+        await interaction.response.send_modal(VCRenameModal(self.channel_id, self.owner_id))
+
+    @discord.ui.button(label="Set Limit", emoji="👥", style=discord.ButtonStyle.secondary, custom_id="vc_limit")
+    async def set_limit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message("❌ Only the channel owner can do this.", ephemeral=True)
+            return
+        await interaction.response.send_modal(VCLimitModal(self.channel_id, self.owner_id))
+
+    @discord.ui.button(label="Lock", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="vc_lock")
+    async def lock(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message("❌ Only the channel owner can do this.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+            return
+        try:
+            await channel.set_permissions(interaction.guild.default_role, connect=False,
+                                           reason="ExcelProtocol VC lock")
+            await interaction.response.send_message("🔒 Channel locked — only current members can stay.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Unlock", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="vc_unlock")
+    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message("❌ Only the channel owner can do this.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+            return
+        try:
+            await channel.set_permissions(interaction.guild.default_role, connect=None,
+                                           reason="ExcelProtocol VC unlock")
+            await interaction.response.send_message("🔓 Channel unlocked — anyone can join.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Kick", emoji="👢", style=discord.ButtonStyle.danger, custom_id="vc_kick")
+    async def kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message("❌ Only the channel owner can do this.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(self.channel_id)
+        if not channel:
+            await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+            return
+        members = [m for m in channel.members if m.id != self.owner_id]
+        if not members:
+            await interaction.response.send_message("No other members in the channel.", ephemeral=True)
+            return
+        # Build select menu for who to kick
+        options = [discord.SelectOption(label=m.display_name, value=str(m.id)) for m in members[:25]]
+        select = discord.ui.Select(placeholder="Select member to kick", options=options)
+
+        async def kick_callback(si: discord.Interaction):
+            target_id = int(select.values[0])
+            target = interaction.guild.get_member(target_id)
+            if target:
+                try:
+                    await target.move_to(None, reason="ExcelProtocol VC kick")
+                    await si.response.send_message(f"👢 Kicked **{target.display_name}**", ephemeral=True)
+                except Exception as e:
+                    await si.response.send_message(f"❌ Failed: {e}", ephemeral=True)
+            else:
+                await si.response.send_message("Member not found.", ephemeral=True)
+
+        select.callback = kick_callback
+        view = discord.ui.View(timeout=30)
+        view.add_item(select)
+        await interaction.response.send_message("Select a member to kick:", view=view, ephemeral=True)
+
 
 # Initialize bot
 bot = TwitchNotifierBot()
