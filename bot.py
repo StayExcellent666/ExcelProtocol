@@ -1240,7 +1240,16 @@ class TwitchNotifierBot(discord.Client):
             channel = self.get_channel(channel_id)
             
             if not channel:
-                logger.warning(f"Channel {channel_id} not found for cleanup")
+                guild = self.get_guild(guild_id)
+                guild_name = guild.name if guild else str(guild_id)
+                logger.warning(f"Channel {channel_id} not found for cleanup in guild {guild_name} ({guild_id})")
+                await self.log_to_channel(
+                    "⚠️", "Cleanup Channel Not Found",
+                    f"Channel `{channel_id}` configured for cleanup no longer exists.\n"
+                    f"**Guild:** {guild_name}\n"
+                    f"Please remove this cleanup rule from the dashboard.",
+                    color=0xFF6B35
+                )
                 return 0
             
             # Check bot permissions
