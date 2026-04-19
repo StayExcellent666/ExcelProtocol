@@ -251,6 +251,46 @@ class TwitchNotifierBot(discord.Client):
             logger.error(f"Error closing Twitch chat bot: {e}")
         await super().close()
 
+    async def on_guild_join(self, guild):
+        """DM the server owner with setup info when the bot is added."""
+        logger.info(f"Bot joined guild: {guild.name} (ID: {guild.id})")
+        await self.log_to_channel(
+            "🟢", "Bot Added to Server",
+            f"**{guild.name}** (`{guild.id}`) — {guild.member_count} members",
+            color=0x39D98A
+        )
+        try:
+            owner = guild.owner
+            if not owner:
+                owner = await self.fetch_user(guild.owner_id)
+            if owner:
+                embed = discord.Embed(
+                    title="👋 Thanks for adding ExcelProtocol!",
+                    description=(
+                        "Hey, thanks for using the bot — really appreciate it! 🙌\n\n"
+                        "Head over to the dashboard to get everything set up. "
+                        "And if you need a hand, join the support server — you'll find setup tips, "
+                        "support, and a place to drop suggestions."
+                    ),
+                    color=0x00f5d4
+                )
+                embed.add_field(
+                    name="📊 Dashboard",
+                    value="Manage your bot settings, streamers, reaction roles and more:\nhttps://excelprotocol.fly.dev",
+                    inline=False
+                )
+                embed.add_field(
+                    name="💬 Support Server",
+                    value="Get help, report bugs, or suggest features:\nhttps://discord.gg/Z4unn5DHgD",
+                    inline=False
+                )
+                embed.set_footer(text="ExcelProtocol • Use /help in your server to see available commands")
+                await owner.send(embed=embed)
+        except discord.Forbidden:
+            logger.debug(f"Could not DM owner of {guild.name} — DMs disabled")
+        except Exception as e:
+            logger.error(f"Error sending welcome DM for {guild.name}: {e}")
+
     async def on_guild_remove(self, guild):
         """Called when bot is removed from a server - clean up data"""
         logger.info(f"Bot removed from guild: {guild.name} (ID: {guild.id})")
