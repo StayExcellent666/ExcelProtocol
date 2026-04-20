@@ -1882,10 +1882,12 @@ async def overlay_page(request):
 </head>
 <body>
 <div id="overlay">
-  <div id="frame-wrap" style="display:none;position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);">
-    <div style="position:relative;display:flex;flex-direction:column;align-items:center;">
-      <div id="yt-player"></div>
-      <div style="position:absolute;inset:0;z-index:1;"></div>
+  <div id="frame-wrap" style="display:none;position:fixed;inset:0;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);">
+    <div style="display:inline-flex;flex-direction:column;align-items:stretch;">
+      <div style="position:relative;">
+        <div id="yt-player"></div>
+        <div style="position:absolute;inset:0;z-index:1;"></div>
+      </div>
       <div id="progress-wrap">
         <div id="progress-bar-bg"><div id="progress-bar-fill"></div></div>
         <div id="progress-timer">0:00</div>
