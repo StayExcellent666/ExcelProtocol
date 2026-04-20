@@ -1,3 +1,8 @@
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:dashboard:stayexcellent:2026
+
 """
 ExcelProtocol Dashboard Backend
 ================================
@@ -540,6 +545,12 @@ async def get_guild_summary(request):
         "notif_log":      notif_log,
         "commands":       COMMANDS,
     })
+
+
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:dashboard:stayexcellent:2026
 
 # ── Streamers ─────────────────────────────────────────────────────────────────
 async def get_streamers(request):
@@ -1274,6 +1285,11 @@ async def get_cleanup_configs(request):
         })
     return web.json_response(result)
 
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:dashboard:stayexcellent:2026
+
 async def add_cleanup_config(request):
     guild_id = request.match_info["guild_id"]
     body = await request.json()
@@ -1937,6 +1953,7 @@ async def delete_reward(request):
         headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
         params={"broadcaster_id": broadcaster_id, "id": reward_id}
     )
+
     if resp.status not in (200, 204):
         raise web.HTTPBadRequest(reason="Failed to delete reward")
     # Also remove trigger if exists
@@ -2306,6 +2323,10 @@ async def get_global_stats(request):
         "servers_by_count":    enriched_servers,
     })
 
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:dashboard:stayexcellent:2026
 
 # ── Dev: DB Tools ─────────────────────────────────────────────────────────────
 async def db_tools_status(request):
@@ -3232,3 +3253,9 @@ def create_dashboard_app(bot=None):
     app.on_cleanup.append(on_cleanup)
 
     return app
+
+
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:dashboard:stayexcellent:2026
