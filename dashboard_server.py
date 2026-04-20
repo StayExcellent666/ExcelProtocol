@@ -1801,10 +1801,13 @@ async def overlay_page(request):
   * {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{ background:transparent; overflow:hidden; width:100vw; height:100vh; }}
   #overlay {{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; }}
-  video {{ max-width:100%; max-height:100%; object-fit:contain; display:none; border-radius:8px; }}
-  #redeemer {{ position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+  #rdm {{ position:fixed; bottom:40px; left:50%; transform:translateX(-50%);
     background:rgba(0,0,0,0.7); color:#fff; padding:6px 16px; border-radius:20px;
-    font-family:sans-serif; font-size:14px; display:none; white-space:nowrap; }}
+    font-family:sans-serif; font-size:18px; display:none; white-space:nowrap; z-index:10; }}
+  #frame-wrap {{ pointer-events:none; }}
+  /* Clip bottom 40px of iframe to hide the YouTube controls bar */
+  #yt-player {{ display:block; clip-path:inset(0 0 40px 0); }}
+  #yt-player iframe {{ display:block; }}
 </style>
 </head>
 <body>
@@ -1877,7 +1880,7 @@ function processQueue() {{
     player = new YT.Player("yt-player", {{
       height: "480", width: "854",
       videoId: videoId,
-      playerVars: {{ autoplay: 1, controls: 0, modestbranding: 1, rel: 0, disablekb: 1, fs: 0, iv_load_policy: 3 }},
+      playerVars: {{ autoplay: 1, controls: 0, modestbranding: 1, rel: 0, iv_load_policy: 3, playsinline: 1 }},
       events: {{
         onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
         onStateChange: e => {{
