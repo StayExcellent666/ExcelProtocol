@@ -1789,14 +1789,33 @@ async def overlay_page(request):
 </style>
 </head>
 <body>
-<div id="overlay"><video id="vid" playsinline></video></div>
-<div id="redeemer" id="rdm"></div>
+<div id="overlay">
+  <div id="frame-wrap" style="display:none;position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);">
+    <div id="yt-player"></div>
+  </div>
+</div>
+<div id="rdm" style="display:none;position:fixed;bottom:40px;left:50%;transform:translateX(-50%);color:#fff;font-size:22px;font-family:sans-serif;text-shadow:0 2px 8px #000;"></div>
+<script src="https://www.youtube.com/iframe_api"></script>
 <script>
 const guildId = "{guild_id}";
-const vid = document.getElementById("vid");
-const rdm = document.getElementById("redeemer");
+const rdm = document.getElementById("rdm");
+const frameWrap = document.getElementById("frame-wrap");
 const queue = [];
 let playing = false;
+let player = null;
+let ytReady = false;
+
+function onYouTubeIframeAPIReady() {{
+  ytReady = true;
+}}
+
+function extractVideoId(url) {{
+  try {{
+    const u = new URL(url);
+    if (u.hostname.includes("youtu.be")) return u.pathname.slice(1).split("?")[0];
+    return u.searchParams.get("v") || null;
+  }} catch {{ return null; }}
+}}
 
 const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
 const ws = new WebSocket(wsProto + "//" + location.host + "/overlay/" + guildId + "/ws");
@@ -1809,22 +1828,39 @@ ws.onmessage = e => {{
 ws.onclose = () => {{ setTimeout(() => location.reload(), 3000); }};
 
 function processQueue() {{
-  if (playing || queue.length === 0) return;
+  if (playing || queue.length === 0 || !ytReady) {{
+    if (!ytReady) setTimeout(processQueue, 200);
+    return;
+  }}
   const item = queue.shift();
+  const videoId = extractVideoId(item.video_url);
+  if (!videoId) {{ playing = false; setTimeout(processQueue, 500); return; }}
   playing = true;
-  vid.src = item.video_url;
-  vid.volume = Math.max(0, Math.min(1, item.volume || 1));
-  vid.style.display = "block";
+  const volume = Math.round(Math.max(0, Math.min(1, item.volume || 1)) * 100);
   rdm.textContent = item.redeemer ? item.redeemer + " redeemed!" : "";
   rdm.style.display = item.redeemer ? "block" : "none";
-  vid.play().catch(() => {{}});
-  vid.onended = () => {{
-    vid.style.display = "none";
-    rdm.style.display = "none";
-    vid.src = "";
-    playing = false;
-    setTimeout(processQueue, 500);
-  }};
+  frameWrap.style.display = "flex";
+  if (player) {{
+    player.loadVideoById(videoId);
+    player.setVolume(volume);
+  }} else {{
+    player = new YT.Player("yt-player", {{
+      height: "480", width: "854",
+      videoId: videoId,
+      playerVars: {{ autoplay: 1, controls: 0, modestbranding: 1, rel: 0 }},
+      events: {{
+        onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
+        onStateChange: e => {{
+          if (e.data === YT.PlayerState.ENDED) {{
+            frameWrap.style.display = "none";
+            rdm.style.display = "none";
+            playing = false;
+            setTimeout(processQueue, 500);
+          }}
+        }}
+      }}
+    }});
+  }}
 }}
 </script>
 </body>
