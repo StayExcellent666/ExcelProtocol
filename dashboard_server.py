@@ -1855,14 +1855,41 @@ async def overlay_page(request):
   #frame-wrap {{ pointer-events:none; }}
   #yt-player {{ display:block; }}
   #yt-player iframe {{ display:block; }}
+  #progress-wrap {{
+    display:none;
+    flex-direction:column;
+    align-items:stretch;
+    gap:4px;
+    margin-top:8px;
+    width:854px;
+  }}
+  #progress-bar-bg {{
+    width:100%; height:6px; border-radius:3px;
+    background:rgba(255,255,255,0.2);
+    overflow:hidden;
+  }}
+  #progress-bar-fill {{
+    height:100%; width:0%; border-radius:3px;
+    background:linear-gradient(90deg,#00f5d4,#9146ff);
+    transition:width 0.5s linear;
+  }}
+  #progress-timer {{
+    font-family:'JetBrains Mono',monospace,sans-serif;
+    font-size:12px; color:rgba(255,255,255,0.7);
+    text-align:right;
+  }}
 </style>
 </head>
 <body>
 <div id="overlay">
   <div id="frame-wrap" style="display:none;position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);">
-    <div style="position:relative;">
+    <div style="position:relative;display:flex;flex-direction:column;align-items:center;">
       <div id="yt-player"></div>
       <div style="position:absolute;inset:0;z-index:1;"></div>
+      <div id="progress-wrap">
+        <div id="progress-bar-bg"><div id="progress-bar-fill"></div></div>
+        <div id="progress-timer">0:00</div>
+      </div>
     </div>
   </div>
 </div>
@@ -1872,11 +1899,43 @@ async def overlay_page(request):
 const guildId = "{guild_id}";
 const rdm = document.getElementById("rdm");
 const frameWrap = document.getElementById("frame-wrap");
+const progressWrap = document.getElementById("progress-wrap");
+const progressFill = document.getElementById("progress-bar-fill");
+const progressTimer = document.getElementById("progress-timer");
 const queue = [];
 let playing = false;
 let player = null;
 let ytReady = false;
 let savedVolume = 100;
+let progressInterval = null;
+
+function formatTime(seconds) {{
+  const s = Math.floor(seconds);
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}}
+
+function startProgress() {{
+  if (progressInterval) clearInterval(progressInterval);
+  progressWrap.style.display = "flex";
+  progressInterval = setInterval(() => {{
+    if (!player || typeof player.getCurrentTime !== "function") return;
+    const current = player.getCurrentTime();
+    const duration = player.getDuration();
+    if (!duration || duration <= 0) return;
+    const remaining = Math.max(0, duration - current);
+    const pct = Math.min(100, (current / duration) * 100);
+    progressFill.style.width = pct + "%";
+    progressTimer.textContent = formatTime(remaining);
+  }}, 500);
+}}
+
+function stopProgress() {{
+  if (progressInterval) clearInterval(progressInterval);
+  progressInterval = null;
+  progressWrap.style.display = "none";
+  progressFill.style.width = "0%";
+  progressTimer.textContent = "0:00";
+}}
 
 function onYouTubeIframeAPIReady() {{
   console.log("YouTube IFrame API ready");
@@ -1909,6 +1968,7 @@ ws.onmessage = e => {{
     if (player) {{ player.stopVideo(); }}
     frameWrap.style.display = "none";
     rdm.style.display = "none";
+    stopProgress();
     playing = false;
   }}
 }};
@@ -1942,9 +2002,13 @@ function processQueue() {{
       events: {{
         onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
         onStateChange: e => {{
+          if (e.data === YT.PlayerState.PLAYING) {{
+            startProgress();
+          }}
           if (e.data === YT.PlayerState.ENDED) {{
             frameWrap.style.display = "none";
             rdm.style.display = "none";
+            stopProgress();
             playing = false;
             setTimeout(processQueue, 500);
           }}
@@ -1956,7 +2020,7 @@ function processQueue() {{
 </script>
 </body>
 </html>"""
-    return web.Response(text=html, content_type="text/html")
+    return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 # ── Broadcaster Info + Rewards ────────────────────────────────────────────────
 async def get_broadcaster_info(request):
