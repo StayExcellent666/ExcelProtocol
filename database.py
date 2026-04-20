@@ -1,3 +1,8 @@
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:database:stayexcellent:2026
+
 import sqlite3
 import logging
 import os
@@ -504,6 +509,11 @@ class Database:
         conn.commit()
         conn.close()
 
+    # ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:database:stayexcellent:2026
+
     def get_stat_channels(self, guild_id: int) -> list:
         """Get all stat channels for a guild."""
         conn = self.get_connection()
@@ -949,6 +959,13 @@ class Database:
         conn.commit()
         conn.close()
         logger.info(f"Set auto-delete for guild {guild_id} to {enabled}")
+
+
+    # ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:database:stayexcellent:2026
+
     
     def get_auto_delete(self, guild_id: int) -> bool:
         """Check if auto-delete is enabled for a server"""
@@ -1344,6 +1361,12 @@ class Database:
         logger.info("Cleaned up old stream events")
         return 0
 
+    # ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:database:stayexcellent:2026
+
+    
     # ------------------------------------------------------------------
     # Twitch channel linking
     # ------------------------------------------------------------------
@@ -1848,3 +1871,9 @@ class Database:
                        (json.dumps(roles), message_id))
         conn.commit()
         conn.close()
+
+
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:database:stayexcellent:2026
