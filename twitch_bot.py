@@ -19,6 +19,7 @@ class TwitchChatBot(commands.Bot):
         self.db = db
         self.twitch_api = twitch_api
         self._cooldowns: dict[str, dict[str, datetime]] = {}
+        self.overlay_push_callback = None  # Set by dashboard_server on startup
 
     async def event_ready(self):
         logger.info(f"Twitch chat bot ready | Nick: {self.nick}")
@@ -60,6 +61,26 @@ class TwitchChatBot(commands.Bot):
                 await message.channel.send("Usage: !so @username")
                 return True
             await self._do_shoutout(message.channel, target)
+            return True
+
+        if command_name == "!play":
+            if not is_mod:
+                return True  # mod/broadcaster only
+            if not self.db.is_play_enabled(channel_name):
+                return True  # feature disabled for this channel
+            url = args.strip()
+            if not url:
+                await message.channel.send("Usage: !play <youtube_url>")
+                return True
+            if self.overlay_push_callback:
+                try:
+                    await self.overlay_push_callback(channel_name, url, message.author.name)
+                    await message.channel.send(f"▶ Playing video for {message.author.name} PogChamp")
+                except Exception as e:
+                    logger.error(f"!play overlay push failed for {channel_name}: {e}")
+                    await message.channel.send("❌ Could not push to overlay — is OBS connected?")
+            else:
+                await message.channel.send("❌ Overlay not connected.")
             return True
 
         if command_name == "!uptime":
@@ -107,6 +128,8 @@ class TwitchChatBot(commands.Bot):
                 return True
             custom_cmds = self.db.get_twitch_commands(channel_name)
             builtin = "!uptime !game !title !viewers !so !commands"
+            if self.db.is_play_enabled(channel_name):
+                builtin += " !play"
             if custom_cmds:
                 names = " ".join(c["command_name"] for c in custom_cmds)
                 await message.channel.send(f"Commands: {builtin} | Custom: {names}")

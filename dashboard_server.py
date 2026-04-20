@@ -1,8 +1,3 @@
-# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:dashboard:stayexcellent:2026
-
 """
 ExcelProtocol Dashboard Backend
 ================================
@@ -545,12 +540,6 @@ async def get_guild_summary(request):
         "notif_log":      notif_log,
         "commands":       COMMANDS,
     })
-
-
-# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:dashboard:stayexcellent:2026
 
 # ── Streamers ─────────────────────────────────────────────────────────────────
 async def get_streamers(request):
@@ -1285,11 +1274,6 @@ async def get_cleanup_configs(request):
         })
     return web.json_response(result)
 
-# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:dashboard:stayexcellent:2026
-
 async def add_cleanup_config(request):
     guild_id = request.match_info["guild_id"]
     body = await request.json()
@@ -1419,7 +1403,21 @@ async def get_twitch_info(request):
         "count": len(commands),
         "limit": limit,
         "bot_is_modded": bot_is_modded,
+        "play_enabled": row.get("play_enabled", False) if row else False,
     })
+
+async def set_play_enabled(request):
+    """Toggle !play command on/off for a guild."""
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    enabled = bool(body.get("enabled", False))
+    import asyncio as _asyncio
+    if _bot_ref:
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_play_enabled(int(guild_id), enabled))
+    else:
+        await db_execute("UPDATE twitch_channels SET play_enabled = ? WHERE guild_id = ?", (int(enabled), guild_id))
+    return web.json_response({"ok": True, "play_enabled": enabled})
+
 
 async def add_twitch_command(request):
     guild_id = request.match_info["guild_id"]
@@ -1852,7 +1850,7 @@ async def get_broadcaster_info(request):
         elif resp.status == 403:
             # Not affiliate/partner
             rows2 = await db_fetch("SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
-            return web.json_response({"connected": True, "not_affiliate": True, "twitch_login": rows2[0]["twitch_login"] if rows2 else "", "rewards": [], "triggers": []})
+            return web.json_response({"connected": True, "not_affiliate": True, "twitch_login": rows2[0]["twitch_login"] if rows2 else "", "rewards": [], "triggers": [], "overlay_url": f"https://excelprotocol.fly.dev/overlay/{guild_id}"})
     except Exception as e:
         logger.error(f"Error fetching rewards for guild {guild_id}: {e}")
 
@@ -1953,7 +1951,6 @@ async def delete_reward(request):
         headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
         params={"broadcaster_id": broadcaster_id, "id": reward_id}
     )
-
     if resp.status not in (200, 204):
         raise web.HTTPBadRequest(reason="Failed to delete reward")
     # Also remove trigger if exists
@@ -2323,10 +2320,6 @@ async def get_global_stats(request):
         "servers_by_count":    enriched_servers,
     })
 
-# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:dashboard:stayexcellent:2026
 
 # ── Dev: DB Tools ─────────────────────────────────────────────────────────────
 async def db_tools_status(request):
@@ -3150,6 +3143,24 @@ async def auth_logout(request):
 def create_dashboard_app(bot=None):
     global _bot_ref
     _bot_ref = bot
+
+    # Wire up the overlay push callback to the chat bot
+    if bot and hasattr(bot, 'twitch_chat_bot') and bot.twitch_chat_bot:
+        async def _overlay_push(twitch_channel: str, video_url: str, requester: str):
+            import json as _json
+            payload = _json.dumps({"type": "play", "video_url": video_url, "volume": 1.0, "redeemer": requester})
+            guilds = bot.db.get_guilds_for_twitch_channel(twitch_channel)
+            for g in guilds:
+                gid = str(g['guild_id'])
+                dead = set()
+                for ws in _overlay_connections.get(gid, set()):
+                    try:
+                        await ws.send_str(payload)
+                    except Exception:
+                        dead.add(ws)
+                if dead:
+                    _overlay_connections.get(gid, set()).difference_update(dead)
+        bot.twitch_chat_bot.overlay_push_callback = _overlay_push
     app = web.Application(middlewares=[error_logging_middleware, auth_middleware])
 
     app.router.add_get("/health",        health)
@@ -3172,6 +3183,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get   ("/overlay/{guild_id}",                            overlay_page)
     app.router.add_get   ("/overlay/{guild_id}/ws",                         overlay_ws)
     app.router.add_get   ("/api/guild/{guild_id}/twitch",                    get_twitch_info)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/play-enabled",       set_play_enabled)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/commands",           add_twitch_command)
     app.router.add_delete("/api/guild/{guild_id}/twitch/commands/{command_name}", delete_twitch_command)
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
@@ -3253,9 +3265,3 @@ def create_dashboard_app(bot=None):
     app.on_cleanup.append(on_cleanup)
 
     return app
-
-
-# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:dashboard:stayexcellent:2026

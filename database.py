@@ -1,8 +1,3 @@
-# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:database:stayexcellent:2026
-
 import sqlite3
 import logging
 import os
@@ -234,6 +229,14 @@ class Database:
                 linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Migration: add play_enabled to twitch_channels
+        try:
+            cursor.execute('ALTER TABLE twitch_channels ADD COLUMN play_enabled INTEGER NOT NULL DEFAULT 0')
+            conn.commit()
+            logger.info("Migration: added play_enabled to twitch_channels")
+        except Exception:
+            pass  # Column already exists
 
         # Custom chat commands per Twitch channel
         cursor.execute('''
@@ -508,11 +511,6 @@ class Database:
         cursor.execute('DELETE FROM stat_channels WHERE guild_id = ? AND channel_id = ?', (guild_id, channel_id))
         conn.commit()
         conn.close()
-
-    # ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:database:stayexcellent:2026
 
     def get_stat_channels(self, guild_id: int) -> list:
         """Get all stat channels for a guild."""
@@ -959,13 +957,6 @@ class Database:
         conn.commit()
         conn.close()
         logger.info(f"Set auto-delete for guild {guild_id} to {enabled}")
-
-
-    # ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:database:stayexcellent:2026
-
     
     def get_auto_delete(self, guild_id: int) -> bool:
         """Check if auto-delete is enabled for a server"""
@@ -1361,12 +1352,6 @@ class Database:
         logger.info("Cleaned up old stream events")
         return 0
 
-    # ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:database:stayexcellent:2026
-
-    
     # ------------------------------------------------------------------
     # Twitch channel linking
     # ------------------------------------------------------------------
@@ -1388,14 +1373,37 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            'SELECT guild_id, twitch_channel FROM twitch_channels WHERE guild_id = ?',
+            'SELECT guild_id, twitch_channel, play_enabled FROM twitch_channels WHERE guild_id = ?',
             (guild_id,)
         )
         row = cursor.fetchone()
         conn.close()
         if row:
-            return {'guild_id': row[0], 'twitch_channel': row[1]}
+            return {'guild_id': row[0], 'twitch_channel': row[1], 'play_enabled': bool(row[2])}
         return None
+
+    def set_play_enabled(self, guild_id: int, enabled: bool):
+        """Enable or disable the !play command for a guild's linked Twitch channel."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE twitch_channels SET play_enabled = ? WHERE guild_id = ?',
+            (int(enabled), guild_id)
+        )
+        conn.commit()
+        conn.close()
+
+    def is_play_enabled(self, twitch_channel: str) -> bool:
+        """Check if !play is enabled for any guild linked to this Twitch channel."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT play_enabled FROM twitch_channels WHERE twitch_channel = ?',
+            (twitch_channel.lower(),)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return bool(row[0]) if row else False
 
     def remove_twitch_channel(self, guild_id: int):
         """Unlink a Discord guild from its Twitch channel"""
@@ -1871,9 +1879,3 @@ class Database:
                        (json.dumps(roles), message_id))
         conn.commit()
         conn.close()
-
-
-# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
-# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
-# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# EP-ORIGIN:database:stayexcellent:2026
