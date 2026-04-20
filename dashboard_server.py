@@ -1848,6 +1848,7 @@ const ws = new WebSocket(wsProto + "//" + location.host + "/overlay/" + guildId 
 
 ws.onmessage = e => {{
   const msg = JSON.parse(e.data);
+  console.log("Overlay received:", msg);
   if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
   if (msg.type === "stop") {{
     queue.length = 0;
@@ -1867,6 +1868,7 @@ function processQueue() {{
   }}
   const item = queue.shift();
   const videoId = extractVideoId(item.video_url);
+  console.log("Playing videoId:", videoId, "ytReady:", ytReady);
   if (!videoId) {{ playing = false; setTimeout(processQueue, 500); return; }}
   playing = true;
   const volume = Math.round(Math.max(0, Math.min(1, item.volume || 1)) * 100);
@@ -1880,7 +1882,7 @@ function processQueue() {{
     player = new YT.Player("yt-player", {{
       height: "480", width: "854",
       videoId: videoId,
-      playerVars: {{ autoplay: 1, controls: 0, modestbranding: 1, rel: 0, iv_load_policy: 3, playsinline: 1 }},
+      playerVars: {{ autoplay: 1, controls: 1, modestbranding: 1, rel: 0, iv_load_policy: 3, playsinline: 1 }},
       events: {{
         onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
         onStateChange: e => {{
