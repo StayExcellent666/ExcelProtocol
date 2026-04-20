@@ -1870,7 +1870,7 @@ async def overlay_page(request):
     position:absolute;
     bottom:0; left:0; right:0;
     z-index:2;
-    padding:10px 14px 10px 14px;
+    padding:24px 12px 8px 12px;
     background:linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 100%);
     display:flex;
     flex-direction:column;
