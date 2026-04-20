@@ -1830,7 +1830,9 @@ let player = null;
 let ytReady = false;
 
 function onYouTubeIframeAPIReady() {{
+  console.log("YouTube IFrame API ready");
   ytReady = true;
+  processQueue();
 }}
 
 function extractVideoId(url) {{
@@ -1861,8 +1863,10 @@ ws.onmessage = e => {{
 ws.onclose = () => {{ setTimeout(() => location.reload(), 3000); }};
 
 function processQueue() {{
-  if (playing || queue.length === 0 || !ytReady) {{
-    if (!ytReady) setTimeout(processQueue, 200);
+  if (playing || queue.length === 0) return;
+  if (!ytReady) {{
+    console.log("ytReady not set yet, retrying in 500ms");
+    setTimeout(processQueue, 500);
     return;
   }}
   const item = queue.shift();
