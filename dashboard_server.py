@@ -1858,19 +1858,28 @@ async def overlay_page(request):
   }}
   #video-container {{
     position:relative;
-    width:854px;
-    height:480px;
+    width:100vw;
+    height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
     flex-shrink:0;
   }}
-  #yt-player, #yt-player iframe {{ display:block; width:854px; height:480px; }}
+  #player-sizer {{
+    position:relative;
+    /* Fit 16:9 as large as possible inside the container */
+    width:min(100vw, calc(100vh * 16 / 9));
+    height:min(100vh, calc(100vw * 9 / 16));
+  }}
+  #yt-player, #yt-player iframe {{ display:block; width:100%; height:100%; }}
   #click-block {{
     position:absolute; inset:0; z-index:10;
   }}
   #bottom-overlay {{
     position:absolute;
     bottom:0; left:0; right:0;
-    z-index:2;
-    padding:24px 12px 8px 12px;
+    z-index:11;
+    padding:32px 16px 10px 16px;
     background:linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 100%);
     display:flex;
     flex-direction:column;
@@ -1890,12 +1899,12 @@ async def overlay_page(request):
     gap:3px;
   }}
   #progress-bar-bg {{
-    width:100%; height:5px; border-radius:3px;
+    width:100%; height:8px; border-radius:4px;
     background:rgba(255,255,255,0.2);
     overflow:hidden;
   }}
   #progress-bar-fill {{
-    height:100%; width:0%; border-radius:3px;
+    height:100%; width:0%; border-radius:4px;
     background:linear-gradient(90deg,#00f5d4,#9146ff);
     transition:width 0.5s linear;
   }}
@@ -1909,13 +1918,15 @@ async def overlay_page(request):
 <body>
 <div id="frame-wrap">
   <div id="video-container">
-    <div id="yt-player"></div>
-    <div id="click-block"></div>
-    <div id="bottom-overlay">
-      <div id="rdm"></div>
-      <div id="progress-wrap">
-        <div id="progress-bar-bg"><div id="progress-bar-fill"></div></div>
-        <div id="progress-timer">0:00</div>
+    <div id="player-sizer">
+      <div id="yt-player"></div>
+      <div id="click-block"></div>
+      <div id="bottom-overlay">
+        <div id="rdm"></div>
+        <div id="progress-wrap">
+          <div id="progress-bar-bg"><div id="progress-bar-fill"></div></div>
+          <div id="progress-timer">0:00</div>
+        </div>
       </div>
     </div>
   </div>
@@ -2022,7 +2033,7 @@ function processQueue() {{
     player.setVolume(volume);
   }} else {{
     player = new YT.Player("yt-player", {{
-      height: "480", width: "854",
+      height: "100%", width: "100%",
       videoId: videoId,
       playerVars: {{ autoplay: 1, controls: 0, disablekb: 1, modestbranding: 1, rel: 0, iv_load_policy: 3 }},
       events: {{
