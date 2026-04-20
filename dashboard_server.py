@@ -38,6 +38,30 @@ TWITCH_API            = "https://api.twitch.tv/helix"
 # WebSocket connections for overlays: {guild_id: set of ws}
 _overlay_connections: dict = {}
 
+async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: str):
+    """Push a !play event to all overlay WebSockets for guilds linked to this Twitch channel."""
+    import json as _json
+    if not _bot_ref:
+        return False
+    guilds = _bot_ref.db.get_guilds_for_twitch_channel(twitch_channel)
+    if not guilds:
+        return False
+    payload = _json.dumps({"type": "play", "video_url": video_url, "volume": 1.0, "redeemer": requester})
+    pushed = False
+    for g in guilds:
+        gid = str(g['guild_id'])
+        conns = _overlay_connections.get(gid, set())
+        dead = set()
+        for ws in conns:
+            try:
+                await ws.send_str(payload)
+                pushed = True
+            except Exception:
+                dead.add(ws)
+        if dead:
+            conns.difference_update(dead)
+    return pushed
+
 # EventSub message dedup: {message_id: received_at} — Twitch recommends deduping by message ID
 _eventsub_seen: dict = {}
 
@@ -3143,24 +3167,6 @@ async def auth_logout(request):
 def create_dashboard_app(bot=None):
     global _bot_ref
     _bot_ref = bot
-
-    # Wire up the overlay push callback to the chat bot
-    if bot and hasattr(bot, 'twitch_chat_bot') and bot.twitch_chat_bot:
-        async def _overlay_push(twitch_channel: str, video_url: str, requester: str):
-            import json as _json
-            payload = _json.dumps({"type": "play", "video_url": video_url, "volume": 1.0, "redeemer": requester})
-            guilds = bot.db.get_guilds_for_twitch_channel(twitch_channel)
-            for g in guilds:
-                gid = str(g['guild_id'])
-                dead = set()
-                for ws in _overlay_connections.get(gid, set()):
-                    try:
-                        await ws.send_str(payload)
-                    except Exception:
-                        dead.add(ws)
-                if dead:
-                    _overlay_connections.get(gid, set()).difference_update(dead)
-        bot.twitch_chat_bot.overlay_push_callback = _overlay_push
     app = web.Application(middlewares=[error_logging_middleware, auth_middleware])
 
     app.router.add_get("/health",        health)

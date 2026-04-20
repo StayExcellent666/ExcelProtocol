@@ -19,7 +19,6 @@ class TwitchChatBot(commands.Bot):
         self.db = db
         self.twitch_api = twitch_api
         self._cooldowns: dict[str, dict[str, datetime]] = {}
-        self.overlay_push_callback = None  # Set by dashboard_server on startup
 
     async def event_ready(self):
         logger.info(f"Twitch chat bot ready | Nick: {self.nick}")
@@ -72,15 +71,16 @@ class TwitchChatBot(commands.Bot):
             if not url:
                 await message.channel.send("Usage: !play <youtube_url>")
                 return True
-            if self.overlay_push_callback:
-                try:
-                    await self.overlay_push_callback(channel_name, url, message.author.name)
-                    await message.channel.send(f"▶ Playing video for {message.author.name} PogChamp")
-                except Exception as e:
-                    logger.error(f"!play overlay push failed for {channel_name}: {e}")
-                    await message.channel.send("❌ Could not push to overlay — is OBS connected?")
-            else:
-                await message.channel.send("❌ Overlay not connected.")
+            try:
+                from dashboard_server import push_play_to_overlay
+                pushed = await push_play_to_overlay(channel_name, url, message.author.name)
+                if pushed:
+                    await message.channel.send(f"▶ Playing video PogChamp")
+                else:
+                    await message.channel.send("❌ No OBS overlay connected — make sure the browser source is open.")
+            except Exception as e:
+                logger.error(f"!play overlay push failed for {channel_name}: {e}")
+                await message.channel.send("❌ Could not push to overlay.")
             return True
 
         if command_name == "!uptime":
