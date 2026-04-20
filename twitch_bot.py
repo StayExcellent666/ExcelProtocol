@@ -62,6 +62,19 @@ class TwitchChatBot(commands.Bot):
             await self._do_shoutout(message.channel, target)
             return True
 
+        if command_name == "!stop":
+            if not is_mod:
+                return True
+            if not self.db.is_play_enabled(channel_name):
+                return True
+            try:
+                from dashboard_server import push_stop_to_overlay
+                await push_stop_to_overlay(channel_name)
+                await message.channel.send("⏹ Stopped.")
+            except Exception as e:
+                logger.error(f"!stop overlay push failed for {channel_name}: {e}")
+            return True
+
         if command_name == "!play":
             if not is_mod:
                 return True  # mod/broadcaster only
@@ -129,7 +142,7 @@ class TwitchChatBot(commands.Bot):
             custom_cmds = self.db.get_twitch_commands(channel_name)
             builtin = "!uptime !game !title !viewers !so !commands"
             if self.db.is_play_enabled(channel_name):
-                builtin += " !play"
+                builtin += " !play !stop"
             if custom_cmds:
                 names = " ".join(c["command_name"] for c in custom_cmds)
                 await message.channel.send(f"Commands: {builtin} | Custom: {names}")

@@ -62,6 +62,25 @@ async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: s
             conns.difference_update(dead)
     return pushed
 
+async def push_stop_to_overlay(twitch_channel: str):
+    """Push a stop event to all overlay WebSockets for guilds linked to this Twitch channel."""
+    import json as _json
+    if not _bot_ref:
+        return
+    guilds = _bot_ref.db.get_guilds_for_twitch_channel(twitch_channel)
+    payload = _json.dumps({"type": "stop"})
+    for g in guilds:
+        gid = str(g['guild_id'])
+        conns = _overlay_connections.get(gid, set())
+        dead = set()
+        for ws in conns:
+            try:
+                await ws.send_str(payload)
+            except Exception:
+                dead.add(ws)
+        if dead:
+            conns.difference_update(dead)
+
 # EventSub message dedup: {message_id: received_at} — Twitch recommends deduping by message ID
 _eventsub_seen: dict = {}
 
@@ -1791,7 +1810,10 @@ async def overlay_page(request):
 <body>
 <div id="overlay">
   <div id="frame-wrap" style="display:none;position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);">
-    <div id="yt-player"></div>
+    <div style="position:relative;">
+      <div id="yt-player"></div>
+      <div style="position:absolute;inset:0;z-index:1;"></div>
+    </div>
   </div>
 </div>
 <div id="rdm" style="display:none;position:fixed;bottom:40px;left:50%;transform:translateX(-50%);color:#fff;font-size:22px;font-family:sans-serif;text-shadow:0 2px 8px #000;"></div>
@@ -1813,6 +1835,7 @@ function extractVideoId(url) {{
   try {{
     const u = new URL(url);
     if (u.hostname.includes("youtu.be")) return u.pathname.slice(1).split("?")[0];
+    if (u.pathname.includes("/shorts/")) return u.pathname.split("/shorts/")[1].split("?")[0];
     return u.searchParams.get("v") || null;
   }} catch {{ return null; }}
 }}
@@ -1823,6 +1846,13 @@ const ws = new WebSocket(wsProto + "//" + location.host + "/overlay/" + guildId 
 ws.onmessage = e => {{
   const msg = JSON.parse(e.data);
   if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
+  if (msg.type === "stop") {{
+    queue.length = 0;
+    if (player) {{ player.stopVideo(); }}
+    frameWrap.style.display = "none";
+    rdm.style.display = "none";
+    playing = false;
+  }}
 }};
 
 ws.onclose = () => {{ setTimeout(() => location.reload(), 3000); }};
@@ -1847,7 +1877,7 @@ function processQueue() {{
     player = new YT.Player("yt-player", {{
       height: "480", width: "854",
       videoId: videoId,
-      playerVars: {{ autoplay: 1, controls: 0, modestbranding: 1, rel: 0 }},
+      playerVars: {{ autoplay: 1, controls: 0, modestbranding: 1, rel: 0, disablekb: 1, fs: 0, iv_load_policy: 3 }},
       events: {{
         onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
         onStateChange: e => {{
