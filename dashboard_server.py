@@ -1848,23 +1848,49 @@ async def overlay_page(request):
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{ background:transparent; overflow:hidden; width:100vw; height:100vh; }}
-  #overlay {{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; }}
-  #rdm {{ position:fixed; bottom:40px; left:50%; transform:translateX(-50%);
-    background:rgba(0,0,0,0.7); color:#fff; padding:6px 16px; border-radius:20px;
-    font-family:sans-serif; font-size:18px; display:none; white-space:nowrap; z-index:10; }}
-  #frame-wrap {{ pointer-events:none; }}
-  #yt-player {{ display:block; }}
-  #yt-player iframe {{ display:block; }}
+  #frame-wrap {{
+    display:none;
+    position:fixed;
+    inset:0;
+    align-items:center;
+    justify-content:center;
+    pointer-events:none;
+  }}
+  #video-container {{
+    position:relative;
+    width:854px;
+    height:480px;
+    flex-shrink:0;
+  }}
+  #yt-player, #yt-player iframe {{ display:block; width:854px; height:480px; }}
+  #click-block {{
+    position:absolute; inset:0; z-index:1;
+  }}
+  #bottom-overlay {{
+    position:absolute;
+    bottom:0; left:0; right:0;
+    z-index:2;
+    padding:10px 14px 10px 14px;
+    background:linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 100%);
+    display:flex;
+    flex-direction:column;
+    gap:5px;
+  }}
+  #rdm {{
+    font-family:sans-serif;
+    font-size:16px;
+    color:#fff;
+    text-shadow:0 1px 6px #000;
+    display:none;
+    white-space:nowrap;
+  }}
   #progress-wrap {{
     display:none;
     flex-direction:column;
-    align-items:stretch;
-    gap:4px;
-    margin-top:8px;
-    width:854px;
+    gap:3px;
   }}
   #progress-bar-bg {{
-    width:100%; height:6px; border-radius:3px;
+    width:100%; height:5px; border-radius:3px;
     background:rgba(255,255,255,0.2);
     overflow:hidden;
   }}
@@ -1875,19 +1901,18 @@ async def overlay_page(request):
   }}
   #progress-timer {{
     font-family:'JetBrains Mono',monospace,sans-serif;
-    font-size:12px; color:rgba(255,255,255,0.7);
+    font-size:11px; color:rgba(255,255,255,0.7);
     text-align:right;
   }}
 </style>
 </head>
 <body>
-<div id="overlay">
-  <div id="frame-wrap" style="display:none;position:fixed;inset:0;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);">
-    <div style="display:inline-flex;flex-direction:column;align-items:stretch;">
-      <div style="position:relative;">
-        <div id="yt-player"></div>
-        <div style="position:absolute;inset:0;z-index:1;"></div>
-      </div>
+<div id="frame-wrap">
+  <div id="video-container">
+    <div id="yt-player"></div>
+    <div id="click-block"></div>
+    <div id="bottom-overlay">
+      <div id="rdm"></div>
       <div id="progress-wrap">
         <div id="progress-bar-bg"><div id="progress-bar-fill"></div></div>
         <div id="progress-timer">0:00</div>
@@ -1895,7 +1920,6 @@ async def overlay_page(request):
     </div>
   </div>
 </div>
-<div id="rdm" style="display:none;position:fixed;bottom:40px;left:50%;transform:translateX(-50%);color:#fff;font-size:22px;font-family:sans-serif;text-shadow:0 2px 8px #000;"></div>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
 const guildId = "{guild_id}";
