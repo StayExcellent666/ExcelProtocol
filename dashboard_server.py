@@ -2024,7 +2024,7 @@ function processQueue() {{
     player = new YT.Player("yt-player", {{
       height: "480", width: "854",
       videoId: videoId,
-      playerVars: {{ autoplay: 1, controls: 1, modestbranding: 1, rel: 0, iv_load_policy: 3 }},
+      playerVars: {{ autoplay: 1, controls: 0, modestbranding: 1, rel: 0, iv_load_policy: 3 }},
       events: {{
         onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
         onStateChange: e => {{
