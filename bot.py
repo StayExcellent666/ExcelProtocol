@@ -1,3 +1,8 @@
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:bot:stayexcellent:2026
+
 import discord
 from discord import app_commands
 from discord.ext import tasks
@@ -951,6 +956,12 @@ class TwitchNotifierBot(discord.Client):
                 self.db.log_notification(server_data['guild_id'], stream['user_login'], effective_channel_id, 'failed')
                 return
 
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:bot:stayexcellent:2026
+
+            
             # Bug 4 fix: DB-level dedup to prevent duplicate notifications during
             # rolling deploys where multiple instances briefly run simultaneously,
             # each with an empty live_streamers set.
@@ -1955,7 +1966,13 @@ async def bot_stats(interaction: discord.Interaction):
         value=f"`{memory_bar}` {memory_mb:.1f} MB / 256 MB ({memory_percent:.1f}%)",
         inline=False
     )
-    
+
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:bot:stayexcellent:2026
+
+
     embed.add_field(
         name="⚡ CPU Usage",
         value=f"{cpu_percent:.1f}%",
@@ -3423,3 +3440,9 @@ async def main_with_error_handling():
 
 if __name__ == "__main__":
     asyncio.run(main_with_error_handling())
+
+
+# ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
+# Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
+# Unauthorized use is a violation of the ExcelProtocol Proprietary License.
+# EP-ORIGIN:bot:stayexcellent:2026
