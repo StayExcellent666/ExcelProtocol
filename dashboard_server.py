@@ -1805,8 +1805,7 @@ async def overlay_page(request):
     background:rgba(0,0,0,0.7); color:#fff; padding:6px 16px; border-radius:20px;
     font-family:sans-serif; font-size:18px; display:none; white-space:nowrap; z-index:10; }}
   #frame-wrap {{ pointer-events:none; }}
-  /* Clip bottom 40px of iframe to hide the YouTube controls bar */
-  #yt-player {{ display:block; clip-path:inset(0 0 40px 0); }}
+  #yt-player {{ display:block; }}
   #yt-player iframe {{ display:block; }}
 </style>
 </head>
@@ -1882,7 +1881,7 @@ function processQueue() {{
     player = new YT.Player("yt-player", {{
       height: "480", width: "854",
       videoId: videoId,
-      playerVars: {{ autoplay: 1, controls: 1, modestbranding: 1, rel: 0, iv_load_policy: 3, playsinline: 1 }},
+      playerVars: {{ autoplay: 1, controls: 1, modestbranding: 1, rel: 0, iv_load_policy: 3 }},
       events: {{
         onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
         onStateChange: e => {{
