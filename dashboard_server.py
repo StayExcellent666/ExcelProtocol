@@ -1448,6 +1448,7 @@ async def get_twitch_info(request):
         "limit": limit,
         "bot_is_modded": bot_is_modded,
         "play_enabled": row.get("play_enabled", False) if row else False,
+        "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100,
     })
 
 async def set_play_enabled(request):
@@ -1461,6 +1462,46 @@ async def set_play_enabled(request):
     else:
         await db_execute("UPDATE twitch_channels SET play_enabled = ? WHERE guild_id = ?", (int(enabled), guild_id))
     return web.json_response({"ok": True, "play_enabled": enabled})
+
+
+async def set_overlay_volume(request):
+    """Save overlay volume (0-100) for a guild and push live to connected WebSocket overlays."""
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    volume = max(0, min(100, int(body.get("volume", 100))))
+    import asyncio as _asyncio
+    if _bot_ref:
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_overlay_volume(int(guild_id), volume))
+    else:
+        await db_execute("UPDATE twitch_channels SET overlay_volume = ? WHERE guild_id = ?", (volume, guild_id))
+    # Push live to any connected overlay WebSockets
+    payload = json.dumps({"type": "set_volume", "volume": volume})
+    conns = _overlay_connections.get(str(guild_id), set())
+    dead = set()
+    for ws in conns:
+        try:
+            await ws.send_str(payload)
+        except Exception:
+            dead.add(ws)
+    if dead:
+        conns.difference_update(dead)
+    return web.json_response({"ok": True, "volume": volume})
+
+
+async def play_test_overlay(request):
+    """Send a test video to the overlay so the user can verify volume in OBS."""
+    guild_id = request.match_info["guild_id"]
+    payload = json.dumps({"type": "play", "video_url": "https://www.youtube.com/watch?v=UKZzszc9AEI", "volume": 1.0, "redeemer": ""})
+    conns = _overlay_connections.get(str(guild_id), set())
+    dead = set()
+    for ws in conns:
+        try:
+            await ws.send_str(payload)
+        except Exception:
+            dead.add(ws)
+    if dead:
+        conns.difference_update(dead)
+    return web.json_response({"ok": True})
 
 
 async def add_twitch_command(request):
@@ -1777,6 +1818,12 @@ async def overlay_ws(request):
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
     _overlay_connections.setdefault(guild_id, set()).add(ws)
+    # Send saved volume immediately on connect so OBS picks it up
+    try:
+        volume = _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100
+        await ws.send_str(json.dumps({"type": "set_volume", "volume": volume}))
+    except Exception:
+        pass
     try:
         async for msg in ws:
             pass  # overlay only receives, doesn't send
@@ -1829,6 +1876,7 @@ const queue = [];
 let playing = false;
 let player = null;
 let ytReady = false;
+let savedVolume = 100;
 
 function onYouTubeIframeAPIReady() {{
   console.log("YouTube IFrame API ready");
@@ -1851,6 +1899,10 @@ const ws = new WebSocket(wsProto + "//" + location.host + "/overlay/" + guildId 
 ws.onmessage = e => {{
   const msg = JSON.parse(e.data);
   console.log("Overlay received:", msg);
+  if (msg.type === "set_volume") {{
+    savedVolume = msg.volume;
+    if (player) player.setVolume(msg.volume);
+  }}
   if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
   if (msg.type === "stop") {{
     queue.length = 0;
@@ -1875,7 +1927,7 @@ function processQueue() {{
   console.log("Playing videoId:", videoId, "ytReady:", ytReady);
   if (!videoId) {{ playing = false; setTimeout(processQueue, 500); return; }}
   playing = true;
-  const volume = Math.round(Math.max(0, Math.min(1, item.volume || 1)) * 100);
+  const volume = savedVolume;
   rdm.textContent = item.redeemer ? item.redeemer + " redeemed!" : "";
   rdm.style.display = item.redeemer ? "block" : "none";
   frameWrap.style.display = "flex";
@@ -1949,7 +2001,7 @@ async def get_broadcaster_info(request):
         elif resp.status == 403:
             # Not affiliate/partner
             rows2 = await db_fetch("SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
-            return web.json_response({"connected": True, "not_affiliate": True, "twitch_login": rows2[0]["twitch_login"] if rows2 else "", "rewards": [], "triggers": [], "overlay_url": f"https://excelprotocol.fly.dev/overlay/{guild_id}"})
+            return web.json_response({"connected": True, "not_affiliate": True, "twitch_login": rows2[0]["twitch_login"] if rows2 else "", "rewards": [], "triggers": [], "overlay_url": f"https://excelprotocol.fly.dev/overlay/{guild_id}", "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100})
     except Exception as e:
         logger.error(f"Error fetching rewards for guild {guild_id}: {e}")
 
@@ -1962,6 +2014,7 @@ async def get_broadcaster_info(request):
         "rewards": rewards,
         "triggers": triggers,
         "overlay_url": f"https://excelprotocol.fly.dev/overlay/{guild_id}",
+        "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100,
     })
 
 async def upsert_reward_trigger(request):
@@ -3265,6 +3318,8 @@ def create_dashboard_app(bot=None):
     app.router.add_get   ("/overlay/{guild_id}/ws",                         overlay_ws)
     app.router.add_get   ("/api/guild/{guild_id}/twitch",                    get_twitch_info)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/play-enabled",       set_play_enabled)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/overlay-volume",      set_overlay_volume)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/play-test",           play_test_overlay)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/commands",           add_twitch_command)
     app.router.add_delete("/api/guild/{guild_id}/twitch/commands/{command_name}", delete_twitch_command)
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
