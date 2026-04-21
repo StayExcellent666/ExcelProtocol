@@ -81,6 +81,7 @@ async def push_stop_to_overlay(twitch_channel: str):
     payload = _json.dumps({"type": "stop"})
     for g in guilds:
         gid = str(g['guild_id'])
+        _overlay_queue[gid] = 0  # clear server-side queue counter
         conns = _overlay_connections.get(gid, set())
         dead = set()
         for ws in conns:
@@ -1841,8 +1842,11 @@ async def overlay_ws(request):
                     if data.get("type") == "ended":
                         current = _overlay_queue.get(guild_id, 0)
                         _overlay_queue[guild_id] = max(0, current - 1)
-                except Exception:
-                    pass
+                        logger.debug(f"Overlay ended for guild {guild_id}, queue now {_overlay_queue[guild_id]}")
+                except Exception as parse_err:
+                    logger.debug(f"Overlay WS parse error: {parse_err}")
+            elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                break
     except _asyncio.CancelledError:
         pass
     except Exception as e:
@@ -2029,6 +2033,20 @@ ws.onmessage = e => {{
 
 ws.onclose = () => {{ setTimeout(() => location.reload(), 3000); }};
 
+function onPlayerStateChange(e) {{
+  if (e.data === YT.PlayerState.PLAYING) {{
+    startProgress();
+  }}
+  if (e.data === YT.PlayerState.ENDED && playing) {{
+    frameWrap.style.display = "none";
+    rdm.style.display = "none";
+    stopProgress();
+    try {{ ws.send(JSON.stringify({{type: "ended"}})); }} catch(err) {{}}
+    playing = false;
+    setTimeout(processQueue, 500);
+  }}
+}}
+
 function processQueue() {{
   if (playing || queue.length === 0) return;
   if (!ytReady) {{
@@ -2055,19 +2073,7 @@ function processQueue() {{
       playerVars: {{ autoplay: 1, controls: 0, disablekb: 1, modestbranding: 1, rel: 0, iv_load_policy: 3 }},
       events: {{
         onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
-        onStateChange: e => {{
-          if (e.data === YT.PlayerState.PLAYING) {{
-            startProgress();
-          }}
-          if (e.data === YT.PlayerState.ENDED) {{
-            frameWrap.style.display = "none";
-            rdm.style.display = "none";
-            stopProgress();
-            playing = false;
-            try {{ ws.send(JSON.stringify({{type: "ended"}})); }} catch(err) {{}}
-            setTimeout(processQueue, 500);
-          }}
-        }}
+        onStateChange: onPlayerStateChange
       }}
     }});
   }}
