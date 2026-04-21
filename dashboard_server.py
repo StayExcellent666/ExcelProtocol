@@ -103,6 +103,8 @@ async def push_skip_to_overlay(twitch_channel: str):
     pushed = False
     for g in guilds:
         gid = str(g['guild_id'])
+        current = _overlay_queue.get(gid, 0)
+        _overlay_queue[gid] = max(0, current - 1)
         conns = _overlay_connections.get(gid, set())
         dead = set()
         for ws in conns:
@@ -1862,7 +1864,10 @@ async def overlay_ws(request):
             if msg.type == web.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
-                    if data.get("type") in ("ended", "qsync"):
+                    if data.get("type") == "ended":
+                        current = _overlay_queue.get(guild_id, 0)
+                        _overlay_queue[guild_id] = max(0, current - 1)
+                    elif data.get("type") == "qsync":
                         remaining = int(data.get("remaining", 0))
                         _overlay_queue[guild_id] = remaining
                 except Exception as parse_err:
