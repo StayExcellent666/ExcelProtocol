@@ -86,9 +86,12 @@ class TwitchChatBot(commands.Bot):
                 return True
             try:
                 from dashboard_server import push_play_to_overlay
-                pushed = await push_play_to_overlay(channel_name, url, message.author.name)
+                pushed, position = await push_play_to_overlay(channel_name, url, message.author.name)
                 if pushed:
-                    await message.channel.send(f"▶ Playing video PogChamp")
+                    if position <= 1:
+                        await message.channel.send(f"▶ Playing video PogChamp")
+                    else:
+                        await message.channel.send(f"▶ Added to queue — position {position} PogChamp")
                 else:
                     await message.channel.send("❌ No OBS overlay connected — make sure the browser source is open.")
             except Exception as e:
