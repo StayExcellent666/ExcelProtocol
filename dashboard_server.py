@@ -68,7 +68,8 @@ async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: s
         if dead:
             conns.difference_update(dead)
         if pushed:
-            _overlay_queue[gid] = _overlay_queue.get(gid, 0) + 1
+            current = _overlay_queue.get(gid, 0)
+            _overlay_queue[gid] = current + 1
             queue_position = _overlay_queue[gid]
     return pushed, queue_position
 
@@ -91,6 +92,28 @@ async def push_stop_to_overlay(twitch_channel: str):
                 dead.add(ws)
         if dead:
             conns.difference_update(dead)
+
+async def push_skip_to_overlay(twitch_channel: str):
+    """Skip the current video — overlay will play the next queued item if any."""
+    import json as _json
+    if not _bot_ref:
+        return False
+    guilds = _bot_ref.db.get_guilds_for_twitch_channel(twitch_channel)
+    payload = _json.dumps({"type": "skip"})
+    pushed = False
+    for g in guilds:
+        gid = str(g['guild_id'])
+        conns = _overlay_connections.get(gid, set())
+        dead = set()
+        for ws in conns:
+            try:
+                await ws.send_str(payload)
+                pushed = True
+            except Exception:
+                dead.add(ws)
+        if dead:
+            conns.difference_update(dead)
+    return pushed
 
 # EventSub message dedup: {message_id: received_at} — Twitch recommends deduping by message ID
 _eventsub_seen: dict = {}
@@ -1842,7 +1865,6 @@ async def overlay_ws(request):
                     if data.get("type") == "ended":
                         remaining = int(data.get("remaining", 0))
                         _overlay_queue[guild_id] = remaining
-                        logger.info(f"Overlay ended for guild {guild_id}, queue now {remaining}")
                 except Exception as parse_err:
                     logger.debug(f"Overlay WS parse error: {parse_err}")
             elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
@@ -2021,6 +2043,15 @@ ws.onmessage = e => {{
     if (player) player.setVolume(msg.volume);
   }}
   if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
+  if (msg.type === "skip") {{
+    if (player) {{ player.stopVideo(); }}
+    frameWrap.style.display = "none";
+    rdm.style.display = "none";
+    stopProgress();
+    try {{ ws.send(JSON.stringify({{type: "ended", remaining: queue.length}})); }} catch(err) {{}}
+    playing = false;
+    setTimeout(processQueue, 100);
+  }}
   if (msg.type === "stop") {{
     queue.length = 0;
     if (player) {{ player.stopVideo(); }}
@@ -2041,7 +2072,7 @@ function onPlayerStateChange(e) {{
     frameWrap.style.display = "none";
     rdm.style.display = "none";
     stopProgress();
-    try {{ console.log("Sending ended to server, remaining:", queue.length); ws.send(JSON.stringify({{type: "ended", remaining: queue.length}})); }} catch(err) {{ console.log("ws.send ended failed:", err); }}
+    try {{ ws.send(JSON.stringify({{type: "ended", remaining: queue.length}})); }} catch(err) {{}}
     playing = false;
     setTimeout(processQueue, 500);
   }}

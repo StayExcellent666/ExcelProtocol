@@ -75,6 +75,22 @@ class TwitchChatBot(commands.Bot):
                 logger.error(f"!stop overlay push failed for {channel_name}: {e}")
             return True
 
+        if command_name == "!skip":
+            if not is_mod:
+                return True
+            if not self.db.is_play_enabled(channel_name):
+                return True
+            try:
+                from dashboard_server import push_skip_to_overlay
+                pushed = await push_skip_to_overlay(channel_name)
+                if pushed:
+                    await message.channel.send("⏭ Skipped.")
+                else:
+                    await message.channel.send("❌ No OBS overlay connected.")
+            except Exception as e:
+                logger.error(f"!skip overlay push failed for {channel_name}: {e}")
+            return True
+
         if command_name == "!play":
             if not is_mod:
                 return True  # mod/broadcaster only
@@ -145,7 +161,7 @@ class TwitchChatBot(commands.Bot):
             custom_cmds = self.db.get_twitch_commands(channel_name)
             builtin = "!uptime !game !title !viewers !so !commands"
             if self.db.is_play_enabled(channel_name):
-                builtin += " !play !stop"
+                builtin += " !play !stop !skip"
             if custom_cmds:
                 names = " ".join(c["command_name"] for c in custom_cmds)
                 await message.channel.send(f"Commands: {builtin} | Custom: {names}")
