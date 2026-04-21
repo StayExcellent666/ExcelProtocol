@@ -1840,9 +1840,9 @@ async def overlay_ws(request):
                 try:
                     data = json.loads(msg.data)
                     if data.get("type") == "ended":
-                        current = _overlay_queue.get(guild_id, 0)
-                        _overlay_queue[guild_id] = max(0, current - 1)
-                        logger.debug(f"Overlay ended for guild {guild_id}, queue now {_overlay_queue[guild_id]}")
+                        remaining = int(data.get("remaining", 0))
+                        _overlay_queue[guild_id] = remaining
+                        logger.info(f"Overlay ended for guild {guild_id}, queue now {remaining}")
                 except Exception as parse_err:
                     logger.debug(f"Overlay WS parse error: {parse_err}")
             elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
@@ -2041,7 +2041,7 @@ function onPlayerStateChange(e) {{
     frameWrap.style.display = "none";
     rdm.style.display = "none";
     stopProgress();
-    try {{ ws.send(JSON.stringify({{type: "ended"}})); }} catch(err) {{}}
+    try {{ console.log("Sending ended to server, remaining:", queue.length); ws.send(JSON.stringify({{type: "ended", remaining: queue.length}})); }} catch(err) {{ console.log("ws.send ended failed:", err); }}
     playing = false;
     setTimeout(processQueue, 500);
   }}
