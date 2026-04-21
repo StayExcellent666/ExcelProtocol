@@ -1862,7 +1862,7 @@ async def overlay_ws(request):
             if msg.type == web.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
-                    if data.get("type") == "ended":
+                    if data.get("type") in ("ended", "qsync"):
                         remaining = int(data.get("remaining", 0))
                         _overlay_queue[guild_id] = remaining
                 except Exception as parse_err:
@@ -2042,7 +2042,7 @@ ws.onmessage = e => {{
     savedVolume = msg.volume;
     if (player) player.setVolume(msg.volume);
   }}
-  if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
+  if (msg.type === "play") {{ queue.push(msg); processQueue(); try {{ ws.send(JSON.stringify({{type: "qsync", remaining: queue.length + (playing ? 1 : 0)}})); }} catch(e) {{}} }}
   if (msg.type === "skip") {{
     if (player) {{ player.stopVideo(); }}
     frameWrap.style.display = "none";
@@ -2067,6 +2067,7 @@ ws.onclose = () => {{ setTimeout(() => location.reload(), 3000); }};
 function onPlayerStateChange(e) {{
   if (e.data === YT.PlayerState.PLAYING) {{
     startProgress();
+    try {{ ws.send(JSON.stringify({{type: "qsync", remaining: queue.length + 1}})); }} catch(e) {{}}
   }}
   if (e.data === YT.PlayerState.ENDED && playing) {{
     frameWrap.style.display = "none";
