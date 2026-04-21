@@ -243,29 +243,38 @@ async def get_twitch_token() -> str:
         _twitch_token["expires_at"] = now + timedelta(seconds=data["expires_in"])
         return _twitch_token["token"]
 
+_twitch_cache: dict = {}  # {username_lower: {data..., _cached_at: timestamp}}
+_TWITCH_CACHE_TTL = 3600  # 1 hour
+
 async def get_twitch_users(usernames: list) -> dict:
     """Returns {username_lower: {display_name, profile_image_url, description}}"""
     if not usernames:
         return {}
-    missing = [u for u in usernames if u.lower() not in _twitch_cache]
+    import time
+    now = time.time()
+    missing = [u for u in usernames if u.lower() not in _twitch_cache or now - _twitch_cache[u.lower()].get("_cached_at", 0) > _TWITCH_CACHE_TTL]
     if missing:
         try:
             token = await get_twitch_token()
-            params = [("login", u.lower()) for u in missing]
             session = get_http_session()
-            async with session.get(
-                "https://api.twitch.tv/helix/users",
-                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"},
-                params=params,
-            ) as resp:
-                data = await resp.json()
-                for u in data.get("data", []):
-                    _twitch_cache[u["login"].lower()] = {
-                        "display_name":      u.get("display_name", u["login"]),
-                        "profile_image_url": u.get("profile_image_url", ""),
-                        "description":       u.get("description", ""),
-                        "broadcaster_type":  u.get("broadcaster_type", ""),
-                    }
+            # Twitch allows max 100 logins per request — chunk accordingly
+            for i in range(0, len(missing), 100):
+                batch = missing[i:i+100]
+                params = [("login", u.lower()) for u in batch]
+                async with session.get(
+                    "https://api.twitch.tv/helix/users",
+                    headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"},
+                    params=params,
+                ) as resp:
+                    data = await resp.json()
+                    for u in data.get("data", []):
+                        _twitch_cache[u["login"].lower()] = {
+                            "display_name":      u.get("display_name", u["login"]),
+                            "profile_image_url": u.get("profile_image_url", ""),
+                            "description":       u.get("description", ""),
+                            "broadcaster_type":  u.get("broadcaster_type", ""),
+                            "_cached_at":        now,
+                        }
         except Exception:
             pass
     return {u: _twitch_cache.get(u.lower(), {}) for u in usernames}
@@ -616,19 +625,21 @@ async def get_streamers(request):
         (guild_id,)
     )
     usernames = [r["twitch_username"] for r in rows]
-    twitch_data = await get_twitch_users(usernames)
+    import asyncio as _asyncio
+    # Fetch Twitch data and all channel names concurrently
+    twitch_data, *channel_names = await _asyncio.gather(
+        get_twitch_users(usernames),
+        *[get_channel_name(str(r.get("custom_channel_id") or r["channel_id"])) for r in rows]
+    )
     result = []
-    for r in rows:
+    for r, ch_name in zip(rows, channel_names):
         tw = twitch_data.get(r["twitch_username"].lower(), {})
-        eff_ch = str(r.get("custom_channel_id") or r["channel_id"])
-        ch_name = await get_channel_name(eff_ch)
         result.append({
             **r,
             "display_name":      tw.get("display_name", r["twitch_username"]),
             "profile_image_url": tw.get("profile_image_url", ""),
             "channel_name":      ch_name,
         })
-    import asyncio as _asyncio
     limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id))) if _bot_ref else 75
     count = len(result)
     return web.json_response({"streamers": result, "count": count, "limit": limit})
