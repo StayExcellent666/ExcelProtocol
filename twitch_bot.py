@@ -93,21 +93,18 @@ class TwitchChatBot(commands.Bot):
 
         if command_name == "!play":
             if not is_mod:
-                return True  # mod/broadcaster only
+                return True
             if not self.db.is_play_enabled(channel_name):
-                return True  # feature disabled for this channel
+                return True
             url = args.strip()
             if not url:
                 await message.channel.send("Usage: !play <youtube_url>")
                 return True
             try:
                 from dashboard_server import push_play_to_overlay
-                pushed, position = await push_play_to_overlay(channel_name, url, message.author.name)
+                pushed = await push_play_to_overlay(channel_name, url, message.author.name)
                 if pushed:
-                    if position <= 1:
-                        await message.channel.send(f"▶ Playing video PogChamp")
-                    else:
-                        await message.channel.send(f"▶ Added to queue — position {position} PogChamp")
+                    await message.channel.send(f"▶ Added to queue PogChamp")
                 else:
                     await message.channel.send("❌ No OBS overlay connected — make sure the browser source is open.")
             except Exception as e:

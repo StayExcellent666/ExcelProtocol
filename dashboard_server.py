@@ -39,22 +39,17 @@ TWITCH_API            = "https://api.twitch.tv/helix"
 # WebSocket connections for overlays: {guild_id: set of ws}
 _overlay_connections: dict = {}
 
-# Server-side queue length tracker: {guild_id: int}
-# Incremented when a play is pushed, decremented when overlay reports ENDED via WS
-_overlay_queue: dict = {}
-
 async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: str):
     """Push a !play event to all overlay WebSockets for guilds linked to this Twitch channel.
-    Returns (pushed: bool, queue_position: int) — position 1 means playing immediately."""
+    Returns True if pushed to at least one overlay, False otherwise."""
     import json as _json
     if not _bot_ref:
-        return False, 0
+        return False
     guilds = _bot_ref.db.get_guilds_for_twitch_channel(twitch_channel)
     if not guilds:
-        return False, 0
+        return False
     payload = _json.dumps({"type": "play", "video_url": video_url, "volume": 1.0, "redeemer": requester})
     pushed = False
-    queue_position = 1
     for g in guilds:
         gid = str(g['guild_id'])
         conns = _overlay_connections.get(gid, set())
@@ -67,11 +62,7 @@ async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: s
                 dead.add(ws)
         if dead:
             conns.difference_update(dead)
-        if pushed:
-            current = _overlay_queue.get(gid, 0)
-            _overlay_queue[gid] = current + 1
-            queue_position = _overlay_queue[gid]
-    return pushed, queue_position
+    return pushed
 
 async def push_stop_to_overlay(twitch_channel: str):
     """Push a stop event to all overlay WebSockets for guilds linked to this Twitch channel."""
@@ -82,7 +73,6 @@ async def push_stop_to_overlay(twitch_channel: str):
     payload = _json.dumps({"type": "stop"})
     for g in guilds:
         gid = str(g['guild_id'])
-        _overlay_queue[gid] = 0  # clear server-side queue counter
         conns = _overlay_connections.get(gid, set())
         dead = set()
         for ws in conns:
@@ -103,8 +93,6 @@ async def push_skip_to_overlay(twitch_channel: str):
     pushed = False
     for g in guilds:
         gid = str(g['guild_id'])
-        current = _overlay_queue.get(gid, 0)
-        _overlay_queue[gid] = max(0, current - 1)
         conns = _overlay_connections.get(gid, set())
         dead = set()
         for ws in conns:
@@ -1861,26 +1849,13 @@ async def overlay_ws(request):
         pass
     try:
         async for msg in ws:
-            if msg.type == web.WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                    if data.get("type") == "ended":
-                        current = _overlay_queue.get(guild_id, 0)
-                        _overlay_queue[guild_id] = max(0, current - 1)
-                    elif data.get("type") == "qsync":
-                        remaining = int(data.get("remaining", 0))
-                        _overlay_queue[guild_id] = remaining
-                except Exception as parse_err:
-                    logger.debug(f"Overlay WS parse error: {parse_err}")
-            elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
-                break
+            pass  # overlay only receives, doesn't need to send back
     except _asyncio.CancelledError:
         pass
     except Exception as e:
         logger.debug(f"Overlay WS closed for guild {guild_id}: {e}")
     finally:
         _overlay_connections.get(guild_id, set()).discard(ws)
-        _overlay_queue[guild_id] = 0  # reset on disconnect
         if not ws.closed:
             await ws.close()
     return ws
@@ -1918,11 +1893,9 @@ async def overlay_page(request):
     /* Fit 16:9 as large as possible inside the container */
     width:min(100vw, calc(100vh * 16 / 9));
     height:min(100vh, calc(100vw * 9 / 16));
+    pointer-events:none;
   }}
-  #yt-player, #yt-player iframe {{ display:block; width:100%; height:100%; }}
-  #click-block {{
-    position:absolute; inset:0; z-index:10;
-  }}
+  #yt-player, #yt-player iframe {{ display:block; width:100%; height:100%; pointer-events:none; }}
   #bottom-overlay {{
     position:absolute;
     bottom:0; left:0; right:0;
@@ -1968,7 +1941,6 @@ async def overlay_page(request):
   <div id="video-container">
     <div id="player-sizer">
       <div id="yt-player"></div>
-      <div id="click-block"></div>
       <div id="bottom-overlay">
         <div id="rdm"></div>
         <div id="progress-wrap">
@@ -2047,13 +2019,12 @@ ws.onmessage = e => {{
     savedVolume = msg.volume;
     if (player) player.setVolume(msg.volume);
   }}
-  if (msg.type === "play") {{ queue.push(msg); processQueue(); try {{ ws.send(JSON.stringify({{type: "qsync", remaining: queue.length + (playing ? 1 : 0)}})); }} catch(e) {{}} }}
+  if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
   if (msg.type === "skip") {{
     if (player) {{ player.stopVideo(); }}
     frameWrap.style.display = "none";
     rdm.style.display = "none";
     stopProgress();
-    try {{ ws.send(JSON.stringify({{type: "ended", remaining: queue.length}})); }} catch(err) {{}}
     playing = false;
     setTimeout(processQueue, 100);
   }}
@@ -2072,13 +2043,11 @@ ws.onclose = () => {{ setTimeout(() => location.reload(), 3000); }};
 function onPlayerStateChange(e) {{
   if (e.data === YT.PlayerState.PLAYING) {{
     startProgress();
-    try {{ ws.send(JSON.stringify({{type: "qsync", remaining: queue.length + 1}})); }} catch(e) {{}}
   }}
   if (e.data === YT.PlayerState.ENDED && playing) {{
     frameWrap.style.display = "none";
     rdm.style.display = "none";
     stopProgress();
-    try {{ ws.send(JSON.stringify({{type: "ended", remaining: queue.length}})); }} catch(err) {{}}
     playing = false;
     setTimeout(processQueue, 500);
   }}
