@@ -243,38 +243,29 @@ async def get_twitch_token() -> str:
         _twitch_token["expires_at"] = now + timedelta(seconds=data["expires_in"])
         return _twitch_token["token"]
 
-_twitch_cache: dict = {}  # {username_lower: {data..., _cached_at: timestamp}}
-_TWITCH_CACHE_TTL = 3600  # 1 hour
-
 async def get_twitch_users(usernames: list) -> dict:
     """Returns {username_lower: {display_name, profile_image_url, description}}"""
     if not usernames:
         return {}
-    import time
-    now = time.time()
-    missing = [u for u in usernames if u.lower() not in _twitch_cache or now - _twitch_cache[u.lower()].get("_cached_at", 0) > _TWITCH_CACHE_TTL]
+    missing = [u for u in usernames if u.lower() not in _twitch_cache]
     if missing:
         try:
             token = await get_twitch_token()
+            params = [("login", u.lower()) for u in missing]
             session = get_http_session()
-            # Twitch allows max 100 logins per request — chunk accordingly
-            for i in range(0, len(missing), 100):
-                batch = missing[i:i+100]
-                params = [("login", u.lower()) for u in batch]
-                async with session.get(
-                    "https://api.twitch.tv/helix/users",
-                    headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"},
-                    params=params,
-                ) as resp:
-                    data = await resp.json()
-                    for u in data.get("data", []):
-                        _twitch_cache[u["login"].lower()] = {
-                            "display_name":      u.get("display_name", u["login"]),
-                            "profile_image_url": u.get("profile_image_url", ""),
-                            "description":       u.get("description", ""),
-                            "broadcaster_type":  u.get("broadcaster_type", ""),
-                            "_cached_at":        now,
-                        }
+            async with session.get(
+                "https://api.twitch.tv/helix/users",
+                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"},
+                params=params,
+            ) as resp:
+                data = await resp.json()
+                for u in data.get("data", []):
+                    _twitch_cache[u["login"].lower()] = {
+                        "display_name":      u.get("display_name", u["login"]),
+                        "profile_image_url": u.get("profile_image_url", ""),
+                        "description":       u.get("description", ""),
+                        "broadcaster_type":  u.get("broadcaster_type", ""),
+                    }
         except Exception:
             pass
     return {u: _twitch_cache.get(u.lower(), {}) for u in usernames}
@@ -625,21 +616,19 @@ async def get_streamers(request):
         (guild_id,)
     )
     usernames = [r["twitch_username"] for r in rows]
-    import asyncio as _asyncio
-    # Fetch Twitch data and all channel names concurrently
-    twitch_data, *channel_names = await _asyncio.gather(
-        get_twitch_users(usernames),
-        *[get_channel_name(str(r.get("custom_channel_id") or r["channel_id"])) for r in rows]
-    )
+    twitch_data = await get_twitch_users(usernames)
     result = []
-    for r, ch_name in zip(rows, channel_names):
+    for r in rows:
         tw = twitch_data.get(r["twitch_username"].lower(), {})
+        eff_ch = str(r.get("custom_channel_id") or r["channel_id"])
+        ch_name = await get_channel_name(eff_ch)
         result.append({
             **r,
             "display_name":      tw.get("display_name", r["twitch_username"]),
             "profile_image_url": tw.get("profile_image_url", ""),
             "channel_name":      ch_name,
         })
+    import asyncio as _asyncio
     limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id))) if _bot_ref else 75
     count = len(result)
     return web.json_response({"streamers": result, "count": count, "limit": limit})
@@ -1819,20 +1808,27 @@ async def eventsub_callback(request):
             rows = await db_fetch("SELECT guild_id FROM broadcaster_tokens WHERE twitch_login = ?", (broadcaster_login,))
             for row in rows:
                 guild_id = str(row["guild_id"])
-                # Find matching trigger
                 trigger_rows = await db_fetch(
-                    "SELECT video_url, volume FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
+                    "SELECT video_url, volume, trigger_type, hotkey_name FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
                     (guild_id, reward_id)
                 )
                 if trigger_rows:
                     trigger = trigger_rows[0]
+                    trigger_type = trigger.get("trigger_type") or "video"
                     import json as _json
-                    payload = _json.dumps({
-                        "type": "play",
-                        "video_url": trigger["video_url"],
-                        "volume": trigger["volume"],
-                        "redeemer": redeemer,
-                    })
+                    if trigger_type == "hotkey":
+                        payload = _json.dumps({
+                            "type": "hotkey",
+                            "hotkey_name": trigger["hotkey_name"],
+                            "redeemer": redeemer,
+                        })
+                    else:
+                        payload = _json.dumps({
+                            "type": "play",
+                            "video_url": trigger["video_url"],
+                            "volume": trigger["volume"],
+                            "redeemer": redeemer,
+                        })
                     dead = set()
                     for ws in _overlay_connections.get(guild_id, set()):
                         try:
@@ -1875,6 +1871,10 @@ async def overlay_ws(request):
 async def overlay_page(request):
     """Serve the OBS browser source overlay page."""
     guild_id = request.match_info["guild_id"]
+    # Fetch OBS settings to inject into overlay JS
+    obs_rows = await db_fetch("SELECT ws_password, ws_port FROM obs_settings WHERE guild_id = ?", (guild_id,))
+    obs_password = obs_rows[0]["ws_password"] if obs_rows else ""
+    obs_port = obs_rows[0]["ws_port"] if obs_rows else 4455
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1965,6 +1965,8 @@ async def overlay_page(request):
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
 const guildId = "{guild_id}";
+const obsWsPort = {obs_port};
+const obsWsPassword = "{obs_password}";
 const rdm = document.getElementById("rdm");
 const frameWrap = document.getElementById("frame-wrap");
 const progressWrap = document.getElementById("progress-wrap");
@@ -1976,6 +1978,49 @@ let player = null;
 let ytReady = false;
 let savedVolume = 100;
 let progressInterval = null;
+
+// ── OBS WebSocket hotkey trigger ──────────────────────────────────────────────
+async function fireObsHotkey(hotkeyName) {{
+  if (!hotkeyName) return;
+  try {{
+    const obsWs = new WebSocket("ws://localhost:" + obsWsPort);
+    let helloDone = false;
+    obsWs.onmessage = async (e) => {{
+      const msg = JSON.parse(e.data);
+      // op 0 = Hello
+      if (msg.op === 0 && !helloDone) {{
+        helloDone = true;
+        const identPayload = {{ "op": 1, "d": {{ "rpcVersion": 1 }} }};
+        // If password set, compute authentication string
+        if (obsWsPassword && msg.d && msg.d.authentication) {{
+          const {{ challenge, salt }} = msg.d.authentication;
+          const enc = new TextEncoder();
+          const b64 = async (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+          const hash1 = await crypto.subtle.digest("SHA-256", enc.encode(obsWsPassword + salt));
+          const secret = await b64(hash1);
+          const hash2 = await crypto.subtle.digest("SHA-256", enc.encode(secret + challenge));
+          identPayload.d.authentication = await b64(hash2);
+        }}
+        obsWs.send(JSON.stringify(identPayload));
+      }}
+      // op 2 = Identified — now send the hotkey request
+      if (msg.op === 2) {{
+        obsWs.send(JSON.stringify({{
+          "op": 6,
+          "d": {{
+            "requestType": "TriggerHotkeyByName",
+            "requestId": "ep-" + Date.now(),
+            "requestData": {{ "hotkeyName": hotkeyName }}
+          }}
+        }}));
+        setTimeout(() => obsWs.close(), 1000);
+      }}
+    }};
+    obsWs.onerror = (err) => console.log("OBS WS error:", err);
+  }} catch(err) {{
+    console.log("OBS WS hotkey error:", err);
+  }}
+}}
 
 function formatTime(seconds) {{
   const s = Math.floor(seconds);
@@ -2031,6 +2076,7 @@ ws.onmessage = e => {{
     if (player) player.setVolume(msg.volume);
   }}
   if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
+  if (msg.type === "hotkey") {{ fireObsHotkey(msg.hotkey_name); }}
   if (msg.type === "skip") {{
     if (player) {{ player.stopVideo(); }}
     frameWrap.style.display = "none";
@@ -2148,7 +2194,9 @@ async def get_broadcaster_info(request):
         logger.error(f"Error fetching rewards for guild {guild_id}: {e}")
 
     # Get existing triggers
-    triggers = await db_fetch("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+    triggers = await db_fetch("SELECT reward_id, reward_title, video_url, volume, trigger_type, hotkey_name FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+    obs_rows = await db_fetch("SELECT ws_password, ws_port FROM obs_settings WHERE guild_id = ?", (guild_id,))
+    obs_settings = {"ws_password": obs_rows[0]["ws_password"], "ws_port": obs_rows[0]["ws_port"]} if obs_rows else {"ws_password": "", "ws_port": 4455}
 
     return web.json_response({
         "connected": True,
@@ -2157,21 +2205,29 @@ async def get_broadcaster_info(request):
         "triggers": triggers,
         "overlay_url": f"https://excelprotocol.fly.dev/overlay/{guild_id}",
         "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100,
+        "obs_settings": obs_settings,
     })
 
 async def upsert_reward_trigger(request):
-    """Add or update a video trigger for a reward."""
-    guild_id = request.match_info["guild_id"]
-    body = await request.json()
+    """Add or update a video or hotkey trigger for a reward."""
+    guild_id     = request.match_info["guild_id"]
+    body         = await request.json()
     reward_id    = body.get("reward_id", "").strip()
     reward_title = body.get("reward_title", "").strip()
+    trigger_type = body.get("trigger_type", "video").strip()
     video_url    = body.get("video_url", "").strip()
     volume       = float(body.get("volume", 1.0))
-    if not reward_id or not video_url:
-        raise web.HTTPBadRequest(reason="reward_id and video_url are required")
+    hotkey_name  = body.get("hotkey_name", "").strip()
+    if not reward_id:
+        raise web.HTTPBadRequest(reason="reward_id is required")
+    if trigger_type == "video" and not video_url:
+        raise web.HTTPBadRequest(reason="video_url is required for video triggers")
+    if trigger_type == "hotkey" and not hotkey_name:
+        raise web.HTTPBadRequest(reason="hotkey_name is required for hotkey triggers")
     await db_execute(
-        "INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume) VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id, reward_id) DO UPDATE SET reward_title=excluded.reward_title, video_url=excluded.video_url, volume=excluded.volume",
-        (guild_id, reward_id, reward_title, video_url, volume)
+        "INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume, trigger_type, hotkey_name) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(guild_id, reward_id) DO UPDATE SET reward_title=excluded.reward_title, video_url=excluded.video_url, volume=excluded.volume, trigger_type=excluded.trigger_type, hotkey_name=excluded.hotkey_name",
+        (guild_id, reward_id, reward_title, video_url, volume, trigger_type, hotkey_name)
     )
     return web.json_response({"ok": True})
 
@@ -2179,6 +2235,33 @@ async def delete_reward_trigger(request):
     guild_id  = request.match_info["guild_id"]
     reward_id = request.match_info["reward_id"]
     await db_execute("DELETE FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+    return web.json_response({"ok": True})
+
+async def get_obs_settings(request):
+    """Get OBS WebSocket settings for a guild."""
+    guild_id = request.match_info["guild_id"]
+    import asyncio as _asyncio
+    if _bot_ref:
+        settings = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_obs_settings(int(guild_id)))
+    else:
+        rows = await db_fetch("SELECT ws_password, ws_port FROM obs_settings WHERE guild_id = ?", (guild_id,))
+        settings = {"ws_password": rows[0]["ws_password"], "ws_port": rows[0]["ws_port"]} if rows else {"ws_password": "", "ws_port": 4455}
+    return web.json_response(settings)
+
+async def set_obs_settings(request):
+    """Save OBS WebSocket settings for a guild."""
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    ws_password = body.get("ws_password", "")
+    ws_port     = int(body.get("ws_port", 4455))
+    import asyncio as _asyncio
+    if _bot_ref:
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_obs_settings(int(guild_id), ws_password, ws_port))
+    else:
+        await db_execute(
+            "INSERT INTO obs_settings (guild_id, ws_password, ws_port) VALUES (?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET ws_password=excluded.ws_password, ws_port=excluded.ws_port",
+            (guild_id, ws_password, ws_port)
+        )
     return web.json_response({"ok": True})
 
 async def create_reward(request):
@@ -3464,6 +3547,8 @@ def create_dashboard_app(bot=None):
     app.router.add_get   ("/api/guild/{guild_id}/broadcaster",              get_broadcaster_info)
     app.router.add_post  ("/api/guild/{guild_id}/broadcaster/triggers",     upsert_reward_trigger)
     app.router.add_delete("/api/guild/{guild_id}/broadcaster/triggers/{reward_id}", delete_reward_trigger)
+    app.router.add_get   ("/api/guild/{guild_id}/obs-settings",             get_obs_settings)
+    app.router.add_post  ("/api/guild/{guild_id}/obs-settings",             set_obs_settings)
     app.router.add_post  ("/api/guild/{guild_id}/broadcaster/rewards",      create_reward)
     app.router.add_patch ("/api/guild/{guild_id}/broadcaster/rewards/{reward_id}", edit_reward)
     app.router.add_delete("/api/guild/{guild_id}/broadcaster/rewards/{reward_id}", delete_reward)
