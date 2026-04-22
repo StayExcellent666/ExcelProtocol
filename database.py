@@ -246,29 +246,6 @@ class Database:
         except Exception:
             pass  # Column already exists
 
-        # Migration: add trigger_type and hotkey_name to reward_triggers
-        try:
-            cursor.execute("ALTER TABLE reward_triggers ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'video'")
-            conn.commit()
-            logger.info("Migration: added trigger_type to reward_triggers")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE reward_triggers ADD COLUMN hotkey_name TEXT NOT NULL DEFAULT ''")
-            conn.commit()
-            logger.info("Migration: added hotkey_name to reward_triggers")
-        except Exception:
-            pass
-
-        # OBS WebSocket password per guild — stored for the overlay to use client-side
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS obs_settings (
-                guild_id     INTEGER PRIMARY KEY,
-                ws_password  TEXT NOT NULL DEFAULT '',
-                ws_port      INTEGER NOT NULL DEFAULT 4455
-            )
-        ''')
-
         # Custom chat commands per Twitch channel
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS twitch_commands (
@@ -1690,20 +1667,20 @@ class Database:
     def get_reward_triggers(self, guild_id: int) -> List[Dict]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT reward_id, reward_title, video_url, volume, trigger_type, hotkey_name FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ?", (guild_id,))
         rows = cursor.fetchall()
         conn.close()
-        return [{"reward_id": r[0], "reward_title": r[1], "video_url": r[2], "volume": r[3], "trigger_type": r[4] or "video", "hotkey_name": r[5] or ""} for r in rows]
+        return [{"reward_id": r[0], "reward_title": r[1], "video_url": r[2], "volume": r[3]} for r in rows]
 
     def get_reward_trigger(self, guild_id: int, reward_id: str) -> Optional[Dict]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT reward_id, reward_title, video_url, volume, trigger_type, hotkey_name FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
         row = cursor.fetchone()
         conn.close()
         if not row:
             return None
-        return {"reward_id": row[0], "reward_title": row[1], "video_url": row[2], "volume": row[3], "trigger_type": row[4] or "video", "hotkey_name": row[5] or ""}
+        return {"reward_id": row[0], "reward_title": row[1], "video_url": row[2], "volume": row[3]}
 
     def delete_reward_trigger(self, guild_id: int, reward_id: str):
         conn = self.get_connection()
@@ -1716,28 +1693,10 @@ class Database:
         """Get all triggers across all guilds — used for EventSub routing."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT guild_id, reward_id, reward_title, video_url, volume, trigger_type, hotkey_name FROM reward_triggers")
+        cursor.execute("SELECT guild_id, reward_id, reward_title, video_url, volume FROM reward_triggers")
         rows = cursor.fetchall()
         conn.close()
-        return [{"guild_id": r[0], "reward_id": r[1], "reward_title": r[2], "video_url": r[3], "volume": r[4], "trigger_type": r[5] or "video", "hotkey_name": r[6] or ""} for r in rows]
-
-    def get_obs_settings(self, guild_id: int) -> Dict:
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT ws_password, ws_port FROM obs_settings WHERE guild_id = ?", (guild_id,))
-        row = cursor.fetchone()
-        conn.close()
-        return {"ws_password": row[0] or "", "ws_port": row[1] or 4455} if row else {"ws_password": "", "ws_port": 4455}
-
-    def set_obs_settings(self, guild_id: int, ws_password: str, ws_port: int = 4455):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO obs_settings (guild_id, ws_password, ws_port) VALUES (?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET ws_password=excluded.ws_password, ws_port=excluded.ws_port",
-            (guild_id, ws_password, ws_port)
-        )
-        conn.commit()
-        conn.close()
+        return [{"guild_id": r[0], "reward_id": r[1], "reward_title": r[2], "video_url": r[3], "volume": r[4]} for r in rows]
 
     def get_overlay_volume(self, guild_id: int) -> int:
         """Get the saved overlay volume (0-100) for a guild."""
