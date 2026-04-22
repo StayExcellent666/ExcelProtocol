@@ -238,6 +238,14 @@ class Database:
         except Exception:
             pass  # Column already exists
 
+        # Migration: add overlay_volume to twitch_channels
+        try:
+            cursor.execute('ALTER TABLE twitch_channels ADD COLUMN overlay_volume INTEGER NOT NULL DEFAULT 100')
+            conn.commit()
+            logger.info("Migration: added overlay_volume to twitch_channels")
+        except Exception:
+            pass  # Column already exists
+
         # Migration: add trigger_type and hotkey_name to reward_triggers
         try:
             cursor.execute("ALTER TABLE reward_triggers ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'video'")
@@ -1727,6 +1735,26 @@ class Database:
         cursor.execute(
             "INSERT INTO obs_settings (guild_id, ws_password, ws_port) VALUES (?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET ws_password=excluded.ws_password, ws_port=excluded.ws_port",
             (guild_id, ws_password, ws_port)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_overlay_volume(self, guild_id: int) -> int:
+        """Get the saved overlay volume (0-100) for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT overlay_volume FROM twitch_channels WHERE guild_id = ?', (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else 100
+
+    def set_overlay_volume(self, guild_id: int, volume: int):
+        """Save the overlay volume (0-100) for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE twitch_channels SET overlay_volume = ? WHERE guild_id = ?',
+            (max(0, min(100, volume)), guild_id)
         )
         conn.commit()
         conn.close()
