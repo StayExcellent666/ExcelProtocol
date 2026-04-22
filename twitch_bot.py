@@ -34,6 +34,16 @@ class TwitchChatBot(commands.Bot):
                         await self.join_channels([channel_name])
                         logger.info(f"Joined Twitch channel: {channel_name}")
                         break
+                    except KeyError:
+                        # twitchio internal race condition — join likely succeeded, verify
+                        await _asyncio.sleep(1)
+                        if any(c.name.lower() == channel_name for c in self.connected_channels):
+                            logger.info(f"Joined Twitch channel: {channel_name} (KeyError suppressed)")
+                            break
+                        elif attempt < 2:
+                            await _asyncio.sleep(4)
+                        else:
+                            logger.error(f"Failed to join {channel_name} after 3 attempts")
                     except Exception as e:
                         if attempt < 2:
                             logger.debug(f"Join attempt {attempt+1} failed for {channel_name}, retrying...")
