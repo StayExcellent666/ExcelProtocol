@@ -105,6 +105,30 @@ async def push_skip_to_overlay(twitch_channel: str):
             conns.difference_update(dead)
     return pushed
 
+async def push_hotkey_to_overlay(twitch_channel: str, hotkey_name: str):
+    """Push a hotkey trigger to all overlay WebSockets for guilds linked to this Twitch channel."""
+    import json as _json
+    if not _bot_ref:
+        return False
+    guilds = _bot_ref.db.get_guilds_for_twitch_channel(twitch_channel)
+    if not guilds:
+        return False
+    payload = _json.dumps({"type": "hotkey", "hotkey_name": hotkey_name})
+    pushed = False
+    for g in guilds:
+        gid = str(g['guild_id'])
+        conns = _overlay_connections.get(gid, set())
+        dead = set()
+        for ws in conns:
+            try:
+                await ws.send_str(payload)
+                pushed = True
+            except Exception:
+                dead.add(ws)
+        if dead:
+            conns.difference_update(dead)
+    return pushed
+
 # EventSub message dedup: {message_id: received_at} — Twitch recommends deduping by message ID
 _eventsub_seen: dict = {}
 

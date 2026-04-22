@@ -91,6 +91,27 @@ class TwitchChatBot(commands.Bot):
                 logger.error(f"!skip overlay push failed for {channel_name}: {e}")
             return True
 
+        if command_name == "!hotkey":
+            if not is_mod:
+                return True
+            if not self.db.is_play_enabled(channel_name):
+                return True
+            hotkey_name = args.strip()
+            if not hotkey_name:
+                await message.channel.send("Usage: !hotkey <hotkey_name>")
+                return True
+            try:
+                from dashboard_server import push_hotkey_to_overlay
+                pushed = await push_hotkey_to_overlay(channel_name, hotkey_name)
+                if pushed:
+                    await message.channel.send(f"⌨️ Hotkey fired: {hotkey_name}")
+                else:
+                    await message.channel.send("❌ No OBS overlay connected.")
+            except Exception as e:
+                logger.error(f"!hotkey overlay push failed for {channel_name}: {e}")
+                await message.channel.send("❌ Could not push to overlay.")
+            return True
+
         if command_name == "!play":
             if not is_mod:
                 return True
@@ -158,7 +179,7 @@ class TwitchChatBot(commands.Bot):
             custom_cmds = self.db.get_twitch_commands(channel_name)
             builtin = "!uptime !game !title !viewers !so !commands"
             if self.db.is_play_enabled(channel_name):
-                builtin += " !play !stop !skip"
+                builtin += " !play !stop !skip !hotkey"
             if custom_cmds:
                 names = " ".join(c["command_name"] for c in custom_cmds)
                 await message.channel.send(f"Commands: {builtin} | Custom: {names}")
