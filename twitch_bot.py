@@ -21,7 +21,10 @@ class TwitchChatBot(commands.Bot):
         self._cooldowns: dict[str, dict[str, datetime]] = {}
 
     async def event_ready(self):
+        import asyncio as _asyncio
         logger.info(f"Twitch chat bot ready | Nick: {self.nick}")
+        # Small delay to let IRC fully stabilise before joining channels
+        await _asyncio.sleep(3)
         registered = self.db.get_all_twitch_channels()
         connected_names = [c.name.lower() for c in self.connected_channels]
         for row in registered:
@@ -30,6 +33,7 @@ class TwitchChatBot(commands.Bot):
                 try:
                     await self.join_channels([channel_name])
                     logger.info(f"Joined Twitch channel: {channel_name}")
+                    await _asyncio.sleep(0.5)  # stagger joins to avoid rate limits
                 except Exception as e:
                     logger.error(f"Failed to join {channel_name}: {e}")
 
