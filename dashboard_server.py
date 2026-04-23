@@ -3452,8 +3452,9 @@ def create_dashboard_app(bot=None):
     _bot_ref = bot
     app = web.Application(middlewares=[error_logging_middleware, auth_middleware])
 
-    app.router.add_get("/health",        health)
-    app.router.add_get("/companion/version", handle_companion_version)("/",              landing_page)
+    app.router.add_get("/health",            health)
+    app.router.add_get("/companion/version", handle_companion_version)
+    app.router.add_get("/",                   landing_page)
     app.router.add_get("/terms",         terms_page)
     app.router.add_get("/privacy",       privacy_page)
     app.router.add_get ("/auth/login",    auth_login)
