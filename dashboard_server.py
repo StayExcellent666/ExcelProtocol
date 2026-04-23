@@ -335,7 +335,7 @@ def _session_can_access_guild(session: dict, guild_id: str) -> bool:
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/twitch/callback", "/api/eventsub/callback")
-    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/auth/twitch/login"):
+    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/auth/twitch/login") or request.path.startswith("/companion"):
         return await handler(request)
 
     session = get_session(request)
