@@ -59,7 +59,9 @@ class TwitchNotifierBot(discord.Client):
                 from twitch_bot import TwitchChatBot
                 import twitch_chat_cog
 
-                registered_channels = [r['twitch_channel'] for r in self.db.get_all_twitch_channels()]
+                # Dedupe channels — same Twitch channel may appear in multiple guilds,
+                # passing it twice causes a KeyError in twitchio's join handler.
+                registered_channels = list({r['twitch_channel'] for r in self.db.get_all_twitch_channels()})
 
                 bot_user = await self.twitch.get_user(TWITCH_BOT_USERNAME)
                 if not bot_user:
