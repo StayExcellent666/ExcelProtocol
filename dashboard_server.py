@@ -3435,6 +3435,21 @@ async def auth_logout(request):
     return response
 
 
+
+# ── Companion: lightweight guild info (no auth required) ─────────────────────
+async def handle_companion_guild_info(request: web.Request) -> web.Response:
+    guild_id = request.match_info["guild_id"]
+    name = guild_id  # fallback
+    if _bot_ref:
+        try:
+            guild_obj = _bot_ref.get_guild(int(guild_id))
+            if guild_obj:
+                name = guild_obj.name
+        except Exception:
+            pass
+    return web.json_response({"guild_id": guild_id, "name": name})
+
+
 # ── Companion App ─────────────────────────────────────────────────────────────
 COMPANION_VERSION      = "1.0.0"
 COMPANION_DOWNLOAD_URL = "https://github.com/stayexcellent/excelprotocol/releases/download/companion-v1.0.0/ExcelProtocol-Companion.exe"
@@ -3453,7 +3468,8 @@ def create_dashboard_app(bot=None):
     app = web.Application(middlewares=[error_logging_middleware, auth_middleware])
 
     app.router.add_get("/health",            health)
-    app.router.add_get("/companion/version", handle_companion_version)
+    app.router.add_get("/companion/version",             handle_companion_version)
+    app.router.add_get("/companion/guild/{guild_id}",    handle_companion_guild_info)
     app.router.add_get("/",                   landing_page)
     app.router.add_get("/terms",         terms_page)
     app.router.add_get("/privacy",       privacy_page)
