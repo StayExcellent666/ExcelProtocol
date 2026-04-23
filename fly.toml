@@ -6,10 +6,6 @@ primary_region = "fra"
   source = "twitch_bot_data"
   destination = "/data"
 
-[restart]
-  policy = "always"
-  max_retries = 10
-
 # Expose port 8080 for the dashboard web server
 [[services]]
   internal_port = 8080
