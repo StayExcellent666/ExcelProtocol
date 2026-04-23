@@ -3435,6 +3435,17 @@ async def auth_logout(request):
     return response
 
 
+# ── Companion App ─────────────────────────────────────────────────────────────
+COMPANION_VERSION      = "1.0.0"
+COMPANION_DOWNLOAD_URL = "https://github.com/stayexcellent/excelprotocol/releases/download/companion-v1.0.0/ExcelProtocol-Companion.exe"
+
+async def handle_companion_version(request: web.Request) -> web.Response:
+    return web.json_response({
+        "version":      COMPANION_VERSION,
+        "download_url": COMPANION_DOWNLOAD_URL,
+    })
+
+
 # ── App Factory ───────────────────────────────────────────────────────────────
 def create_dashboard_app(bot=None):
     global _bot_ref
@@ -3442,7 +3453,7 @@ def create_dashboard_app(bot=None):
     app = web.Application(middlewares=[error_logging_middleware, auth_middleware])
 
     app.router.add_get("/health",        health)
-    app.router.add_get("/",              landing_page)
+    app.router.add_get("/companion/version", handle_companion_version)("/",              landing_page)
     app.router.add_get("/terms",         terms_page)
     app.router.add_get("/privacy",       privacy_page)
     app.router.add_get ("/auth/login",    auth_login)
