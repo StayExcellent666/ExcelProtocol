@@ -1815,18 +1815,37 @@ async def eventsub_callback(request):
                 if trigger_rows:
                     trigger = trigger_rows[0]
                     import json as _json
-                    payload = _json.dumps({
-                        "type": "play",
-                        "video_url": trigger["video_url"],
-                        "volume": trigger["volume"],
-                        "redeemer": redeemer,
-                    })
                     dead = set()
-                    for ws in _overlay_connections.get(guild_id, set()):
-                        try:
-                            await ws.send_str(payload)
-                        except Exception:
-                            dead.add(ws)
+                    # Send video trigger if set
+                    if trigger["video_url"]:
+                        payload = _json.dumps({
+                            "type": "play",
+                            "video_url": trigger["video_url"],
+                            "volume": trigger["volume"],
+                            "redeemer": redeemer,
+                        })
+                        for ws in _overlay_connections.get(guild_id, set()):
+                            try:
+                                await ws.send_str(payload)
+                            except Exception:
+                                dead.add(ws)
+                    # Send hotkey trigger if set and broadcaster is live
+                    if trigger.get("hotkey"):
+                        broadcaster_login_check = broadcaster_login
+                        is_live = _bot_ref and broadcaster_login_check in _bot_ref.live_streamers if _bot_ref else False
+                        if is_live:
+                            hotkey_payload = _json.dumps({
+                                "type": "hotkey",
+                                "hotkey_name": f"reward_{reward_id}",
+                                "hotkey_keys": trigger["hotkey"],
+                                "reward_title": trigger.get("reward_title", ""),
+                                "redeemer": redeemer,
+                            })
+                            for ws in _overlay_connections.get(guild_id, set()):
+                                try:
+                                    await ws.send_str(hotkey_payload)
+                                except Exception:
+                                    dead.add(ws)
                     if dead:
                         _overlay_connections.get(guild_id, set()).difference_update(dead)
 
@@ -2137,7 +2156,7 @@ async def get_broadcaster_info(request):
         logger.error(f"Error fetching rewards for guild {guild_id}: {e}")
 
     # Get existing triggers
-    triggers = await db_fetch("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+    triggers = await db_fetch("SELECT reward_id, reward_title, video_url, volume, hotkey FROM reward_triggers WHERE guild_id = ?", (guild_id,))
 
     return web.json_response({
         "connected": True,
@@ -2156,12 +2175,13 @@ async def upsert_reward_trigger(request):
     reward_title = body.get("reward_title", "").strip()
     video_url    = body.get("video_url", "").strip()
     volume       = float(body.get("volume", 1.0))
-    if not reward_id or not video_url:
-        raise web.HTTPBadRequest(reason="reward_id and video_url are required")
+    hotkey       = body.get("hotkey", None)  # e.g. "ctrl+alt+1" or null to clear
+    if not reward_id:
+        raise web.HTTPBadRequest(reason="reward_id is required")
     await db_execute(
-        "INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume) VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(guild_id, reward_id) DO UPDATE SET reward_title=excluded.reward_title, video_url=excluded.video_url, volume=excluded.volume",
-        (guild_id, reward_id, reward_title, video_url, volume)
+        "INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume, hotkey) VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(guild_id, reward_id) DO UPDATE SET reward_title=excluded.reward_title, video_url=excluded.video_url, volume=excluded.volume, hotkey=excluded.hotkey",
+        (guild_id, reward_id, reward_title, video_url, volume, hotkey)
     )
     return web.json_response({"ok": True})
 
@@ -3450,9 +3470,28 @@ async def handle_companion_guild_info(request: web.Request) -> web.Response:
     return web.json_response({"guild_id": guild_id, "name": name})
 
 
+# ── Companion: hotkey mappings for a guild ────────────────────────────────────
+async def handle_companion_hotkeys(request: web.Request) -> web.Response:
+    """Returns all reward hotkey mappings for a guild. No auth required."""
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch(
+        "SELECT reward_id, reward_title, hotkey FROM reward_triggers WHERE guild_id = ? AND hotkey IS NOT NULL AND hotkey != ''",
+        (guild_id,)
+    )
+    mappings = [
+        {
+            "hotkey_name": f"reward_{r['reward_id']}",
+            "reward_title": r["reward_title"],
+            "hotkey_keys": r["hotkey"],
+        }
+        for r in rows
+    ]
+    return web.json_response({"guild_id": guild_id, "mappings": mappings})
+
+
 # ── Companion App ─────────────────────────────────────────────────────────────
-COMPANION_VERSION      = "1.0.0"
-COMPANION_DOWNLOAD_URL = "https://github.com/stayexcellent/excelprotocol/releases/download/companion-v1.0.0/ExcelProtocol-Companion.exe"
+COMPANION_VERSION      = "1.0.1"
+COMPANION_DOWNLOAD_URL = "https://github.com/stayexcellent/excelprotocol/releases/download/companion-v1.0.1/ExcelProtocol-Companion.exe"
 
 async def handle_companion_version(request: web.Request) -> web.Response:
     return web.json_response({
@@ -3470,6 +3509,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/health",            health)
     app.router.add_get("/companion/version",             handle_companion_version)
     app.router.add_get("/companion/guild/{guild_id}",    handle_companion_guild_info)
+    app.router.add_get("/companion/hotkeys/{guild_id}", handle_companion_hotkeys)
     app.router.add_get("/",                   landing_page)
     app.router.add_get("/terms",         terms_page)
     app.router.add_get("/privacy",       privacy_page)

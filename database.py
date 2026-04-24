@@ -206,7 +206,7 @@ class Database:
             ON stream_events(guild_id, streamer_name)
         ''')
 
-        # Global stream events — one row per stream session regardless of server count
+        # Global stream events -- one row per stream session regardless of server count
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS global_stream_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,7 +218,7 @@ class Database:
         ''')
 
         # ----------------------------------------------------------------
-        # Twitch chat bot tables (new — existing tables untouched)
+        # Twitch chat bot tables (new -- existing tables untouched)
         # ----------------------------------------------------------------
 
         # Which Twitch channel each Discord guild is linked to
@@ -354,20 +354,30 @@ class Database:
             )
         ''')
 
-        # Video triggers — links a Twitch reward_id to a video URL
+        # Video triggers -- links a Twitch reward_id to a video URL
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS reward_triggers (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id   INTEGER NOT NULL,
                 reward_id  TEXT NOT NULL,
                 reward_title TEXT NOT NULL DEFAULT \'\',
-                video_url  TEXT NOT NULL,
+                video_url  TEXT NOT NULL DEFAULT \'\',
                 volume     REAL NOT NULL DEFAULT 1.0,
+                hotkey     TEXT,
                 UNIQUE(guild_id, reward_id)
             )
         ''')
 
-        # Permission issues — written by bot's periodic check, read by dashboard
+
+        # Migrate: add hotkey column to reward_triggers if missing
+        try:
+            cursor.execute("ALTER TABLE reward_triggers ADD COLUMN hotkey TEXT")
+        except Exception:
+            pass  # Column already exists
+
+        # Migrate: make video_url nullable (was NOT NULL)
+        # SQLite can't ALTER column constraints, but new rows will use DEFAULT ''
+        # Permission issues -- written by bot's periodic check, read by dashboard
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS permission_issues (
                 guild_id   INTEGER NOT NULL,
@@ -378,7 +388,7 @@ class Database:
             )
         ''')
 
-        # Stat channels — voice channels whose names are updated with live member counts
+        # Stat channels -- voice channels whose names are updated with live member counts
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS stat_channels (
                 guild_id    INTEGER NOT NULL,
@@ -389,7 +399,7 @@ class Database:
             )
         ''')
 
-        # Unresolvable streamers — accounts that Twitch no longer recognises (banned/deleted/renamed)
+        # Unresolvable streamers -- accounts that Twitch no longer recognises (banned/deleted/renamed)
         # Cleared and repopulated on every EventSub sync
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS unresolvable_streamers (
@@ -400,7 +410,7 @@ class Database:
             )
         ''')
 
-        # VC Creator — "Join to Create" voice channel feature
+        # VC Creator -- "Join to Create" voice channel feature
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS vc_settings (
                 guild_id           INTEGER PRIMARY KEY,
@@ -419,7 +429,7 @@ class Database:
             )
         ''')
 
-        # Safety settings — new account filter config per guild
+        # Safety settings -- new account filter config per guild
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS safety_settings (
                 guild_id            INTEGER PRIMARY KEY,
@@ -433,7 +443,7 @@ class Database:
             )
         ''')
 
-        # Safety kick log — record of every kick/ban action
+        # Safety kick log -- record of every kick/ban action
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS safety_kicks (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -554,7 +564,7 @@ class Database:
     # ----------------------------------------------------------------
 
     def clear_unresolvable_streamers(self):
-        """Wipe all unresolvable streamer records — called at start of each EventSub sync."""
+        """Wipe all unresolvable streamer records -- called at start of each EventSub sync."""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('DELETE FROM unresolvable_streamers')
@@ -730,7 +740,7 @@ class Database:
         """
         Add a streamer to monitor for a guild.
         custom_channel_id: if set, this streamer always posts to this channel regardless of default.
-        twitch_user_id: Twitch user ID — stored so subscriptions survive renames.
+        twitch_user_id: Twitch user ID -- stored so subscriptions survive renames.
         Returns True if added, False if already exists
         """
         conn = self.get_connection()
@@ -1254,7 +1264,7 @@ class Database:
             (guild_id, streamer_name.lower())
         )
 
-        # Global event — one per stream session per day (UNIQUE constraint deduplicates)
+        # Global event -- one per stream session per day (UNIQUE constraint deduplicates)
         cursor.execute('''
             INSERT OR IGNORE INTO global_stream_events (streamer_name, stream_date)
             VALUES (?, date('now'))
@@ -1281,7 +1291,7 @@ class Database:
         return [{'streamer_name': r[0], 'stream_count': r[1]} for r in rows]
 
     def get_global_leaderboard(self, limit: int = 15) -> list:
-        """Get top streamers globally this month — counts unique stream sessions only"""
+        """Get top streamers globally this month -- counts unique stream sessions only"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
@@ -1650,37 +1660,38 @@ class Database:
 
     # ── Reward triggers ──────────────────────────────────────────────────────────
 
-    def set_reward_trigger(self, guild_id: int, reward_id: str, reward_title: str, video_url: str, volume: float = 1.0):
+    def set_reward_trigger(self, guild_id: int, reward_id: str, reward_title: str, video_url: str, volume: float = 1.0, hotkey: str = None):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume, hotkey)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, reward_id) DO UPDATE SET
                 reward_title = excluded.reward_title,
                 video_url    = excluded.video_url,
-                volume       = excluded.volume
-        """, (guild_id, reward_id, reward_title, video_url, volume))
+                volume       = excluded.volume,
+                hotkey       = excluded.hotkey
+        """, (guild_id, reward_id, reward_title, video_url, volume, hotkey))
         conn.commit()
         conn.close()
 
     def get_reward_triggers(self, guild_id: int) -> List[Dict]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey FROM reward_triggers WHERE guild_id = ?", (guild_id,))
         rows = cursor.fetchall()
         conn.close()
-        return [{"reward_id": r[0], "reward_title": r[1], "video_url": r[2], "volume": r[3]} for r in rows]
+        return [{"reward_id": r[0], "reward_title": r[1], "video_url": r[2], "volume": r[3], "hotkey": r[4]} for r in rows]
 
     def get_reward_trigger(self, guild_id: int, reward_id: str) -> Optional[Dict]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
         row = cursor.fetchone()
         conn.close()
         if not row:
             return None
-        return {"reward_id": row[0], "reward_title": row[1], "video_url": row[2], "volume": row[3]}
+        return {"reward_id": row[0], "reward_title": row[1], "video_url": row[2], "volume": row[3], "hotkey": row[4]}
 
     def delete_reward_trigger(self, guild_id: int, reward_id: str):
         conn = self.get_connection()
@@ -1690,13 +1701,13 @@ class Database:
         conn.close()
 
     def get_all_reward_triggers(self) -> List[Dict]:
-        """Get all triggers across all guilds — used for EventSub routing."""
+        """Get all triggers across all guilds -- used for EventSub routing."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT guild_id, reward_id, reward_title, video_url, volume FROM reward_triggers")
+        cursor.execute("SELECT guild_id, reward_id, reward_title, video_url, volume, hotkey FROM reward_triggers")
         rows = cursor.fetchall()
         conn.close()
-        return [{"guild_id": r[0], "reward_id": r[1], "reward_title": r[2], "video_url": r[3], "volume": r[4]} for r in rows]
+        return [{"guild_id": r[0], "reward_id": r[1], "reward_title": r[2], "video_url": r[3], "volume": r[4], "hotkey": r[5]} for r in rows]
 
     def get_overlay_volume(self, guild_id: int) -> int:
         """Get the saved overlay volume (0-100) for a guild."""
