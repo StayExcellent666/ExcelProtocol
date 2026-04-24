@@ -3491,7 +3491,7 @@ async def handle_companion_hotkeys(request: web.Request) -> web.Response:
 
 # ── Companion App ─────────────────────────────────────────────────────────────
 COMPANION_VERSION      = "1.0.1"
-COMPANION_DOWNLOAD_URL = "https://github.com/stayexcellent/excelprotocol/releases/download/companion-v1.0.1/ExcelProtocol-Companion.exe"
+COMPANION_DOWNLOAD_URL = "https://github.com/StayExcellent666/ExcelProtocol/releases/download/companion-v1.0.1/ExcelProtocol-Companion.exe"
 
 async def handle_companion_version(request: web.Request) -> web.Response:
     return web.json_response({
