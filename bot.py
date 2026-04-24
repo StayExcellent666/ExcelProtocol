@@ -1,7 +1,7 @@
 # ExcelProtocol — Copyright (c) 2026 stayexcellent. All rights reserved.
 # Proprietary software. Viewing permitted; use, copying, or self-hosting is not.
 # Unauthorized use is a violation of the ExcelProtocol Proprietary License.
-# .EP-ORIGIN:bot:stayexcellent:2026
+# EP-ORIGIN:bot:stayexcellent:2026
 
 import discord
 from discord import app_commands
