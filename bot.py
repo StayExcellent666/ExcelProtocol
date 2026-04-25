@@ -1272,13 +1272,13 @@ class TwitchNotifierBot(discord.Client):
         statuses = [
             discord.Activity(
                 type=discord.ActivityType.watching,
-                name="Dashboard available now!"
+                name="watching your community grow! 🌱"
             ),
             discord.Activity(
                 type=discord.ActivityType.listening,
-                name="Twitch stream alerts 📡"
+                name="listening to stream alerts across your servers 📡"
             ),
-            discord.Game(name="across multiple servers 🎮"),
+            discord.Game(name="playing excelprotocol.fly.dev 🎮"),
         ]
         current = self.rotate_status.current_loop % len(statuses)
         await self.change_presence(activity=statuses[current])
