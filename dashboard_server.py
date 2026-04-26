@@ -1647,7 +1647,7 @@ async def twitch_broadcaster_login(request):
         "client_id":    TWITCH_CLIENT_ID,
         "redirect_uri": TWITCH_REDIRECT_URI,
         "response_type": "code",
-        "scope":        "channel:read:redemptions channel:manage:redemptions",
+        "scope":        "channel:read:redemptions channel:manage:redemptions moderator:manage:chat_messages",
         "state":        state,
         "force_verify": "true",
     })
