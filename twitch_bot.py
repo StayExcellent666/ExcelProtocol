@@ -55,6 +55,11 @@ class TwitchChatBot(commands.Bot):
                             logger.error(f"Failed to join {channel_name} after 3 attempts: {e}")
                 await _asyncio.sleep(0.5)
 
+    async def event_raw_data(self, data: str):
+        """Log all raw IRC data to debug echo messages."""
+        if self.nick and f':{self.nick}!' in data.lower() and 'PRIVMSG' in data:
+            logger.info(f"RAW bot message: {data[:200]}")
+
     async def event_message(self, message):
         if message.echo:
             if message.content in self._pending_deletes:
