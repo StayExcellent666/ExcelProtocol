@@ -292,34 +292,27 @@ class TwitchChatBot(commands.Bot):
 
 
     async def _delete_msg(self, channel_name: str, message_id: str):
-        """Delete a chat message using the broadcaster's OAuth token from DB."""
+        """Delete a chat message using the bot's IRC OAuth token."""
         logger.info(f"_delete_msg called: channel={channel_name} msg_id={message_id}")
         try:
             import aiohttp
             from config import TWITCH_CLIENT_ID
 
-            # Look up guild_id from channel name, then get broadcaster token
-            all_channels = self.db.get_all_twitch_channels()
-            guild_id = None
-            for ch in all_channels:
-                if ch["twitch_channel"].lower() == channel_name.lower():
-                    guild_id = ch["guild_id"]
-                    break
-            if not guild_id:
-                logger.error(f"Delete: no guild found for channel {channel_name}")
-                return
+            # Use the bot's own IRC token — it's a user token for the bot account
+            # twitchio stores it on the http client
+            bot_token = self._http.token
 
-            row = self.db.get_broadcaster_token(guild_id)
-            if not row:
-                logger.error(f"Delete: no broadcaster token for guild {guild_id}")
+            # Get broadcaster user ID
+            broadcaster_user = await self.twitch_api.get_user(channel_name)
+            if not broadcaster_user:
+                logger.error(f"Delete: could not find user {channel_name}")
                 return
-
-            access_token   = row["access_token"]
-            broadcaster_id = row["twitch_user_id"]
+            broadcaster_id = broadcaster_user["id"]
 
             # Get bot user ID
             bot_user = await self.twitch_api.get_user(self.nick)
             if not bot_user:
+                logger.error(f"Delete: could not find bot user {self.nick}")
                 return
             moderator_id = bot_user["id"]
 
@@ -327,7 +320,7 @@ class TwitchChatBot(commands.Bot):
                 async with session.delete(
                     "https://api.twitch.tv/helix/moderation/chat",
                     headers={
-                        "Authorization": f"Bearer {access_token}",
+                        "Authorization": f"Bearer {bot_token}",
                         "Client-Id": TWITCH_CLIENT_ID,
                     },
                     params={
@@ -338,7 +331,9 @@ class TwitchChatBot(commands.Bot):
                 ) as resp:
                     if resp.status not in (200, 204):
                         text = await resp.text()
-                        logger.error(f"Delete message FAILED {resp.status}: {text} | broadcaster={broadcaster_id} mod={moderator_id} msg={message_id}")
+                        logger.error(f"Delete FAILED {resp.status}: {text} | token_prefix={bot_token[:8] if bot_token else None}")
+                    else:
+                        logger.info(f"Delete OK: {message_id}")
         except Exception as e:
             logger.error(f"Delete exception: {e}")
 
