@@ -19,6 +19,8 @@ class TwitchChatBot(commands.Bot):
         self.db = db
         self.twitch_api = twitch_api
         self._cooldowns: dict[str, dict[str, datetime]] = {}
+        # Tracks bot responses that need to be deleted: {content: (channel_name, delete_after_secs)}
+        self._pending_deletes: dict[str, tuple[str, int]] = {}
 
     async def event_ready(self):
         import asyncio as _asyncio
@@ -54,6 +56,11 @@ class TwitchChatBot(commands.Bot):
 
     async def event_message(self, message):
         if message.echo:
+            # This is the bot's own message — check if we need to delete it
+            if message.content in self._pending_deletes:
+                channel_name, delay = self._pending_deletes.pop(message.content)
+                import asyncio
+                asyncio.create_task(self._delete_after(channel_name, message.id, delay))
             return
         if not message.content or not message.content.startswith("!"):
             return
@@ -335,15 +342,19 @@ class TwitchChatBot(commands.Bot):
 
 
     async def _send_and_delete(self, channel, channel_name: str, text: str, delay: int = 3):
-        """Send a message then delete it after `delay` seconds."""
-        import asyncio
+        """Send a message then delete it after `delay` seconds.
+        Registers content in _pending_deletes so event_message can capture the ID when echo fires."""
         try:
-            msg = await channel.send(text)
-            if msg and hasattr(msg, 'id'):
-                await asyncio.sleep(delay)
-                await self._delete_msg(channel_name, msg.id)
+            self._pending_deletes[text] = (channel_name, delay)
+            await channel.send(text)
         except Exception as e:
+            self._pending_deletes.pop(text, None)
             logger.debug(f"_send_and_delete error: {e}")
+
+    async def _delete_after(self, channel_name: str, message_id: str, delay: int):
+        import asyncio
+        await asyncio.sleep(delay)
+        await self._delete_msg(channel_name, message_id)
 
     async def join_channel(self, channel_name: str):
         try:
