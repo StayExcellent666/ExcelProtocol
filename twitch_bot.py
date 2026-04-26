@@ -56,7 +56,7 @@ class TwitchChatBot(commands.Bot):
 
     async def event_message(self, message):
         if message.echo:
-            # This is the bot's own message — check if we need to delete it
+            logger.info(f"Echo msg: content={repr(message.content)} id={message.id} pending={list(self._pending_deletes.keys())}")
             if message.content in self._pending_deletes:
                 channel_name, delay = self._pending_deletes.pop(message.content)
                 import asyncio
