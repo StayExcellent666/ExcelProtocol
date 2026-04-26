@@ -1,3 +1,4 @@
+import asyncio
 from twitchio.ext import commands 
 import logging
 from datetime import datetime
@@ -108,7 +109,6 @@ class TwitchChatBot(commands.Bot):
             try:
                 from dashboard_server import push_stop_to_overlay
                 await push_stop_to_overlay(channel_name)
-                import asyncio
                 asyncio.create_task(self._send_and_delete(message.channel, channel_name, "⏹ Stopped."))
             except Exception as e:
                 logger.error(f"!stop overlay push failed for {channel_name}: {e}")
@@ -125,7 +125,6 @@ class TwitchChatBot(commands.Bot):
                 pass
             try:
                 from dashboard_server import push_skip_to_overlay
-                import asyncio
                 pushed = await push_skip_to_overlay(channel_name)
                 if pushed:
                     asyncio.create_task(self._send_and_delete(message.channel, channel_name, "⏭ Skipped."))
@@ -150,7 +149,6 @@ class TwitchChatBot(commands.Bot):
                 pass
             try:
                 from dashboard_server import push_play_to_overlay
-                import asyncio
                 pushed = await push_play_to_overlay(channel_name, url, message.author.name)
                 if pushed:
                     asyncio.create_task(self._send_and_delete(message.channel, channel_name, "▶ Added to queue PogChamp"))
@@ -360,7 +358,6 @@ class TwitchChatBot(commands.Bot):
             logger.debug(f"_send_and_delete error: {e}")
 
     async def _delete_after(self, channel_name: str, message_id: str, delay: int):
-        import asyncio
         await asyncio.sleep(delay)
         await self._delete_msg(channel_name, message_id)
 
