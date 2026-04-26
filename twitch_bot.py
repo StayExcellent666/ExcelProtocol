@@ -87,14 +87,14 @@ class TwitchChatBot(commands.Bot):
             if not self.db.is_play_enabled(channel_name):
                 return True
             try:
-                await message.delete()
+                await self._delete_msg(channel_name, message.id)
             except Exception:
                 pass
             try:
                 from dashboard_server import push_stop_to_overlay
                 await push_stop_to_overlay(channel_name)
                 import asyncio
-                asyncio.create_task(self._send_and_delete(message.channel, "⏹ Stopped."))
+                asyncio.create_task(self._send_and_delete(message.channel, channel_name, "⏹ Stopped."))
             except Exception as e:
                 logger.error(f"!stop overlay push failed for {channel_name}: {e}")
             return True
@@ -105,7 +105,7 @@ class TwitchChatBot(commands.Bot):
             if not self.db.is_play_enabled(channel_name):
                 return True
             try:
-                await message.delete()
+                await self._delete_msg(channel_name, message.id)
             except Exception:
                 pass
             try:
@@ -113,9 +113,9 @@ class TwitchChatBot(commands.Bot):
                 import asyncio
                 pushed = await push_skip_to_overlay(channel_name)
                 if pushed:
-                    asyncio.create_task(self._send_and_delete(message.channel, "⏭ Skipped."))
+                    asyncio.create_task(self._send_and_delete(message.channel, channel_name, "⏭ Skipped."))
                 else:
-                    asyncio.create_task(self._send_and_delete(message.channel, "❌ No OBS overlay connected."))
+                    asyncio.create_task(self._send_and_delete(message.channel, channel_name, "❌ No OBS overlay connected."))
             except Exception as e:
                 logger.error(f"!skip overlay push failed for {channel_name}: {e}")
             return True
@@ -127,10 +127,10 @@ class TwitchChatBot(commands.Bot):
                 return True
             url = args.strip()
             if not url:
-                asyncio.create_task(self._send_and_delete(message.channel, "Usage: !play <youtube_url>"))
+                asyncio.create_task(self._send_and_delete(message.channel, channel_name, "Usage: !play <youtube_url>"))
                 return True
             try:
-                await message.delete()
+                await self._delete_msg(channel_name, message.id)
             except Exception:
                 pass
             try:
@@ -138,12 +138,12 @@ class TwitchChatBot(commands.Bot):
                 import asyncio
                 pushed = await push_play_to_overlay(channel_name, url, message.author.name)
                 if pushed:
-                    asyncio.create_task(self._send_and_delete(message.channel, "▶ Added to queue PogChamp"))
+                    asyncio.create_task(self._send_and_delete(message.channel, channel_name, "▶ Added to queue PogChamp"))
                 else:
-                    asyncio.create_task(self._send_and_delete(message.channel, "❌ No OBS overlay connected — make sure the browser source is open."))
+                    asyncio.create_task(self._send_and_delete(message.channel, channel_name, "❌ No OBS overlay connected — make sure the browser source is open."))
             except Exception as e:
                 logger.error(f"!play overlay push failed for {channel_name}: {e}")
-                asyncio.create_task(self._send_and_delete(message.channel, "❌ Could not push to overlay."))
+                asyncio.create_task(self._send_and_delete(message.channel, channel_name, "❌ Could not push to overlay."))
             return True
 
         if command_name == "!uptime":
@@ -290,15 +290,33 @@ class TwitchChatBot(commands.Bot):
         channel_cooldowns[command] = now
         return True
 
-    async def _send_and_delete(self, channel, text: str, delay: int = 3):
+    async def _delete_msg(self, channel_name: str, message_id: str):
+        """Delete a message using twitchio's HTTP client."""
+        try:
+            # Get broadcaster and moderator IDs
+            users = await self.fetch_users(names=[channel_name])
+            broadcaster_id = str(users[0].id) if users else None
+            mod_users = await self.fetch_users(names=[self.nick])
+            mod_id = str(mod_users[0].id) if mod_users else None
+            if broadcaster_id and mod_id:
+                await self._http.delete_chat_message(
+                    token=self._connection._token,
+                    broadcaster_id=broadcaster_id,
+                    moderator_id=mod_id,
+                    message_id=message_id,
+                )
+        except Exception as e:
+            logger.debug(f"Could not delete message: {e}")
+
+    async def _send_and_delete(self, channel, channel_name: str, text: str, delay: int = 3):
         """Send a message then delete it after `delay` seconds."""
         import asyncio
         try:
             msg = await channel.send(text)
             await asyncio.sleep(delay)
-            await msg.delete()
-        except Exception:
-            pass
+            await self._delete_msg(channel_name, msg.id)
+        except Exception as e:
+            logger.debug(f"_send_and_delete error: {e}")
 
     async def join_channel(self, channel_name: str):
         try:
