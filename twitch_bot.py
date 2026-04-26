@@ -290,14 +290,23 @@ class TwitchChatBot(commands.Bot):
         channel_cooldowns[command] = now
         return True
 
+
     async def _delete_msg(self, channel_name: str, message_id: str):
-        """Delete a message by sending /delete via IRC."""
+        """Delete a chat message using twitchio v2 HTTP client."""
         try:
-            channel = self.get_channel(channel_name)
-            if channel:
-                await channel.send(f"/delete {message_id}")
+            # Fetch broadcaster and bot user IDs
+            users = await self.fetch_users(names=[channel_name, self.nick])
+            broadcaster = next((u for u in users if u.name.lower() == channel_name.lower()), None)
+            moderator  = next((u for u in users if u.name.lower() == self.nick.lower()), None)
+            if broadcaster and moderator:
+                await self._http.delete_chat_messages(
+                    token=self._http.token,
+                    broadcaster_id=str(broadcaster.id),
+                    moderator_id=str(moderator.id),
+                    message_id=message_id,
+                )
         except Exception as e:
-            logger.debug(f"Could not delete message: {e}")
+            logger.debug(f"Could not delete message {message_id}: {e}")
 
 
     async def _send_and_delete(self, channel, channel_name: str, text: str, delay: int = 3):
