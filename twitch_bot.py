@@ -94,7 +94,7 @@ class TwitchChatBot(commands.Bot):
             try:
                 from dashboard_server import push_stop_to_overlay
                 await push_stop_to_overlay(channel_name)
-                asyncio.create_task(self._send_and_delete(message.channel, channel_name, "⏹ Stopped."))
+                await message.channel.send("⏹ Stopped.")
             except Exception as e:
                 logger.error(f"!stop overlay push failed for {channel_name}: {e}")
             return True
@@ -112,9 +112,9 @@ class TwitchChatBot(commands.Bot):
                 from dashboard_server import push_skip_to_overlay
                 pushed = await push_skip_to_overlay(channel_name)
                 if pushed:
-                    asyncio.create_task(self._send_and_delete(message.channel, channel_name, "⏭ Skipped."))
+                    await message.channel.send("⏭ Skipped.")
                 else:
-                    asyncio.create_task(self._send_and_delete(message.channel, channel_name, "❌ No OBS overlay connected."))
+                    await message.channel.send("❌ No OBS overlay connected.")
             except Exception as e:
                 logger.error(f"!skip overlay push failed for {channel_name}: {e}")
             return True
@@ -126,7 +126,7 @@ class TwitchChatBot(commands.Bot):
                 return True
             url = args.strip()
             if not url:
-                asyncio.create_task(self._send_and_delete(message.channel, channel_name, "Usage: !play <youtube_url>"))
+                await message.channel.send("Usage: !play <youtube_url>")
                 return True
             try:
                 await self._delete_msg(channel_name, message.id)
@@ -136,12 +136,12 @@ class TwitchChatBot(commands.Bot):
                 from dashboard_server import push_play_to_overlay
                 pushed = await push_play_to_overlay(channel_name, url, message.author.name)
                 if pushed:
-                    asyncio.create_task(self._send_and_delete(message.channel, channel_name, "▶ Added to queue PogChamp"))
+                    await message.channel.send("▶ Added to queue PogChamp")
                 else:
-                    asyncio.create_task(self._send_and_delete(message.channel, channel_name, "❌ No OBS overlay connected — make sure the browser source is open."))
+                    await message.channel.send("❌ No OBS overlay connected — make sure the browser source is open.")
             except Exception as e:
                 logger.error(f"!play overlay push failed for {channel_name}: {e}")
-                asyncio.create_task(self._send_and_delete(message.channel, channel_name, "❌ Could not push to overlay."))
+                await message.channel.send("❌ Could not push to overlay.")
             return True
 
         if command_name == "!uptime":
@@ -333,49 +333,11 @@ class TwitchChatBot(commands.Bot):
 
 
     async def _send_and_delete(self, channel, channel_name: str, text: str, delay: int = 3):
-        """Send message, wait, then find and delete it via Twitch API."""
-        import aiohttp
-        from config import TWITCH_CLIENT_ID
+        """Send a response message — bot responses are not deleted (no API support)."""
         try:
             await channel.send(text)
-            await asyncio.sleep(delay)
-
-            # Look up guild and broadcaster token
-            all_channels = self.db.get_all_twitch_channels()
-            guild_id = next((ch["guild_id"] for ch in all_channels
-                             if ch["twitch_channel"].lower() == channel_name.lower()), None)
-            if not guild_id:
-                return
-            row = self.db.get_broadcaster_token(guild_id)
-            if not row:
-                return
-
-            access_token   = row["access_token"]
-            broadcaster_id = row["twitch_user_id"]
-
-            # Find the bot's recent message in chat history
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    "https://api.twitch.tv/helix/chat/messages",
-                    headers={
-                        "Authorization": f"Bearer {access_token}",
-                        "Client-Id": TWITCH_CLIENT_ID,
-                    },
-                    params={"broadcaster_id": broadcaster_id, "first": 10}
-                ) as resp:
-                    if resp.status != 200:
-                        return
-                    data = await resp.json()
-
-            # Find our message by content and bot username
-            bot_nick = self.nick.lower()
-            for msg in data.get("data", []):
-                if (msg.get("chatter_login","").lower() == bot_nick and
-                        msg.get("message", {}).get("text","") == text):
-                    await self._delete_msg(channel_name, msg["message_id"])
-                    return
         except Exception as e:
-            logger.debug(f"_send_and_delete error: {e}")
+            logger.debug(f"send error: {e}")
 
 
     async def join_channel(self, channel_name: str):
