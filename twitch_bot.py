@@ -292,19 +292,52 @@ class TwitchChatBot(commands.Bot):
 
 
     async def _delete_msg(self, channel_name: str, message_id: str):
-        """Delete a chat message using twitchio v2 HTTP client."""
+        """Delete a chat message using the broadcaster's OAuth token from DB."""
         try:
-            # Fetch broadcaster and bot user IDs
-            users = await self.fetch_users(names=[channel_name, self.nick])
-            broadcaster = next((u for u in users if u.name.lower() == channel_name.lower()), None)
-            moderator  = next((u for u in users if u.name.lower() == self.nick.lower()), None)
-            if broadcaster and moderator:
-                await self._http.delete_chat_messages(
-                    token=self._http.token,
-                    broadcaster_id=str(broadcaster.id),
-                    moderator_id=str(moderator.id),
-                    message_id=message_id,
-                )
+            import aiohttp
+            from config import TWITCH_CLIENT_ID
+
+            # Look up guild_id from channel name, then get broadcaster token
+            all_channels = self.db.get_all_twitch_channels()
+            guild_id = None
+            for ch in all_channels:
+                if ch["twitch_channel"].lower() == channel_name.lower():
+                    guild_id = ch["guild_id"]
+                    break
+            if not guild_id:
+                logger.debug(f"No guild found for channel {channel_name}")
+                return
+
+            row = self.db.get_broadcaster_token(guild_id)
+            if not row:
+                logger.debug(f"No broadcaster token for guild {guild_id}, cannot delete message")
+                return
+
+            access_token   = row["access_token"]
+            broadcaster_id = row["twitch_user_id"]
+
+            # Get bot user ID
+            bot_user = await self.twitch_api.get_user(self.nick)
+            if not bot_user:
+                return
+            moderator_id = bot_user["id"]
+
+            async with aiohttp.ClientSession() as session:
+                async with session.delete(
+                    "https://api.twitch.tv/helix/moderation/chat",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Client-Id": TWITCH_CLIENT_ID,
+                    },
+                    params={
+                        "broadcaster_id": broadcaster_id,
+                        "moderator_id":   moderator_id,
+                        "message_id":     message_id,
+                    }
+                ) as resp:
+                    if resp.status not in (200, 204):
+                        text = await resp.text()
+                        logger.debug(f"Delete message failed {resp.status}: {text}")
         except Exception as e:
             logger.debug(f"Could not delete message {message_id}: {e}")
 
