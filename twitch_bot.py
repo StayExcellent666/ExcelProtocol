@@ -292,48 +292,44 @@ class TwitchChatBot(commands.Bot):
 
 
     async def _delete_msg(self, channel_name: str, message_id: str):
-        """Delete a chat message using the bot's IRC OAuth token."""
-        logger.info(f"_delete_msg called: channel={channel_name} msg_id={message_id}")
+        """Delete a chat message using the broadcaster's OAuth token — broadcaster can delete any message."""
         try:
             import aiohttp
             from config import TWITCH_CLIENT_ID
 
-            # Use the bot's own IRC token — it's a user token for the bot account
-            # twitchio stores it on the http client
-            bot_token = self._http.token
-
-            # Get broadcaster user ID
-            broadcaster_user = await self.twitch_api.get_user(channel_name)
-            if not broadcaster_user:
-                logger.error(f"Delete: could not find user {channel_name}")
+            # Look up guild_id from channel name
+            all_channels = self.db.get_all_twitch_channels()
+            guild_id = next((ch["guild_id"] for ch in all_channels
+                             if ch["twitch_channel"].lower() == channel_name.lower()), None)
+            if not guild_id:
                 return
-            broadcaster_id = broadcaster_user["id"]
 
-            # Get bot user ID
-            bot_user = await self.twitch_api.get_user(self.nick)
-            if not bot_user:
-                logger.error(f"Delete: could not find bot user {self.nick}")
+            # Get broadcaster token — has full delete permissions in own channel
+            row = self.db.get_broadcaster_token(guild_id)
+            if not row:
                 return
-            moderator_id = bot_user["id"]
+
+            access_token   = row["access_token"]
+            broadcaster_id = row["twitch_user_id"]
 
             async with aiohttp.ClientSession() as session:
                 async with session.delete(
                     "https://api.twitch.tv/helix/moderation/chat",
                     headers={
-                        "Authorization": f"Bearer {bot_token}",
+                        "Authorization": f"Bearer {access_token}",
                         "Client-Id": TWITCH_CLIENT_ID,
                     },
                     params={
                         "broadcaster_id": broadcaster_id,
-                        "moderator_id":   moderator_id,
+                        "moderator_id":   broadcaster_id,  # broadcaster is their own moderator
                         "message_id":     message_id,
                     }
                 ) as resp:
                     if resp.status not in (200, 204):
                         text = await resp.text()
-                        logger.error(f"Delete FAILED {resp.status}: {text} | token_prefix={bot_token[:8] if bot_token else None}")
+                        logger.error(f"Delete FAILED {resp.status}: {text}")
                     else:
-                        logger.info(f"Delete OK: {message_id}")
+                        logger.debug(f"Delete OK: {message_id}")
         except Exception as e:
             logger.error(f"Delete exception: {e}")
 
