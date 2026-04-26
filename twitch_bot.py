@@ -293,6 +293,7 @@ class TwitchChatBot(commands.Bot):
 
     async def _delete_msg(self, channel_name: str, message_id: str):
         """Delete a chat message using the broadcaster's OAuth token from DB."""
+        logger.info(f"_delete_msg called: channel={channel_name} msg_id={message_id}")
         try:
             import aiohttp
             from config import TWITCH_CLIENT_ID
@@ -305,12 +306,12 @@ class TwitchChatBot(commands.Bot):
                     guild_id = ch["guild_id"]
                     break
             if not guild_id:
-                logger.debug(f"No guild found for channel {channel_name}")
+                logger.error(f"Delete: no guild found for channel {channel_name}")
                 return
 
             row = self.db.get_broadcaster_token(guild_id)
             if not row:
-                logger.debug(f"No broadcaster token for guild {guild_id}, cannot delete message")
+                logger.error(f"Delete: no broadcaster token for guild {guild_id}")
                 return
 
             access_token   = row["access_token"]
@@ -337,9 +338,9 @@ class TwitchChatBot(commands.Bot):
                 ) as resp:
                     if resp.status not in (200, 204):
                         text = await resp.text()
-                        logger.debug(f"Delete message failed {resp.status}: {text}")
+                        logger.error(f"Delete message FAILED {resp.status}: {text} | broadcaster={broadcaster_id} mod={moderator_id} msg={message_id}")
         except Exception as e:
-            logger.debug(f"Could not delete message {message_id}: {e}")
+            logger.error(f"Delete exception: {e}")
 
 
     async def _send_and_delete(self, channel, channel_name: str, text: str, delay: int = 3):
