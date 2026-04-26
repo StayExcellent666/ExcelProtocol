@@ -55,19 +55,6 @@ class TwitchChatBot(commands.Bot):
 
     async def event_message(self, message):
         if message.echo:
-            if message.content in self._pending_deletes:
-                # message.id is None in twitchio v2 echo — get it from raw tags
-                msg_id = None
-                try:
-                    msg_id = message.tags.get("id") if message.tags else None
-                except Exception:
-                    pass
-                if msg_id:
-                    channel_name, delay = self._pending_deletes.pop(message.content)
-                    import asyncio
-                    asyncio.create_task(self._delete_after(channel_name, msg_id, delay))
-                else:
-                    logger.debug(f"Echo message has no ID in tags: {message.tags}")
             return
         if not message.content or not message.content.startswith("!"):
             return
