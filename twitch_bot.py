@@ -291,30 +291,23 @@ class TwitchChatBot(commands.Bot):
         return True
 
     async def _delete_msg(self, channel_name: str, message_id: str):
-        """Delete a message using twitchio's HTTP client."""
+        """Delete a message by sending /delete via IRC."""
         try:
-            # Get broadcaster and moderator IDs
-            users = await self.fetch_users(names=[channel_name])
-            broadcaster_id = str(users[0].id) if users else None
-            mod_users = await self.fetch_users(names=[self.nick])
-            mod_id = str(mod_users[0].id) if mod_users else None
-            if broadcaster_id and mod_id:
-                await self._http.delete_chat_message(
-                    token=self._connection._token,
-                    broadcaster_id=broadcaster_id,
-                    moderator_id=mod_id,
-                    message_id=message_id,
-                )
+            channel = self.get_channel(channel_name)
+            if channel:
+                await channel.send(f"/delete {message_id}")
         except Exception as e:
             logger.debug(f"Could not delete message: {e}")
+
 
     async def _send_and_delete(self, channel, channel_name: str, text: str, delay: int = 3):
         """Send a message then delete it after `delay` seconds."""
         import asyncio
         try:
             msg = await channel.send(text)
-            await asyncio.sleep(delay)
-            await self._delete_msg(channel_name, msg.id)
+            if msg and hasattr(msg, 'id'):
+                await asyncio.sleep(delay)
+                await self._delete_msg(channel_name, msg.id)
         except Exception as e:
             logger.debug(f"_send_and_delete error: {e}")
 
