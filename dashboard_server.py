@@ -580,7 +580,7 @@ async def get_guild_summary(request):
     # Enrich streamers with Twitch data + channel names
     usernames = [s["twitch_username"] for s in streamers_raw]
     twitch_data = await get_twitch_users(usernames)
-    eff_channel_ids = list({str(s.get("custom_channel_id") or s["channel_id"]) for s in streamers_raw})
+    eff_channel_ids = list({str(s.get("custom_channel_id") or s["channel_id"]) for s in streamers_raw} | {str(s["channel_id"]) for s in streamers_raw if s["channel_id"]})
     for rr in reaction_roles_raw:
         eff_channel_ids.append(str(rr["channel_id"]))
 
