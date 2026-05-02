@@ -194,7 +194,7 @@ async def get_guild_members(request):
                 "id":           str(m.id),
                 "username":     m.name,
                 "display_name": m.display_name,
-                "avatar":       str(m.avatar) if m.avatar else None,
+                "avatar":       m.avatar.key if m.avatar else None,
             })
         members.sort(key=lambda m: m["display_name"].lower())
         return web.json_response({"members": members})
@@ -592,13 +592,22 @@ async def get_guild_summary(request):
     for s in streamers_raw:
         tw = twitch_data.get(s["twitch_username"].lower(), {})
         eff_ch = str(s.get("custom_channel_id") or s["channel_id"])
+        # Look up Discord display name for linked member
+        discord_display_name = None
+        if s.get("discord_user_id") and _bot_ref:
+            guild_obj = _bot_ref.get_guild(int(guild_id))
+            if guild_obj:
+                member = guild_obj.get_member(int(s["discord_user_id"]))
+                if member:
+                    discord_display_name = member.display_name
         streamers.append({
             **s,
-            "display_name":      tw.get("display_name", s["twitch_username"]),
-            "profile_image_url": tw.get("profile_image_url", ""),
-            "description":       tw.get("description", ""),
-            "channel_name":      channel_names.get(str(s["channel_id"]), str(s["channel_id"])),
+            "display_name":          tw.get("display_name", s["twitch_username"]),
+            "profile_image_url":     tw.get("profile_image_url", ""),
+            "description":           tw.get("description", ""),
+            "channel_name":          channel_names.get(str(s["channel_id"]), str(s["channel_id"])),
             "effective_channel_name": channel_names.get(eff_ch, eff_ch),
+            "discord_display_name":  discord_display_name,
         })
 
     # Enrich reaction roles with role names + colors from Discord
