@@ -178,40 +178,24 @@ async def get_guild_roles(guild_id: str) -> dict:
         return {}
 
 async def get_guild_members(request):
-    """Get guild members for Discord user picker. Returns [{id, username, display_name, avatar}]"""
+    """Get guild members via bot cache for Discord user picker."""
     guild_id = request.match_info["guild_id"]
     try:
-        headers = {"Authorization": f"Bot {DISCORD_TOKEN}"}
+        if not _bot_ref:
+            return web.json_response({"members": []})
+        guild = _bot_ref.get_guild(int(guild_id))
+        if not guild:
+            return web.json_response({"members": []})
         members = []
-        after = 0
-        async with aiohttp.ClientSession() as session:
-            while True:
-                params = {"limit": 1000}
-                if after:
-                    params["after"] = after
-                async with session.get(
-                    f"{DISCORD_API}/guilds/{guild_id}/members",
-                    headers=headers,
-                    params=params,
-                ) as resp:
-                    if resp.status != 200:
-                        break
-                    batch = await resp.json()
-                    if not batch:
-                        break
-                    for m in batch:
-                        user = m.get("user", {})
-                        if user.get("bot"):
-                            continue
-                        members.append({
-                            "id":           user["id"],
-                            "username":     user.get("username", ""),
-                            "display_name": m.get("nick") or user.get("global_name") or user.get("username", ""),
-                            "avatar":       user.get("avatar"),
-                        })
-                    if len(batch) < 1000:
-                        break
-                    after = batch[-1]["user"]["id"]
+        for m in guild.members:
+            if m.bot:
+                continue
+            members.append({
+                "id":           str(m.id),
+                "username":     m.name,
+                "display_name": m.display_name,
+                "avatar":       str(m.avatar) if m.avatar else None,
+            })
         members.sort(key=lambda m: m["display_name"].lower())
         return web.json_response({"members": members})
     except Exception as e:
