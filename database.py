@@ -133,6 +133,16 @@ class Database:
         except Exception:
             pass  # Column already exists
 
+        # Migration: add discord_user_id to monitored_streamers
+        try:
+            cursor.execute('''
+                ALTER TABLE monitored_streamers ADD COLUMN discord_user_id TEXT DEFAULT NULL
+            ''')
+            conn.commit()
+            logger.info("Migration: added discord_user_id to monitored_streamers")
+        except Exception:
+            pass  # Column already exists
+
         # Migration: add twitch_user_id if it doesn't exist
         try:
             cursor.execute('''
@@ -169,6 +179,13 @@ class Database:
             cursor.execute('ALTER TABLE server_settings ADD COLUMN ping_role_id INTEGER DEFAULT NULL')
             conn.commit()
             logger.info("Migration: added ping_role_id to server_settings")
+
+        # Migration: add live_role_id to server_settings
+        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("server_settings") WHERE name="live_role_id"')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('ALTER TABLE server_settings ADD COLUMN live_role_id INTEGER DEFAULT NULL')
+            conn.commit()
+            logger.info("Migration: added live_role_id to server_settings")
 
         # Migration: add body_text to reaction_roles
         cursor.execute('SELECT COUNT(*) FROM pragma_table_info("reaction_roles") WHERE name="body_text"')
@@ -791,7 +808,7 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT streamer_name, channel_id, added_at, custom_channel_id, twitch_user_id
+            SELECT streamer_name, channel_id, added_at, custom_channel_id, twitch_user_id, discord_user_id
             FROM monitored_streamers
             WHERE guild_id = ?
             ORDER BY streamer_name
@@ -807,6 +824,7 @@ class Database:
                 'added_at': row[2],
                 'custom_channel_id': row[3],
                 'twitch_user_id': row[4],
+                'discord_user_id': row[5],
             }
             for row in rows
         ]
@@ -817,7 +835,7 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT guild_id, streamer_name, channel_id, custom_channel_id, twitch_user_id
+            SELECT guild_id, streamer_name, channel_id, custom_channel_id, twitch_user_id, discord_user_id
             FROM monitored_streamers
             ORDER BY streamer_name
         ''')
@@ -832,9 +850,42 @@ class Database:
                 'channel_id': row[2],
                 'custom_channel_id': row[3],
                 'twitch_user_id': row[4],
+                'discord_user_id': row[5],
             }
             for row in rows
         ]
+
+    def set_streamer_discord_user(self, guild_id: int, streamer_name: str, discord_user_id: str | None):
+        """Link a Discord user ID to a monitored streamer."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE monitored_streamers SET discord_user_id = ? WHERE guild_id = ? AND streamer_name = ?",
+            (discord_user_id, guild_id, streamer_name.lower())
+        )
+        conn.commit()
+        conn.close()
+
+    def get_live_role(self, guild_id: int) -> int | None:
+        """Get the live role ID for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT live_role_id FROM server_settings WHERE guild_id = ?", (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def set_live_role(self, guild_id: int, role_id: int | None):
+        """Set the live role ID for a guild."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO server_settings (guild_id, notification_channel_id, live_role_id) VALUES (?, 0, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET live_role_id = ?",
+            (guild_id, role_id, role_id)
+        )
+        conn.commit()
+        conn.close()
 
     def update_streamer_user_id(self, guild_id: int, streamer_name: str, twitch_user_id: str):
         """Store the Twitch user ID for a monitored streamer."""

@@ -647,6 +647,51 @@ class TwitchNotifierBot(discord.Client):
                     f"Twitch may have revoked subscriptions. Next 30-min sync will attempt to re-register."
                 )
 
+    async def _assign_live_role(self, guild_id: int, streamer_name: str, add: bool):
+        """Assign or remove the live role for a streamer's linked Discord member."""
+        try:
+            # Get live role for this guild
+            live_role_id = self.db.get_live_role(guild_id)
+            if not live_role_id:
+                return
+
+            # Get the Discord user ID linked to this streamer
+            streamers = self.db.get_server_streamers(guild_id)
+            discord_user_id = None
+            for s in streamers:
+                if s["streamer_name"].lower() == streamer_name.lower():
+                    discord_user_id = s.get("discord_user_id")
+                    break
+
+            if not discord_user_id:
+                return
+
+            # Get the guild and member
+            guild = self.get_guild(guild_id)
+            if not guild:
+                return
+
+            member = guild.get_member(int(discord_user_id))
+            if not member:
+                try:
+                    member = await guild.fetch_member(int(discord_user_id))
+                except Exception:
+                    return
+
+            role = guild.get_role(int(live_role_id))
+            if not role:
+                return
+
+            if add:
+                await member.add_roles(role, reason="Stream went live")
+                logger.info(f"Assigned live role to {member} in guild {guild_id}")
+            else:
+                await member.remove_roles(role, reason="Stream went offline")
+                logger.info(f"Removed live role from {member} in guild {guild_id}")
+
+        except Exception as e:
+            logger.error(f"Error {'assigning' if add else 'removing'} live role for {streamer_name} in guild {guild_id}: {e}")
+
     async def handle_stream_online(self, user_login: str, user_id: str):
         """Called by the dashboard webhook when a stream.online event is received."""
         try:
@@ -680,6 +725,8 @@ class TwitchNotifierBot(discord.Client):
 
             for server_data in monitoring_servers:
                 await self.send_notification(server_data, stream)
+                # Assign live role if configured
+                await self._assign_live_role(server_data["guild_id"], server_data["streamer_name"], add=True)
 
             await self.log_to_channel(
                 "🟢", "Stream Online (EventSub)",
@@ -708,6 +755,8 @@ class TwitchNotifierBot(discord.Client):
             for s in streamers:
                 if s['streamer_name'].lower() == name_lower:
                     self.db.clear_milestones_for_streamer(s['guild_id'], name_lower)
+                    # Remove live role if configured
+                    await self._assign_live_role(s['guild_id'], name_lower, add=False)
 
             await self.delete_offline_notifications(user_login)
 

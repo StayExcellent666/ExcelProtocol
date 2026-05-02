@@ -177,6 +177,51 @@ async def get_guild_roles(guild_id: str) -> dict:
     except Exception:
         return {}
 
+async def get_guild_members(request):
+    """Get guild members for Discord user picker. Returns [{id, username, display_name, avatar}]"""
+    guild_id = request.match_info["guild_id"]
+    session_data = request.get("session", {})
+    if str(session_data.get("guild_id")) != str(guild_id):
+        raise web.HTTPForbidden()
+    try:
+        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+        members = []
+        after = 0
+        async with aiohttp.ClientSession() as session:
+            while True:
+                params = {"limit": 1000}
+                if after:
+                    params["after"] = after
+                async with session.get(
+                    f"{DISCORD_API}/guilds/{guild_id}/members",
+                    headers=headers,
+                    params=params,
+                ) as resp:
+                    if resp.status != 200:
+                        break
+                    batch = await resp.json()
+                    if not batch:
+                        break
+                    for m in batch:
+                        user = m.get("user", {})
+                        if user.get("bot"):
+                            continue
+                        members.append({
+                            "id":           user["id"],
+                            "username":     user.get("username", ""),
+                            "display_name": m.get("nick") or user.get("global_name") or user.get("username", ""),
+                            "avatar":       user.get("avatar"),
+                        })
+                    if len(batch) < 1000:
+                        break
+                    after = batch[-1]["user"]["id"]
+        members.sort(key=lambda m: m["display_name"].lower())
+        return web.json_response({"members": members})
+    except Exception as e:
+        logger.error(f"Error fetching members for guild {guild_id}: {e}")
+        return web.json_response({"members": []})
+
+
 async def get_guild_info(guild_id: str) -> dict:
     try:
         return await discord_get(f"/guilds/{guild_id}?with_counts=true")
@@ -537,7 +582,7 @@ async def get_guild_summary(request):
     cutoff   = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
 
     streamers_raw = await db_fetch(
-        "SELECT id, guild_id, streamer_name AS twitch_username, channel_id, custom_channel_id FROM monitored_streamers WHERE guild_id = ?",
+        "SELECT id, guild_id, streamer_name AS twitch_username, channel_id, custom_channel_id, discord_user_id FROM monitored_streamers WHERE guild_id = ?",
         (guild_id,)
     )
     reaction_roles_raw = await db_fetch(
@@ -612,7 +657,7 @@ async def get_guild_summary(request):
 async def get_streamers(request):
     guild_id = request.match_info["guild_id"]
     rows = await db_fetch(
-        "SELECT id, guild_id, streamer_name AS twitch_username, channel_id, custom_channel_id FROM monitored_streamers WHERE guild_id = ?",
+        "SELECT id, guild_id, streamer_name AS twitch_username, channel_id, custom_channel_id, discord_user_id FROM monitored_streamers WHERE guild_id = ?",
         (guild_id,)
     )
     usernames = [r["twitch_username"] for r in rows]
@@ -1237,7 +1282,7 @@ async def get_guild_members(request):
 async def get_server_settings(request):
     guild_id = request.match_info["guild_id"]
     rows = await db_fetch(
-        "SELECT notification_channel_id, embed_color, auto_delete_notifications, milestone_notifications, ping_role_id FROM server_settings WHERE guild_id = ?",
+        "SELECT notification_channel_id, embed_color, auto_delete_notifications, milestone_notifications, ping_role_id, live_role_id FROM server_settings WHERE guild_id = ?",
         (guild_id,)
     )
     bday = await db_fetch("SELECT channel_id FROM birthday_channels WHERE guild_id = ?", (guild_id,))
@@ -1251,6 +1296,7 @@ async def get_server_settings(request):
         "milestone_notifications": bool(s.get("milestone_notifications", 0)),
         "birthday_channel_id": str(bday[0]["channel_id"]) if bday else None,
         "ping_role_id": str(s["ping_role_id"]) if s.get("ping_role_id") else None,
+        "live_role_id": str(s["live_role_id"]) if s.get("live_role_id") else None,
     })
 
 async def patch_server_settings(request):
@@ -1298,6 +1344,23 @@ async def patch_server_settings(request):
             "INSERT INTO birthday_channels (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id = ?",
             (guild_id, cid, cid)
         )
+
+    if "live_role_id" in body:
+        raw = body["live_role_id"]
+        if raw is None or raw == "":
+            await db_execute(
+                "INSERT INTO server_settings (guild_id, notification_channel_id, live_role_id) VALUES (?, 0, NULL) ON CONFLICT(guild_id) DO UPDATE SET live_role_id = NULL",
+                (guild_id,)
+            )
+        else:
+            try:
+                role_id = int(raw)
+                await db_execute(
+                    "INSERT INTO server_settings (guild_id, notification_channel_id, live_role_id) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET live_role_id = ?",
+                    (guild_id, role_id, role_id)
+                )
+            except (ValueError, TypeError):
+                pass
 
     if "ping_role_id" in body:
         raw = body["ping_role_id"]
@@ -1524,6 +1587,19 @@ async def play_test_overlay(request):
             dead.add(ws)
     if dead:
         conns.difference_update(dead)
+    return web.json_response({"ok": True})
+
+
+async def patch_streamer_discord_user(request):
+    """Link or unlink a Discord user ID to a monitored streamer."""
+    guild_id     = request.match_info["guild_id"]
+    streamer     = request.match_info["streamer"]
+    body         = await request.json()
+    discord_user_id = body.get("discord_user_id")  # str or null
+    await db_execute(
+        "UPDATE monitored_streamers SET discord_user_id = ? WHERE guild_id = ? AND streamer_name = ?",
+        (discord_user_id, guild_id, streamer.lower())
+    )
     return web.json_response({"ok": True})
 
 
@@ -3516,6 +3592,8 @@ def create_dashboard_app(bot=None):
     app.router.add_post  ("/api/guild/{guild_id}/twitch/overlay-volume",      set_overlay_volume)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/play-test",           play_test_overlay)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/hotkey-test",          hotkey_test)
+    app.router.add_get   ("/api/guild/{guild_id}/members",                     get_guild_members)
+    app.router.add_patch ("/api/guild/{guild_id}/streamers/{streamer}/discord", patch_streamer_discord_user)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/commands",           add_twitch_command)
     app.router.add_delete("/api/guild/{guild_id}/twitch/commands/{command_name}", delete_twitch_command)
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
