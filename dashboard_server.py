@@ -595,11 +595,18 @@ async def get_guild_summary(request):
         # Look up Discord display name for linked member
         discord_display_name = None
         if s.get("discord_user_id") and _bot_ref:
-            guild_obj = _bot_ref.get_guild(int(guild_id))
-            if guild_obj:
-                member = guild_obj.get_member(int(s["discord_user_id"]))
-                if member:
-                    discord_display_name = member.display_name
+            try:
+                guild_obj = _bot_ref.get_guild(int(guild_id))
+                if guild_obj:
+                    uid = int(s["discord_user_id"])
+                    member = guild_obj.get_member(uid)
+                    if not member:
+                        # Try iterating members list
+                        member = next((m for m in guild_obj.members if m.id == uid), None)
+                    if member:
+                        discord_display_name = member.display_name
+            except Exception:
+                pass
         streamers.append({
             **s,
             "display_name":          tw.get("display_name", s["twitch_username"]),
