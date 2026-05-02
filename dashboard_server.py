@@ -228,16 +228,31 @@ async def get_guild_channels(guild_id: str) -> list:
             f"{DISCORD_API}/guilds/{guild_id}/channels",
             headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
         ) as resp:
-            if resp.status != 200:
-                return []
-            channels = await resp.json()
-            text = [
-                {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0), "parent_id": str(c.get("parent_id") or "")}
-                for c in channels if c.get("type") == 0
-            ]
-            return sorted(text, key=lambda c: c["position"])
+            if resp.status == 200:
+                channels = await resp.json()
+                text = [
+                    {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0), "parent_id": str(c.get("parent_id") or "")}
+                    for c in channels if c.get("type") == 0
+                ]
+                if text:
+                    return sorted(text, key=lambda c: c["position"])
     except Exception:
-        return []
+        pass
+    # Fall back to bot cache — works when REST API returns 403 or empty
+    if _bot_ref:
+        try:
+            import discord as _discord
+            guild_obj = _bot_ref.get_guild(int(guild_id))
+            if guild_obj:
+                text = [
+                    {"id": str(c.id), "name": c.name, "position": c.position, "parent_id": str(c.category_id or "")}
+                    for c in guild_obj.channels
+                    if isinstance(c, _discord.TextChannel)
+                ]
+                return sorted(text, key=lambda c: c["position"])
+        except Exception:
+            pass
+    return []
 
 async def get_guild_voice_channels(guild_id: str) -> list:
     """Return list of voice channels for a guild: [{id, name, position}]"""
@@ -247,16 +262,31 @@ async def get_guild_voice_channels(guild_id: str) -> list:
             f"{DISCORD_API}/guilds/{guild_id}/channels",
             headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
         ) as resp:
-            if resp.status != 200:
-                return []
-            channels = await resp.json()
-            voice = [
-                {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0)}
-                for c in channels if c.get("type") == 2
-            ]
-            return sorted(voice, key=lambda c: c["position"])
+            if resp.status == 200:
+                channels = await resp.json()
+                voice = [
+                    {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0)}
+                    for c in channels if c.get("type") == 2
+                ]
+                if voice:
+                    return sorted(voice, key=lambda c: c["position"])
     except Exception:
-        return []
+        pass
+    # Fall back to bot cache
+    if _bot_ref:
+        try:
+            import discord as _discord
+            guild_obj = _bot_ref.get_guild(int(guild_id))
+            if guild_obj:
+                voice = [
+                    {"id": str(c.id), "name": c.name, "position": c.position}
+                    for c in guild_obj.channels
+                    if isinstance(c, _discord.VoiceChannel)
+                ]
+                return sorted(voice, key=lambda c: c["position"])
+        except Exception:
+            pass
+    return []
 
 # ── Twitch API Helper ─────────────────────────────────────────────────────────
 _twitch_token: dict = {"token": None, "expires_at": None}
