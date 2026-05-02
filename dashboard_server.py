@@ -158,9 +158,20 @@ async def discord_get(path: str, token: str = None, use_bot: bool = True) -> dic
 async def get_channel_name(channel_id: str) -> str:
     try:
         data = await discord_get(f"/channels/{channel_id}")
-        return f"#{data.get('name', channel_id)}"
+        name = data.get("name")
+        if name:
+            return f"#{name}"
     except Exception:
-        return channel_id
+        pass
+    # Fall back to bot cache (works when Discord API returns 403/404 for that channel)
+    if _bot_ref:
+        try:
+            ch = _bot_ref.get_channel(int(channel_id))
+            if ch and hasattr(ch, "name"):
+                return f"#{ch.name}"
+        except Exception:
+            pass
+    return channel_id
 
 async def get_guild_roles(guild_id: str) -> dict:
     """Returns {role_id: {name, color}} for all roles in a guild. Not cached — roles can be renamed."""
@@ -594,19 +605,29 @@ async def get_guild_summary(request):
         eff_ch = str(s.get("custom_channel_id") or s["channel_id"])
         # Look up Discord display name for linked member
         discord_display_name = None
-        if s.get("discord_user_id") and _bot_ref:
-            try:
-                guild_obj = _bot_ref.get_guild(int(guild_id))
-                if guild_obj:
-                    uid = int(s["discord_user_id"])
-                    member = guild_obj.get_member(uid)
-                    if not member:
-                        # Try iterating members list
-                        member = next((m for m in guild_obj.members if m.id == uid), None)
-                    if member:
-                        discord_display_name = member.display_name
-            except Exception:
-                pass
+        if s.get("discord_user_id"):
+            uid = int(s["discord_user_id"])
+            # 1. Try bot cache first (free, instant)
+            if _bot_ref:
+                try:
+                    guild_obj = _bot_ref.get_guild(int(guild_id))
+                    if guild_obj:
+                        member = guild_obj.get_member(uid)
+                        if not member:
+                            member = next((m for m in guild_obj.members if m.id == uid), None)
+                        if member:
+                            discord_display_name = member.display_name
+                except Exception:
+                    pass
+            # 2. Fall back to Discord REST API if cache missed
+            if not discord_display_name:
+                try:
+                    data = await discord_get(f"/guilds/{guild_id}/members/{uid}")
+                    nick = data.get("nick")
+                    user = data.get("user", {})
+                    discord_display_name = nick or user.get("global_name") or user.get("username")
+                except Exception:
+                    pass
         streamers.append({
             **s,
             "display_name":          tw.get("display_name", s["twitch_username"]),
