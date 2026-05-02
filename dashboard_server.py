@@ -1332,14 +1332,17 @@ async def patch_server_settings(request):
                 (guild_id,)
             )
         else:
-            try:
-                role_id = int(raw)
-                await db_execute(
-                    "INSERT INTO server_settings (guild_id, notification_channel_id, live_role_id) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET live_role_id = ?",
-                    (guild_id, role_id, role_id)
-                )
-            except (ValueError, TypeError):
-                pass
+            resolved = await _resolve_role_id(
+                guild_id,
+                str(raw),
+                body.get("new_role_name"),
+                body.get("new_role_color"),
+            )
+            rid = int(resolved)
+            await db_execute(
+                "INSERT INTO server_settings (guild_id, notification_channel_id, live_role_id) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET live_role_id = ?",
+                (guild_id, rid, rid)
+            )
 
     if "ping_role_id" in body:
         raw = body["ping_role_id"]
