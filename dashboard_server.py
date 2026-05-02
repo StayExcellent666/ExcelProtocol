@@ -632,39 +632,21 @@ async def get_guild_summary(request):
         eff_ch = str(s.get("custom_channel_id") or s["channel_id"])
         # Look up Discord display name for linked member
         discord_display_name = None
-        if s.get("discord_user_id"):
-            uid = int(s["discord_user_id"])
-            # 1. Try bot cache first (free, instant)
-            if _bot_ref:
-                try:
-                    guild_obj = _bot_ref.get_guild(int(guild_id))
-                    if guild_obj:
-                        member = guild_obj.get_member(uid)
-                        if not member:
-                            member = next((m for m in guild_obj.members if m.id == uid), None)
-                        if member:
-                            discord_display_name = member.display_name
-                except Exception:
-                    pass
-            # 2. Fall back to Discord REST API if cache missed
-            if not discord_display_name:
-                try:
-                    session = get_http_session()
-                    async with session.get(
-                        f"{DISCORD_API}/guilds/{guild_id}/members/{uid}",
-                        headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            nick = data.get("nick")
-                            user = data.get("user", {})
-                            discord_display_name = nick or user.get("global_name") or user.get("username")
-                except Exception:
-                    pass
+        if s.get("discord_user_id") and _bot_ref:
+            try:
+                guild_obj = _bot_ref.get_guild(int(guild_id))
+                if guild_obj:
+                    uid = int(s["discord_user_id"])
+                    member = guild_obj.get_member(uid)
+                    if not member:
+                        # Try iterating members list
+                        member = next((m for m in guild_obj.members if m.id == uid), None)
+                    if member:
+                        discord_display_name = member.display_name
+            except Exception:
+                pass
         streamers.append({
             **s,
-            "channel_id":            str(s["channel_id"]) if s.get("channel_id") else None,
-            "custom_channel_id":     str(s["custom_channel_id"]) if s.get("custom_channel_id") else None,
             "display_name":          tw.get("display_name", s["twitch_username"]),
             "profile_image_url":     tw.get("profile_image_url", ""),
             "description":           tw.get("description", ""),
@@ -715,18 +697,32 @@ async def get_streamers(request):
     )
     usernames = [r["twitch_username"] for r in rows]
     twitch_data = await get_twitch_users(usernames)
+
+    # Build member id -> display_name lookup from bot cache once
+    member_names: dict = {}
+    if _bot_ref:
+        try:
+            guild_obj = _bot_ref.get_guild(int(guild_id))
+            if guild_obj:
+                for m in guild_obj.members:
+                    member_names[str(m.id)] = m.display_name
+        except Exception:
+            pass
+
     result = []
     for r in rows:
         tw = twitch_data.get(r["twitch_username"].lower(), {})
         eff_ch = str(r.get("custom_channel_id") or r["channel_id"])
         ch_name = await get_channel_name(eff_ch)
+        discord_display_name = member_names.get(str(r["discord_user_id"])) if r.get("discord_user_id") else None
         result.append({
             **r,
-            "channel_id":        str(r["channel_id"]) if r.get("channel_id") else None,
-            "custom_channel_id": str(r["custom_channel_id"]) if r.get("custom_channel_id") else None,
-            "display_name":      tw.get("display_name", r["twitch_username"]),
-            "profile_image_url": tw.get("profile_image_url", ""),
-            "channel_name":      ch_name,
+            "channel_id":            str(r["channel_id"]) if r.get("channel_id") else None,
+            "custom_channel_id":     str(r["custom_channel_id"]) if r.get("custom_channel_id") else None,
+            "display_name":          tw.get("display_name", r["twitch_username"]),
+            "profile_image_url":     tw.get("profile_image_url", ""),
+            "channel_name":          ch_name,
+            "discord_display_name":  discord_display_name,
         })
     import asyncio as _asyncio
     limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id))) if _bot_ref else 75
