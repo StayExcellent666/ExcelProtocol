@@ -1260,24 +1260,6 @@ async def delete_birthday(request):
     )
     return web.json_response({"ok": True})
 
-async def get_guild_members(request):
-    guild_id = request.match_info["guild_id"]
-    if not _bot_ref:
-        return web.json_response([])
-    try:
-        guild = _bot_ref.get_guild(int(guild_id))
-        if not guild:
-            return web.json_response([])
-        members = [
-            {"id": str(m.id), "username": m.display_name}
-            for m in guild.members if not m.bot
-        ]
-        members.sort(key=lambda m: m["username"].lower())
-        return web.json_response(members)
-    except Exception as e:
-        logger.error(f"Failed to get members: {e}")
-        return web.json_response([])
-
 # ── Server Settings ───────────────────────────────────────────────────────────
 async def get_server_settings(request):
     guild_id = request.match_info["guild_id"]
@@ -3619,7 +3601,6 @@ def create_dashboard_app(bot=None):
     app.router.add_post("/api/suggest",                    post_suggestion)
     app.router.add_post("/api/support",                     post_support)
 
-    app.router.add_get  ("/api/guild/{guild_id}/members",               get_guild_members)
     app.router.add_get  ("/api/guild/{guild_id}/birthdays",              get_birthdays)
     app.router.add_post ("/api/guild/{guild_id}/birthdays",              add_birthday)
     app.router.add_delete("/api/guild/{guild_id}/birthdays/{user_id}",  delete_birthday)
