@@ -163,7 +163,6 @@ async def get_channel_name(channel_id: str) -> str:
             return f"#{name}"
     except Exception:
         pass
-    # Fall back to bot cache (works when Discord API returns 403/404 for that channel)
     if _bot_ref:
         try:
             ch = _bot_ref.get_channel(int(channel_id))
@@ -238,7 +237,6 @@ async def get_guild_channels(guild_id: str) -> list:
                     return sorted(text, key=lambda c: c["position"])
     except Exception:
         pass
-    # Fall back to bot cache — works when REST API returns 403 or empty
     if _bot_ref:
         try:
             import discord as _discord
@@ -272,7 +270,6 @@ async def get_guild_voice_channels(guild_id: str) -> list:
                     return sorted(voice, key=lambda c: c["position"])
     except Exception:
         pass
-    # Fall back to bot cache
     if _bot_ref:
         try:
             import discord as _discord
@@ -652,14 +649,22 @@ async def get_guild_summary(request):
             # 2. Fall back to Discord REST API if cache missed
             if not discord_display_name:
                 try:
-                    data = await discord_get(f"/guilds/{guild_id}/members/{uid}")
-                    nick = data.get("nick")
-                    user = data.get("user", {})
-                    discord_display_name = nick or user.get("global_name") or user.get("username")
+                    session = get_http_session()
+                    async with session.get(
+                        f"{DISCORD_API}/guilds/{guild_id}/members/{uid}",
+                        headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            nick = data.get("nick")
+                            user = data.get("user", {})
+                            discord_display_name = nick or user.get("global_name") or user.get("username")
                 except Exception:
                     pass
         streamers.append({
             **s,
+            "channel_id":            str(s["channel_id"]) if s.get("channel_id") else None,
+            "custom_channel_id":     str(s["custom_channel_id"]) if s.get("custom_channel_id") else None,
             "display_name":          tw.get("display_name", s["twitch_username"]),
             "profile_image_url":     tw.get("profile_image_url", ""),
             "description":           tw.get("description", ""),
@@ -717,6 +722,8 @@ async def get_streamers(request):
         ch_name = await get_channel_name(eff_ch)
         result.append({
             **r,
+            "channel_id":        str(r["channel_id"]) if r.get("channel_id") else None,
+            "custom_channel_id": str(r["custom_channel_id"]) if r.get("custom_channel_id") else None,
             "display_name":      tw.get("display_name", r["twitch_username"]),
             "profile_image_url": tw.get("profile_image_url", ""),
             "channel_name":      ch_name,
