@@ -180,9 +180,6 @@ async def get_guild_roles(guild_id: str) -> dict:
 async def get_guild_members(request):
     """Get guild members for Discord user picker. Returns [{id, username, display_name, avatar}]"""
     guild_id = request.match_info["guild_id"]
-    session_data = request.get("session", {})
-    if str(session_data.get("guild_id")) != str(guild_id):
-        raise web.HTTPForbidden()
     try:
         headers = {"Authorization": f"Bot {DISCORD_TOKEN}"}
         members = []
