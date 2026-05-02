@@ -184,7 +184,7 @@ async def get_guild_members(request):
     if str(session_data.get("guild_id")) != str(guild_id):
         raise web.HTTPForbidden()
     try:
-        headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+        headers = {"Authorization": f"Bot {DISCORD_TOKEN}"}
         members = []
         after = 0
         async with aiohttp.ClientSession() as session:
