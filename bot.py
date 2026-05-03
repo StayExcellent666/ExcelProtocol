@@ -1476,7 +1476,20 @@ class TwitchNotifierBot(discord.Client):
                     channel = guild.get_channel(cfg['channel_id'])
                     if not channel:
                         continue
+                    # Use REST API for accurate count — guild.member_count can lag
+                    # if the guild cache hasn't been fully chunked
                     count = guild.member_count
+                    try:
+                        async with aiohttp.ClientSession() as _s:
+                            async with _s.get(
+                                f"https://discord.com/api/v10/guilds/{cfg['guild_id']}?with_counts=true",
+                                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+                            ) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    count = data.get("approximate_member_count", count)
+                    except Exception:
+                        pass
                     new_name = cfg['format'].replace('{count}', f'{count:,}')
                     # Only update if the name actually changed to avoid wasting the rate limit
                     if channel.name != new_name:

@@ -158,19 +158,9 @@ async def discord_get(path: str, token: str = None, use_bot: bool = True) -> dic
 async def get_channel_name(channel_id: str) -> str:
     try:
         data = await discord_get(f"/channels/{channel_id}")
-        name = data.get("name")
-        if name:
-            return f"#{name}"
+        return f"#{data.get('name', channel_id)}"
     except Exception:
-        pass
-    if _bot_ref:
-        try:
-            ch = _bot_ref.get_channel(int(channel_id))
-            if ch and hasattr(ch, "name"):
-                return f"#{ch.name}"
-        except Exception:
-            pass
-    return channel_id
+        return channel_id
 
 async def get_guild_roles(guild_id: str) -> dict:
     """Returns {role_id: {name, color}} for all roles in a guild. Not cached — roles can be renamed."""
@@ -227,30 +217,16 @@ async def get_guild_channels(guild_id: str) -> list:
             f"{DISCORD_API}/guilds/{guild_id}/channels",
             headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
         ) as resp:
-            if resp.status == 200:
-                channels = await resp.json()
-                text = [
-                    {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0), "parent_id": str(c.get("parent_id") or "")}
-                    for c in channels if c.get("type") == 0
-                ]
-                if text:
-                    return sorted(text, key=lambda c: c["position"])
+            if resp.status != 200:
+                return []
+            channels = await resp.json()
+            text = [
+                {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0), "parent_id": str(c.get("parent_id") or "")}
+                for c in channels if c.get("type") == 0
+            ]
+            return sorted(text, key=lambda c: c["position"])
     except Exception:
-        pass
-    if _bot_ref:
-        try:
-            import discord as _discord
-            guild_obj = _bot_ref.get_guild(int(guild_id))
-            if guild_obj:
-                text = [
-                    {"id": str(c.id), "name": c.name, "position": c.position, "parent_id": str(c.category_id or "")}
-                    for c in guild_obj.channels
-                    if isinstance(c, _discord.TextChannel)
-                ]
-                return sorted(text, key=lambda c: c["position"])
-        except Exception:
-            pass
-    return []
+        return []
 
 async def get_guild_voice_channels(guild_id: str) -> list:
     """Return list of voice channels for a guild: [{id, name, position}]"""
@@ -260,30 +236,16 @@ async def get_guild_voice_channels(guild_id: str) -> list:
             f"{DISCORD_API}/guilds/{guild_id}/channels",
             headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
         ) as resp:
-            if resp.status == 200:
-                channels = await resp.json()
-                voice = [
-                    {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0)}
-                    for c in channels if c.get("type") == 2
-                ]
-                if voice:
-                    return sorted(voice, key=lambda c: c["position"])
+            if resp.status != 200:
+                return []
+            channels = await resp.json()
+            voice = [
+                {"id": str(c["id"]), "name": c["name"], "position": c.get("position", 0)}
+                for c in channels if c.get("type") == 2
+            ]
+            return sorted(voice, key=lambda c: c["position"])
     except Exception:
-        pass
-    if _bot_ref:
-        try:
-            import discord as _discord
-            guild_obj = _bot_ref.get_guild(int(guild_id))
-            if guild_obj:
-                voice = [
-                    {"id": str(c.id), "name": c.name, "position": c.position}
-                    for c in guild_obj.channels
-                    if isinstance(c, _discord.VoiceChannel)
-                ]
-                return sorted(voice, key=lambda c: c["position"])
-        except Exception:
-            pass
-    return []
+        return []
 
 # ── Twitch API Helper ─────────────────────────────────────────────────────────
 _twitch_token: dict = {"token": None, "expires_at": None}
@@ -697,32 +659,16 @@ async def get_streamers(request):
     )
     usernames = [r["twitch_username"] for r in rows]
     twitch_data = await get_twitch_users(usernames)
-
-    # Build member id -> display_name lookup from bot cache once
-    member_names: dict = {}
-    if _bot_ref:
-        try:
-            guild_obj = _bot_ref.get_guild(int(guild_id))
-            if guild_obj:
-                for m in guild_obj.members:
-                    member_names[str(m.id)] = m.display_name
-        except Exception:
-            pass
-
     result = []
     for r in rows:
         tw = twitch_data.get(r["twitch_username"].lower(), {})
         eff_ch = str(r.get("custom_channel_id") or r["channel_id"])
         ch_name = await get_channel_name(eff_ch)
-        discord_display_name = member_names.get(str(r["discord_user_id"])) if r.get("discord_user_id") else None
         result.append({
             **r,
-            "channel_id":            str(r["channel_id"]) if r.get("channel_id") else None,
-            "custom_channel_id":     str(r["custom_channel_id"]) if r.get("custom_channel_id") else None,
-            "display_name":          tw.get("display_name", r["twitch_username"]),
-            "profile_image_url":     tw.get("profile_image_url", ""),
-            "channel_name":          ch_name,
-            "discord_display_name":  discord_display_name,
+            "display_name":      tw.get("display_name", r["twitch_username"]),
+            "profile_image_url": tw.get("profile_image_url", ""),
+            "channel_name":      ch_name,
         })
     import asyncio as _asyncio
     limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id))) if _bot_ref else 75
@@ -2658,7 +2604,24 @@ async def set_stat_channel(request):
                 channel = guild.get_channel(int(channel_id))
                 if not channel:
                     return
-                new_name = fmt.replace('{count}', f'{guild.member_count:,}')
+                # Fetch real member count from REST API (with_counts=true)
+                # guild.member_count is cache-only and requires members intent
+                member_count = None
+                try:
+                    session = get_http_session()
+                    async with session.get(
+                        f"{DISCORD_API}/guilds/{guild_id}?with_counts=true",
+                        headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            member_count = data.get("approximate_member_count")
+                except Exception:
+                    pass
+                # Fall back to cache count if REST failed
+                if member_count is None:
+                    member_count = guild.member_count
+                new_name = fmt.replace('{count}', f'{member_count:,}')
                 await channel.edit(name=new_name, reason="ExcelProtocol stat update")
                 await db_execute(
                     "UPDATE stat_channels SET last_updated = CURRENT_TIMESTAMP WHERE guild_id = ? AND channel_id = ?",
