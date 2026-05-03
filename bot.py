@@ -194,7 +194,143 @@ class TwitchNotifierBot(discord.Client):
 
         # Sync EventSub subscriptions on startup (async so it doesn't block ready)
         asyncio.create_task(self._initial_eventsub_sync())
+
+        # Run self-checks (async, non-blocking — failures log to Discord channel)
+        asyncio.create_task(self._run_startup_checks())
     
+    async def _run_startup_checks(self):
+        """
+        Self-checks run after on_ready. Each check is independent — one failure
+        never blocks the others. Results are posted to the Discord log channel so
+        issues surface immediately after every deploy.
+        """
+        await asyncio.sleep(3)  # Let guild cache settle first
+        failures = []
+        warnings = []
+
+        # ── 1. Database: required tables exist and are readable ──────────────
+        REQUIRED_TABLES = [
+            "server_settings", "monitored_streamers", "notification_messages",
+            "stat_channels", "birthdays", "unresolvable_streamers",
+        ]
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing = {r[0] for r in cursor.fetchall()}
+            conn.close()
+            missing = [t for t in REQUIRED_TABLES if t not in existing]
+            if missing:
+                failures.append(f"**DB:** Missing tables: `{'`, `'.join(missing)}`")
+            else:
+                logger.info(f"[startup_check] DB tables OK ({len(existing)} tables found)")
+        except Exception as e:
+            failures.append(f"**DB:** Cannot query database: `{e}`")
+
+        # ── 2. Twitch API: app access token is valid ─────────────────────────
+        try:
+            result = await self.twitch.get_user("twitch")  # known-good username
+            if result is None:
+                warnings.append("**Twitch API:** Token may be invalid — `get_user('twitch')` returned None")
+            else:
+                logger.info("[startup_check] Twitch API token OK")
+        except Exception as e:
+            failures.append(f"**Twitch API:** Token check failed: `{e}`")
+
+        # ── 3. EventSub: required env vars are present ───────────────────────
+        try:
+            _, _ = await self._eventsub_config()
+            logger.info("[startup_check] EventSub config OK")
+        except Exception as e:
+            failures.append(f"**EventSub:** `{e}`")
+
+        # ── 4. Discord permissions per guild ─────────────────────────────────
+        REQUIRED_PERMS = {
+            "send_messages":    "Send Messages",
+            "embed_links":      "Embed Links",
+            "manage_roles":     "Manage Roles (live role)",
+            "manage_channels":  "Manage Channels (stat channels)",
+        }
+        perm_issues = []
+        for guild in self.guilds:
+            me = guild.me
+            if me is None:
+                continue
+            perms = me.guild_permissions
+            missing_perms = [label for attr, label in REQUIRED_PERMS.items() if not getattr(perms, attr, False)]
+            if missing_perms:
+                perm_issues.append(f"`{guild.name}`: missing {', '.join(missing_perms)}")
+        if perm_issues:
+            warnings.append("**Permissions:**\n" + "\n".join(perm_issues))
+        else:
+            logger.info(f"[startup_check] Permissions OK across {len(self.guilds)} guild(s)")
+
+        # ── 5. Notification channels: bot can see configured channels ────────
+        try:
+            rows = self.db.get_all_monitored_streamers() if hasattr(self.db, 'get_all_monitored_streamers') else []
+            blind_guilds = set()
+            for row in rows:
+                guild = self.get_guild(int(row['guild_id']))
+                if not guild:
+                    continue
+                ch_id = row.get('custom_channel_id') or row.get('channel_id')
+                if not ch_id:
+                    continue
+                ch = guild.get_channel(int(ch_id))
+                if ch is None:
+                    blind_guilds.add(guild.name)
+            if blind_guilds:
+                warnings.append(f"**Channels:** Bot cannot see notification channel(s) in: {', '.join(f'`{g}`' for g in blind_guilds)}")
+            else:
+                logger.info("[startup_check] Notification channels OK")
+        except Exception as e:
+            logger.warning(f"[startup_check] Channel visibility check failed: {e}")
+
+        # ── 6. Live role: roles still exist in their guilds ──────────────────
+        try:
+            rows = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self.db.get_connection().execute(
+                    "SELECT guild_id, live_role_id FROM server_settings WHERE live_role_id IS NOT NULL"
+                ).fetchall()
+            )
+            deleted_roles = []
+            for row in rows:
+                guild = self.get_guild(int(row[0]))
+                if not guild:
+                    continue
+                role = guild.get_role(int(row[1]))
+                if role is None:
+                    deleted_roles.append(f"`{guild.name}` (role ID `{row[1]}`)")
+            if deleted_roles:
+                warnings.append("**Live Role:** Configured role no longer exists in: " + ", ".join(deleted_roles))
+            else:
+                logger.info("[startup_check] Live roles OK")
+        except Exception as e:
+            logger.warning(f"[startup_check] Live role check failed: {e}")
+
+        # ── Post results ─────────────────────────────────────────────────────
+        if not failures and not warnings:
+            await self.log_to_channel(
+                "✅", "Startup Checks Passed",
+                "All self-checks passed. DB, Twitch API, EventSub, permissions, channels, and roles look good.",
+                color=0x00CC66
+            )
+        else:
+            lines = []
+            if failures:
+                lines.append("🔴 **Failures** (need attention):")
+                lines.extend(f"• {f}" for f in failures)
+            if warnings:
+                if lines:
+                    lines.append("")
+                lines.append("🟡 **Warnings** (degraded functionality):")
+                lines.extend(f"• {w}" for w in warnings)
+            await self.log_to_channel(
+                "⚠️", "Startup Check Issues",
+                "\n".join(lines),
+                color=0xFF6B35
+            )
+
     async def _register_eventsub_for_user(self, user_id: str, user_login: str):
         """Register stream.online and stream.offline EventSub for a single user."""
         callback_url, secret = await self._eventsub_config()
@@ -1476,20 +1612,7 @@ class TwitchNotifierBot(discord.Client):
                     channel = guild.get_channel(cfg['channel_id'])
                     if not channel:
                         continue
-                    # Use REST API for accurate count — guild.member_count can lag
-                    # if the guild cache hasn't been fully chunked
                     count = guild.member_count
-                    try:
-                        async with aiohttp.ClientSession() as _s:
-                            async with _s.get(
-                                f"https://discord.com/api/v10/guilds/{cfg['guild_id']}?with_counts=true",
-                                headers={"Authorization": f"Bot {DISCORD_TOKEN}"}
-                            ) as resp:
-                                if resp.status == 200:
-                                    data = await resp.json()
-                                    count = data.get("approximate_member_count", count)
-                    except Exception:
-                        pass
                     new_name = cfg['format'].replace('{count}', f'{count:,}')
                     # Only update if the name actually changed to avoid wasting the rate limit
                     if channel.name != new_name:
