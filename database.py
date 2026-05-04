@@ -334,6 +334,33 @@ class Database:
             ''')
             logger.info("Added milestone_notifications column to server_settings")
 
+        # Migrate vc_settings from single-row (guild_id PK) to multi-row schema
+        try:
+            cursor.execute("PRAGMA table_info(vc_settings)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if 'id' not in cols:
+                cursor.execute("SELECT guild_id, trigger_channel_id, name_template, category_id FROM vc_settings")
+                existing = cursor.fetchall()
+                cursor.execute("DROP TABLE IF EXISTS vc_settings")
+                cursor.execute("""
+                    CREATE TABLE vc_settings (
+                        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                        guild_id           INTEGER NOT NULL,
+                        trigger_channel_id INTEGER NOT NULL,
+                        name_template      TEXT NOT NULL DEFAULT '🔵 {username}\'s VC',
+                        category_id        INTEGER DEFAULT NULL,
+                        UNIQUE(guild_id, trigger_channel_id)
+                    )
+                """)
+                for row in existing:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO vc_settings (guild_id, trigger_channel_id, name_template, category_id) VALUES (?, ?, ?, ?)",
+                        row
+                    )
+                logger.info("Migrated vc_settings to multi-row schema")
+        except Exception as e:
+            logger.warning(f"vc_settings migration: {e}")
+
         # Table to track which milestones have been sent per stream session
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS milestone_sent (
@@ -430,10 +457,12 @@ class Database:
         # VC Creator -- "Join to Create" voice channel feature
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS vc_settings (
-                guild_id           INTEGER PRIMARY KEY,
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id           INTEGER NOT NULL,
                 trigger_channel_id INTEGER NOT NULL,
                 name_template      TEXT NOT NULL DEFAULT '🔵 {username}''s VC',
-                category_id        INTEGER DEFAULT NULL
+                category_id        INTEGER DEFAULT NULL,
+                UNIQUE(guild_id, trigger_channel_id)
             )
         ''')
 
@@ -623,15 +652,13 @@ class Database:
 
     # ── VC Creator ────────────────────────────────────────────────────────────
 
-    def get_vc_settings(self, guild_id: int) -> dict | None:
+    def get_vc_settings(self, guild_id: int) -> list:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT trigger_channel_id, name_template, category_id FROM vc_settings WHERE guild_id = ?', (guild_id,))
-        row = cursor.fetchone()
+        cursor.execute('SELECT id, trigger_channel_id, name_template, category_id FROM vc_settings WHERE guild_id = ?', (guild_id,))
+        rows = cursor.fetchall()
         conn.close()
-        if not row:
-            return None
-        return {'trigger_channel_id': row[0], 'name_template': row[1], 'category_id': row[2]}
+        return [{'id': r[0], 'trigger_channel_id': r[1], 'name_template': r[2], 'category_id': r[3]} for r in rows]
 
     def set_vc_settings(self, guild_id: int, trigger_channel_id: int, name_template: str = "🔵 {username}'s VC", category_id: int = None):
         conn = self.get_connection()
@@ -639,11 +666,17 @@ class Database:
         cursor.execute('''
             INSERT INTO vc_settings (guild_id, trigger_channel_id, name_template, category_id)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET
-                trigger_channel_id = excluded.trigger_channel_id,
-                name_template      = excluded.name_template,
-                category_id        = excluded.category_id
+            ON CONFLICT(guild_id, trigger_channel_id) DO UPDATE SET
+                name_template = excluded.name_template,
+                category_id   = excluded.category_id
         ''', (guild_id, trigger_channel_id, name_template, category_id))
+        conn.commit()
+        conn.close()
+
+    def delete_vc_setting(self, guild_id: int, trigger_channel_id: int):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM vc_settings WHERE guild_id = ? AND trigger_channel_id = ?', (guild_id, trigger_channel_id))
         conn.commit()
         conn.close()
 

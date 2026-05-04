@@ -2565,25 +2565,25 @@ async def get_safety_kicks(request):
 # ── VC Creator ────────────────────────────────────────────────────────────────
 async def get_vc_settings(request):
     guild_id = request.match_info["guild_id"]
-    rows = await db_fetch("SELECT trigger_channel_id, name_template, category_id FROM vc_settings WHERE guild_id = ?", (guild_id,))
+    rows = await db_fetch("SELECT id, trigger_channel_id, name_template, category_id FROM vc_settings WHERE guild_id = ?", (guild_id,))
     if not rows:
-        return web.json_response({"enabled": False})
-    r = rows[0]
-    # Get channel name for display
-    trigger_name = str(r["trigger_channel_id"])
-    if _bot_ref:
-        guild = _bot_ref.get_guild(int(guild_id))
-        if guild:
-            ch = guild.get_channel(r["trigger_channel_id"])
+        return web.json_response({"enabled": False, "configs": []})
+    guild_obj = _bot_ref.get_guild(int(guild_id)) if _bot_ref else None
+    configs = []
+    for r in rows:
+        trigger_name = str(r["trigger_channel_id"])
+        if guild_obj:
+            ch = guild_obj.get_channel(r["trigger_channel_id"])
             if ch:
                 trigger_name = ch.name
-    return web.json_response({
-        "enabled": True,
-        "trigger_channel_id": str(r["trigger_channel_id"]),
-        "trigger_channel_name": trigger_name,
-        "name_template": r["name_template"],
-        "category_id": str(r["category_id"]) if r["category_id"] else None,
-    })
+        configs.append({
+            "id": r["id"],
+            "trigger_channel_id": str(r["trigger_channel_id"]),
+            "trigger_channel_name": trigger_name,
+            "name_template": r["name_template"],
+            "category_id": str(r["category_id"]) if r["category_id"] else None,
+        })
+    return web.json_response({"enabled": True, "configs": configs})
 
 async def set_vc_settings(request):
     guild_id = request.match_info["guild_id"]
@@ -2600,12 +2600,29 @@ async def set_vc_settings(request):
     else:
         await db_execute(
             "INSERT INTO vc_settings (guild_id, trigger_channel_id, name_template) VALUES (?, ?, ?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET trigger_channel_id=excluded.trigger_channel_id, name_template=excluded.name_template",
+            "ON CONFLICT(guild_id, trigger_channel_id) DO UPDATE SET name_template=excluded.name_template",
             (guild_id, trigger_channel_id, name_template)
         )
     return web.json_response({"ok": True})
 
+async def delete_vc_setting(request):
+    """Delete a single VC creator config by trigger_channel_id."""
+    guild_id = request.match_info["guild_id"]
+    trigger_channel_id = request.match_info["trigger_channel_id"]
+    if _bot_ref:
+        import asyncio as _asyncio
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.delete_vc_setting(
+            int(guild_id), int(trigger_channel_id)
+        ))
+    else:
+        await db_execute(
+            "DELETE FROM vc_settings WHERE guild_id = ? AND trigger_channel_id = ?",
+            (guild_id, trigger_channel_id)
+        )
+    return web.json_response({"ok": True})
+
 async def delete_vc_settings(request):
+    """Delete ALL VC creator configs for a guild."""
     guild_id = request.match_info["guild_id"]
     await db_execute("DELETE FROM vc_settings WHERE guild_id = ?", (guild_id,))
     return web.json_response({"ok": True})
@@ -3689,9 +3706,10 @@ def create_dashboard_app(bot=None):
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
     app.router.add_post ("/api/dev/db-tools",       db_tools_action)
     app.router.add_get   ("/api/guild/{guild_id}/stat-channels",            get_stat_channels)
-    app.router.add_get   ("/api/guild/{guild_id}/vc-settings",              get_vc_settings)
-    app.router.add_post  ("/api/guild/{guild_id}/vc-settings",              set_vc_settings)
-    app.router.add_delete("/api/guild/{guild_id}/vc-settings",              delete_vc_settings)
+    app.router.add_get   ("/api/guild/{guild_id}/vc-settings",                          get_vc_settings)
+    app.router.add_post  ("/api/guild/{guild_id}/vc-settings",                          set_vc_settings)
+    app.router.add_delete("/api/guild/{guild_id}/vc-settings",                          delete_vc_settings)
+    app.router.add_delete("/api/guild/{guild_id}/vc-settings/{trigger_channel_id}",     delete_vc_setting)
     app.router.add_get   ("/api/guild/{guild_id}/safety-settings",          get_safety_settings)
     app.router.add_post  ("/api/guild/{guild_id}/safety-settings",          set_safety_settings)
     app.router.add_get   ("/api/guild/{guild_id}/safety-kicks",             get_safety_kicks)
