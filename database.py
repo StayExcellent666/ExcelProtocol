@@ -337,10 +337,23 @@ class Database:
         # Migrate vc_settings from single-row (guild_id PK) to multi-row schema
         try:
             cursor.execute("PRAGMA table_info(vc_settings)")
-            cols = {row[1] for row in cursor.fetchall()}
-            if 'id' not in cols:
-                cursor.execute("SELECT guild_id, trigger_channel_id, name_template, category_id FROM vc_settings")
-                existing = cursor.fetchall()
+            col_info = cursor.fetchall()
+            col_names = {row[1] for row in col_info}
+            if 'id' not in col_names:
+                # Safely read only columns that actually exist in the old table
+                safe_cols = [c for c in ['guild_id', 'trigger_channel_id', 'name_template', 'category_id'] if c in col_names]
+                cursor.execute(f"SELECT {', '.join(safe_cols)} FROM vc_settings")
+                raw_rows = cursor.fetchall()
+                # Normalise to (guild_id, trigger_channel_id, name_template, category_id)
+                existing = []
+                for row in raw_rows:
+                    row_dict = dict(zip(safe_cols, row))
+                    existing.append((
+                        row_dict.get('guild_id'),
+                        row_dict.get('trigger_channel_id'),
+                        row_dict.get('name_template', "{username}'s VC"),
+                        row_dict.get('category_id'),
+                    ))
                 cursor.execute("DROP TABLE IF EXISTS vc_settings")
                 cursor.execute("""
                     CREATE TABLE vc_settings (
@@ -357,7 +370,7 @@ class Database:
                         "INSERT OR IGNORE INTO vc_settings (guild_id, trigger_channel_id, name_template, category_id) VALUES (?, ?, ?, ?)",
                         row
                     )
-                logger.info("Migrated vc_settings to multi-row schema")
+                logger.info(f"Migrated vc_settings to multi-row schema ({len(existing)} row(s) preserved)")
         except Exception as e:
             logger.warning(f"vc_settings migration: {e}")
 
@@ -660,7 +673,7 @@ class Database:
         conn.close()
         return [{'id': r[0], 'trigger_channel_id': r[1], 'name_template': r[2], 'category_id': r[3]} for r in rows]
 
-    def set_vc_settings(self, guild_id: int, trigger_channel_id: int, name_template: str = "🔵 {username}'s VC", category_id: int = None):
+    def set_vc_settings(self, guild_id: int, trigger_channel_id: int, name_template: str = "{username}'s VC", category_id: int = None):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
