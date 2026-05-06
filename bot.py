@@ -1471,9 +1471,9 @@ class TwitchNotifierBot(discord.Client):
             ),
             discord.Activity(
                 type=discord.ActivityType.listening,
-                name="listening to stream alerts across your servers 📡"
+                name="Huge Database overhaul!"
             ),
-            discord.Game(name="playing excelprotocol.fly.dev 🎮"),
+            discord.Game(name="If something does not work, report through dashboard."),
         ]
         current = self.rotate_status.current_loop % len(statuses)
         await self.change_presence(activity=statuses[current])
