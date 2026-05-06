@@ -825,7 +825,6 @@ class TwitchNotifierBot(discord.Client):
                                         icon_url=stream.get('profile_image_url', '')
                                     )
                                     embed.add_field(name="Game", value=stream['game_name'] or "No category", inline=True)
-                                    embed.add_field(name="Viewers", value=f"{stream['viewer_count']:,}", inline=True)
                                     thumbnail_url = stream['thumbnail_url'].replace('{width}', '440').replace('{height}', '248')
                                     embed.set_image(url=thumbnail_url)
                                     embed.set_footer(text="Twitch", icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png")
@@ -1045,19 +1044,29 @@ class TwitchNotifierBot(discord.Client):
                 icon_url=stream.get('profile_image_url', '')
             )
             
-            embed.add_field(
-                name="Game",
-                value=stream['game_name'] or "No category",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="Viewers",
-                value=str(stream['viewer_count']),
-                inline=True
-            )
-            
-            # Use stream thumbnail
+            game_name = stream['game_name'] or "No category"
+            embed.add_field(name="Game", value=game_name, inline=True)
+
+            # Fetch box art for the game and set as thumbnail
+            if stream.get('game_name'):
+                try:
+                    session = await self.twitch.get_session()
+                    headers = await self.twitch._headers()
+                    async with session.get(
+                        "https://api.twitch.tv/helix/games",
+                        headers=headers,
+                        params={"name": stream['game_name']}
+                    ) as resp:
+                        if resp.status == 200:
+                            gdata = await resp.json()
+                            games = gdata.get("data", [])
+                            if games:
+                                box_art = games[0]["box_art_url"].replace("{width}", "144").replace("{height}", "192")
+                                embed.set_thumbnail(url=box_art)
+                except Exception as e:
+                    logger.debug(f"Could not fetch box art for {stream['game_name']}: {e}")
+
+            # Use stream thumbnail as main image
             thumbnail_url = stream['thumbnail_url'].replace('{width}', '440').replace('{height}', '248')
             embed.set_image(url=thumbnail_url)
             
@@ -2126,12 +2135,6 @@ async def test_notification(interaction: discord.Interaction):
         inline=True
     )
     
-    embed.add_field(
-        name="Viewers",
-        value=str(fake_stream['viewer_count']),
-        inline=True
-    )
-    
     # Use stream thumbnail
     thumbnail_url = fake_stream['thumbnail_url'].replace('{width}', '440').replace('{height}', '248')
     embed.set_image(url=thumbnail_url)
@@ -3077,12 +3080,6 @@ async def manual_notif(
     embed.add_field(
         name="Game",
         value=stream['game_name'] or "No category",
-        inline=True
-    )
-    
-    embed.add_field(
-        name="Viewers",
-        value=str(stream['viewer_count']),
         inline=True
     )
     
