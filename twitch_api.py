@@ -1,7 +1,9 @@
 import aiohttp
+import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from config import TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
+from utils import utcnow, parse_twitch_iso
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +15,8 @@ class TwitchAPI:
         self.token_expires_at = None
         self.base_url = "https://api.twitch.tv/helix"
         self._session = None
+        # Serialise token refreshes so concurrent callers don't double-fetch
+        self._token_lock = asyncio.Lock()
 
     async def get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session"""
@@ -26,33 +30,44 @@ class TwitchAPI:
             await self._session.close()
 
     async def get_access_token(self) -> str:
-        """Get or refresh the app access token"""
-        now = datetime.utcnow()
+        """Get or refresh the app access token.
 
-        # Return cached token if still valid (with 60s buffer)
+        Concurrency-safe: an asyncio.Lock prevents two simultaneous callers
+        from both POSTing to /oauth2/token when the cache has just expired.
+        """
+        # Fast-path: cached token still valid (60s buffer). Lock-free check
+        # is fine because we re-check inside the lock before refreshing.
+        now = utcnow()
         if self.access_token and self.token_expires_at and now < self.token_expires_at - timedelta(seconds=60):
             return self.access_token
 
-        logger.info("Fetching new Twitch access token...")
-        session = await self.get_session()
+        async with self._token_lock:
+            # Re-check inside the lock — another coroutine may have refreshed
+            # while we were waiting.
+            now = utcnow()
+            if self.access_token and self.token_expires_at and now < self.token_expires_at - timedelta(seconds=60):
+                return self.access_token
 
-        async with session.post(
-            "https://id.twitch.tv/oauth2/token",
-            params={
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "grant_type": "client_credentials"
-            }
-        ) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise Exception(f"Failed to get Twitch token: {resp.status} - {text}")
+            logger.info("Fetching new Twitch access token...")
+            session = await self.get_session()
 
-            data = await resp.json()
-            self.access_token = data["access_token"]
-            self.token_expires_at = now + timedelta(seconds=data["expires_in"])
-            logger.info("Successfully obtained Twitch access token")
-            return self.access_token
+            async with session.post(
+                "https://id.twitch.tv/oauth2/token",
+                params={
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    "grant_type": "client_credentials"
+                }
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise Exception(f"Failed to get Twitch token: {resp.status} - {text}")
+
+                data = await resp.json()
+                self.access_token = data["access_token"]
+                self.token_expires_at = now + timedelta(seconds=data["expires_in"])
+                logger.info("Successfully obtained Twitch access token")
+                return self.access_token
 
     async def _headers(self) -> dict:
         """Build auth headers for Twitch API requests"""
@@ -268,8 +283,8 @@ class TwitchAPI:
         if not started_at_str:
             return None
 
-        started_at = datetime.strptime(started_at_str, "%Y-%m-%dT%H:%M:%SZ")
-        delta = datetime.utcnow() - started_at
+        started_at = parse_twitch_iso(started_at_str)
+        delta = utcnow() - started_at
 
         total_seconds = int(delta.total_seconds())
         hours = total_seconds // 3600

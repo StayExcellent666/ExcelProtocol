@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import tasks
 from datetime import datetime, date
 import logging
+from utils import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class BirthdayChecker:
 
     @tasks.loop(hours=1)
     async def _loop(self):
-        now = datetime.utcnow()
+        now = utcnow()
         today = now.date()
         if now.hour == 6 and self._last_birthday_date != today:
             await self._send_notifications(today)
@@ -64,7 +65,7 @@ class BirthdayChecker:
     @_loop.before_loop
     async def _before_loop(self):
         await self.bot.wait_until_ready()
-        now = datetime.utcnow()
+        now = utcnow()
         today = now.date()
         if now.hour == 6 and self._last_birthday_date != today:
             logger.info("Bot started during birthday window — running startup catch-up")

@@ -10,11 +10,16 @@ import asyncio
 import logging
 import psutil
 import os
-from datetime import datetime, timedelta
+import re
+from datetime import datetime, timedelta, timezone
 from database import Database
 from twitch_api import TwitchAPI
+from utils import utcnow, sanitise_streamer_name, parse_twitch_iso
 from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID, LOG_CHANNEL_ID
 from config import TWITCH_BOT_USERNAME, TWITCH_BOT_TOKEN
+
+# Compiled once at module load — used by on_member_join's safety filter
+_SUSPICIOUS_USERNAME_RE = re.compile(r'^[a-z]+_[a-z]+_\d{3,}$')
 
 # Set up logging
 logging.basicConfig(
@@ -38,9 +43,14 @@ class TwitchNotifierBot(discord.Client):
         
         # Track which streamers are currently live to avoid duplicate notifications
         self.live_streamers = set()
-        
+
+        # Track stream start times by lowercased login. Populated from EventSub
+        # `stream.online` events (started_at field) so check_milestones() can
+        # compute uptime locally without polling Twitch.
+        self._stream_starts: dict[str, datetime] = {}
+
         # Track bot start time for uptime calculation
-        self.start_time = datetime.utcnow()
+        self.start_time = utcnow()
         
         # Track cleanup statistics
         self.cleanup_stats = {'last_run': None, 'total_deleted': 0}
@@ -117,16 +127,38 @@ class TwitchNotifierBot(discord.Client):
         # Bug 2 fix: re-populate live_streamers from the DB so that streamers who
         # were already notified before a restart are not double-notified, and so
         # their stored message IDs can still be deleted when they go offline.
+        # Also restore _stream_starts (best-effort) using the earliest notification
+        # time per streamer as a fallback for the original stream.online timestamp.
+        # That timestamp is good to within ~15s (the thumbnail-wait delay), which
+        # is plenty accurate for 5h/10h milestone gating.
         try:
             conn = self.db.get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT streamer_name FROM notification_messages")
+            cursor.execute(
+                "SELECT streamer_name, MIN(sent_at) AS first_seen "
+                "FROM notification_messages GROUP BY streamer_name"
+            )
             rows = cursor.fetchall()
             conn.close()
-            for (name,) in rows:
+            restored_starts = 0
+            for name, first_seen in rows:
                 self.live_streamers.add(name.lower())
+                if first_seen:
+                    try:
+                        # SQLite CURRENT_TIMESTAMP is naive UTC; tag it.
+                        # Format: 'YYYY-MM-DD HH:MM:SS' (no timezone).
+                        ts = first_seen.replace('T', ' ').rstrip('Z')
+                        dt = datetime.strptime(ts.split('.')[0], '%Y-%m-%d %H:%M:%S')
+                        dt = dt.replace(tzinfo=timezone.utc)
+                        self._stream_starts[name.lower()] = dt
+                        restored_starts += 1
+                    except Exception as e:
+                        logger.debug(f"Could not parse sent_at='{first_seen}' for {name}: {e}")
             if rows:
-                logger.info(f"Restored {len(rows)} active streamer(s) from notification_messages into live_streamers")
+                logger.info(
+                    f"Restored {len(rows)} active streamer(s) from notification_messages "
+                    f"into live_streamers ({restored_starts} with usable start times)"
+                )
         except Exception as e:
             logger.error(f"Failed to restore live_streamers from DB on startup: {e}")
         
@@ -243,8 +275,8 @@ class TwitchNotifierBot(discord.Client):
                 color=0xFF4444
             )
             await asyncio.sleep(1)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Could not send shutdown log message: {e}")
         # Clean up Twitch API session
         try:
             await self.twitch.close()
@@ -305,88 +337,123 @@ class TwitchNotifierBot(discord.Client):
         logger.info(f"Cleaned up all data for guild {guild.id}")
 
     async def on_member_join(self, member: discord.Member):
-        """Check new members against safety filters."""
+        """Run safety filter, then send welcome message if configured."""
+        # ── Safety filter ────────────────────────────────────────────────────
+        kicked = False
         try:
             settings = self.db.get_safety_settings(member.guild.id)
-            if not settings or not settings['enabled']:
-                return
+            if settings and settings['enabled'] and not member.bot:
+                # Bypass role short-circuit
+                bypassed = False
+                if settings['bypass_role_id']:
+                    bypass_role = member.guild.get_role(settings['bypass_role_id'])
+                    if bypass_role and bypass_role in member.roles:
+                        bypassed = True
 
-            # Skip bots
-            if member.bot:
-                return
+                if not bypassed:
+                    account_age_days = (utcnow() - member.created_at).days
+                    reasons = []
 
-            # Skip if member has bypass role
-            if settings['bypass_role_id']:
-                bypass_role = member.guild.get_role(settings['bypass_role_id'])
-                if bypass_role and bypass_role in member.roles:
-                    return
+                    if account_age_days < settings['min_account_age_days']:
+                        reasons.append(f"account created {account_age_days} day(s) ago (minimum: {settings['min_account_age_days']})")
+                    if settings['check_no_avatar'] and not member.avatar:
+                        reasons.append("no profile picture")
+                    if settings['check_username_pattern']:
+                        if _SUSPICIOUS_USERNAME_RE.match(member.name.lower()):
+                            reasons.append(f"suspicious username pattern ({member.name})")
 
-            account_age_days = (datetime.utcnow() - member.created_at.replace(tzinfo=None)).days
-            reasons = []
+                    if reasons:
+                        reason_str = ", ".join(reasons)
+                        action = settings['action']
 
-            # Check account age
-            if account_age_days < settings['min_account_age_days']:
-                reasons.append(f"account created {account_age_days} day(s) ago (minimum: {settings['min_account_age_days']})")
+                        # DM the user before actioning
+                        if settings['dm_on_kick']:
+                            try:
+                                embed = discord.Embed(
+                                    title=f"{'Kicked' if action == 'kick' else 'Banned'} from {member.guild.name}",
+                                    description=(
+                                        f"You were automatically {'kicked' if action == 'kick' else 'banned'} from **{member.guild.name}** "
+                                        f"by ExcelProtocol's safety filter.\n\n"
+                                        f"**Reason:** {reason_str}\n\n"
+                                        f"{'You can rejoin once your account is older or contact a server admin.' if action == 'kick' else 'Please contact a server admin if you believe this was an error.'}"
+                                    ),
+                                    color=0xFF4444
+                                )
+                                await member.send(embed=embed)
+                            except Exception as e:
+                                logger.debug(f"Safety DM failed for {member} (DMs likely disabled): {e}")
 
-            # Check no avatar
-            if settings['check_no_avatar'] and not member.avatar:
-                reasons.append("no profile picture")
+                        try:
+                            if action == 'ban':
+                                await member.ban(reason=f"ExcelProtocol Safety: {reason_str}", delete_message_seconds=86400)
+                            else:
+                                await member.kick(reason=f"ExcelProtocol Safety: {reason_str}")
+                            kicked = True
+                        except discord.Forbidden:
+                            logger.warning(f"Safety: missing permissions to {action} {member} in {member.guild.name}")
+                        except Exception as e:
+                            logger.error(f"Safety: error actioning {member}: {e}")
 
-            # Check suspicious username pattern (word_word_numbers)
-            if settings['check_username_pattern']:
-                import re
-                if re.match(r'^[a-z]+_[a-z]+_\d{3,}$', member.name.lower()):
-                    reasons.append(f"suspicious username pattern ({member.name})")
-
-            if not reasons:
-                return
-
-            reason_str = ", ".join(reasons)
-            action = settings['action']
-
-            # DM the user before actioning
-            if settings['dm_on_kick']:
-                try:
-                    embed = discord.Embed(
-                        title=f"{'Kicked' if action == 'kick' else 'Banned'} from {member.guild.name}",
-                        description=(
-                            f"You were automatically {'kicked' if action == 'kick' else 'banned'} from **{member.guild.name}** "
-                            f"by ExcelProtocol's safety filter.\n\n"
-                            f"**Reason:** {reason_str}\n\n"
-                            f"{'You can rejoin once your account is older or contact a server admin.' if action == 'kick' else 'Please contact a server admin if you believe this was an error.'}"
-                        ),
-                        color=0xFF4444
-                    )
-                    await member.send(embed=embed)
-                except Exception:
-                    pass  # DMs disabled
-
-            # Take action
-            try:
-                if action == 'ban':
-                    await member.ban(reason=f"ExcelProtocol Safety: {reason_str}", delete_message_days=1)
-                else:
-                    await member.kick(reason=f"ExcelProtocol Safety: {reason_str}")
-            except discord.Forbidden:
-                logger.warning(f"Safety: missing permissions to {action} {member} in {member.guild.name}")
-                return
-            except Exception as e:
-                logger.error(f"Safety: error actioning {member}: {e}")
-                return
-
-            # Log to DB
-            self.db.log_safety_kick(member.guild.id, member.id, str(member), reason_str, action)
-            logger.info(f"Safety {action}: {member} in {member.guild.name} — {reason_str}")
-
-            # Log to bot owner log channel only
-            await self.log_to_channel(
-                "🛡️", f"Safety Filter — {action.capitalize()}",
-                f"**{member}** (`{member.id}`) in **{member.guild.name}**\n**Reason:** {reason_str}",
-                color=0xFF6B35
-            )
-
+                        if kicked:
+                            self.db.log_safety_kick(member.guild.id, member.id, str(member), reason_str, action)
+                            logger.info(f"Safety {action}: {member} in {member.guild.name} — {reason_str}")
+                            await self.log_to_channel(
+                                "🛡️", f"Safety Filter — {action.capitalize()}",
+                                f"**{member}** (`{member.id}`) in **{member.guild.name}**\n**Reason:** {reason_str}",
+                                color=0xFF6B35
+                            )
         except Exception as e:
             logger.error(f"Error in safety on_member_join for {member}: {e}", exc_info=True)
+
+        # If the safety filter kicked/banned them, don't welcome them.
+        if kicked:
+            return
+
+        # ── Welcome message (Feature #8) ─────────────────────────────────────
+        try:
+            await self._send_welcome(member)
+        except Exception as e:
+            logger.error(f"Welcome message failed for {member} in {member.guild.name}: {e}", exc_info=True)
+
+    async def _send_welcome(self, member: discord.Member):
+        """Send the configured welcome message to the configured channel.
+
+        No-op if welcome isn't configured (channel_id NULL) or the channel is gone.
+        Supports template variables: {user}, {username}, {server}, {member_count}.
+        """
+        if member.bot:
+            return
+        settings = self.db.get_welcome_settings(member.guild.id)
+        channel_id = settings.get("channel_id")
+        if not channel_id:
+            return  # not configured
+
+        channel = member.guild.get_channel(channel_id)
+        if not channel:
+            logger.debug(f"Welcome channel {channel_id} not found for guild {member.guild.id}")
+            return
+
+        # Default template if none set
+        template = settings.get("message") or (
+            "👋 Welcome to **{server}**, {user}! "
+            "You're our **{member_count}**th member!"
+        )
+
+        # Substitute variables
+        rendered = (
+            template
+            .replace("{user}", member.mention)
+            .replace("{username}", member.display_name)
+            .replace("{server}", member.guild.name)
+            .replace("{member_count}", str(member.guild.member_count or 0))
+        )
+
+        try:
+            await channel.send(rendered, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+        except discord.Forbidden:
+            logger.warning(f"Welcome: no permission to send in {channel.name} ({member.guild.name})")
+        except Exception as e:
+            logger.error(f"Welcome: error sending in {channel.name}: {e}")
 
     async def on_voice_state_update(self, member, before, after):
         """Handle VC creator — create channels on join, delete when empty."""
@@ -406,8 +473,8 @@ class TwitchNotifierBot(discord.Client):
                     if existing_channel:
                         try:
                             await member.move_to(existing_channel)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"Could not move {member} back to existing VC: {e}")
                         return
 
                 # Build channel name from template
@@ -698,7 +765,8 @@ class TwitchNotifierBot(discord.Client):
         """Called by the dashboard webhook when a stream.online event is received."""
         try:
             logger.info(f"EventSub stream.online: {user_login}")
-            self.live_streamers.add(user_login.lower())
+            name_lower = user_login.lower()
+            self.live_streamers.add(name_lower)
 
             # Fetch full stream data
             stream = await self.twitch.get_stream_info_by_user_id(user_id)
@@ -711,6 +779,15 @@ class TwitchNotifierBot(discord.Client):
                     logger.error(f"Still no stream data for {user_login} after retry — skipping notification")
                     return
 
+            # Cache the stream start time so check_milestones() can compute
+            # uptime locally without polling Twitch every 5 minutes.
+            started_at_str = stream.get('started_at')
+            if started_at_str:
+                try:
+                    self._stream_starts[name_lower] = parse_twitch_iso(started_at_str)
+                except Exception as e:
+                    logger.warning(f"Could not parse started_at for {name_lower}: {e}")
+
             # Wait for thumbnail
             logger.info(f"Waiting 15s for {user_login} thumbnail...")
             await asyncio.sleep(15)
@@ -722,7 +799,7 @@ class TwitchNotifierBot(discord.Client):
             streamers = self.db.get_all_streamers()
             monitoring_servers = [
                 s for s in streamers
-                if s['streamer_name'].lower() == user_login.lower()
+                if s['streamer_name'].lower() == name_lower
             ]
 
             for server_data in monitoring_servers:
@@ -751,6 +828,14 @@ class TwitchNotifierBot(discord.Client):
             name_lower = user_login.lower()
             if name_lower in self.live_streamers:
                 self.live_streamers.discard(name_lower)
+            # Drop the cached start time
+            self._stream_starts.pop(name_lower, None)
+
+            # Mark the most recent open stream_events row as ended for duration metrics
+            try:
+                self.db.mark_stream_ended(name_lower, ended_at=utcnow())
+            except Exception as e:
+                logger.error(f"Could not mark stream ended for {name_lower}: {e}")
 
             # Clear milestones
             streamers = self.db.get_all_streamers()
@@ -776,71 +861,104 @@ class TwitchNotifierBot(discord.Client):
                 color=0xFF4444
             )
 
-    # ── Milestone Check (lightweight poll — EventSub doesn't cover this) ──────
+    # ── Milestone Check ───────────────────────────────────────────────────────
+    # Uses cached started_at from EventSub, not Twitch polling. We only hit
+    # the Twitch API when a milestone is about to fire and we need fresh
+    # stream metadata (game, title, thumbnail) for the embed.
+
+    MILESTONES = (
+        (5,  "⏱️ **{user_name}** has been live for **5 HOURS!** They're not stopping anytime soon!"),
+        (10, "💀 **{user_name}** has been live for **10 HOURS STRAIGHT.** Send help. 👀"),
+    )
 
     @tasks.loop(minutes=5)
     async def check_milestones(self):
-        """Check 5h/10h stream milestones for currently live streamers."""
+        """Check 5h/10h stream milestones using locally cached start times."""
         try:
-            if not self.live_streamers:
+            if not self._stream_starts:
                 return
+            now = utcnow()
             streamers = self.db.get_all_streamers()
-            live_list = list(self.live_streamers)
-            for i in range(0, len(live_list), 100):
-                batch = live_list[i:i+100]
-                live_streams = await self.twitch.get_live_streams(batch)
-                for stream in live_streams:
-                    streamer_name = stream['user_login']
-                    stream_start = datetime.strptime(stream['started_at'], '%Y-%m-%dT%H:%M:%SZ')
-                    hours_live = (datetime.utcnow() - stream_start).total_seconds() / 3600
-                    for milestone_hours, description in [
-                        (5, f"⏱️ **{stream['user_name']}** has been live for **5 HOURS!** They're not stopping anytime soon!"),
-                        (10, f"💀 **{stream['user_name']}** has been live for **10 HOURS STRAIGHT.** Send help. 👀"),
-                    ]:
-                        if hours_live >= milestone_hours:
-                            monitoring_servers = [
-                                s for s in streamers
-                                if s['streamer_name'].lower() == streamer_name.lower()
-                            ]
-                            for server_data in monitoring_servers:
-                                guild_id = server_data['guild_id']
-                                if not self.db.get_milestone_notifications(guild_id):
-                                    continue
-                                if self.db.has_milestone_been_sent(guild_id, streamer_name, milestone_hours):
-                                    continue
-                                channel_id = server_data.get('custom_channel_id') or server_data['channel_id']
-                                channel = self.get_channel(channel_id)
-                                if not channel:
-                                    continue
-                                try:
-                                    embed_color = self.db.get_embed_color(guild_id)
-                                    embed = discord.Embed(
-                                        description=description,
-                                        color=embed_color,
-                                        timestamp=datetime.utcnow()
-                                    )
-                                    embed.set_author(
-                                        name=stream['user_name'],
-                                        url=f"https://twitch.tv/{stream['user_login']}",
-                                        icon_url=stream.get('profile_image_url', '')
-                                    )
-                                    embed.add_field(name="Game", value=stream['game_name'] or "No category", inline=True)
-                                    thumbnail_url = stream['thumbnail_url'].replace('{width}', '440').replace('{height}', '248')
-                                    embed.set_image(url=thumbnail_url)
-                                    embed.set_footer(text="Twitch", icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png")
-                                    view = discord.ui.View()
-                                    view.add_item(discord.ui.Button(
-                                        label="Watch Stream",
-                                        url=f"https://twitch.tv/{stream['user_login']}",
-                                        style=discord.ButtonStyle.link,
-                                        emoji="🔴"
-                                    ))
-                                    msg = await channel.send(embed=embed, view=view)
-                                    self.db.save_notification_message(guild_id, streamer_name, channel_id, msg.id)
-                                    self.db.record_milestone_sent(guild_id, streamer_name, milestone_hours)
-                                    logger.info(f"Sent {milestone_hours}h milestone for {streamer_name} in guild {guild_id}")
-                                except Exception as e:
-                                    logger.error(f"Error sending milestone notification: {e}")
+
+            # Snapshot the dict — handle_stream_offline may mutate it concurrently
+            for name_lower, started_at in list(self._stream_starts.items()):
+                # Compute uptime locally (no API call)
+                # parse_twitch_iso returns timezone-aware UTC; ensure both sides match
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+                hours_live = (now - started_at).total_seconds() / 3600
+
+                for milestone_hours, template in self.MILESTONES:
+                    if hours_live < milestone_hours:
+                        continue
+
+                    # Find every guild that monitors this streamer AND has milestones
+                    # enabled AND hasn't already sent this milestone — if zero match,
+                    # skip the Twitch API call entirely.
+                    pending_servers = []
+                    for s in streamers:
+                        if s['streamer_name'].lower() != name_lower:
+                            continue
+                        gid = s['guild_id']
+                        if not self.db.get_milestone_notifications(gid):
+                            continue
+                        if self.db.has_milestone_been_sent(gid, name_lower, milestone_hours):
+                            continue
+                        pending_servers.append(s)
+
+                    if not pending_servers:
+                        continue
+
+                    # Need fresh stream metadata for the embed — one API call total
+                    # (not one per 5-min cycle as before).
+                    try:
+                        live_streams = await self.twitch.get_live_streams([name_lower])
+                    except Exception as e:
+                        logger.error(f"Milestone API fetch failed for {name_lower}: {e}")
+                        continue
+                    if not live_streams:
+                        # Streamer went offline between cache and now — drop the entry
+                        # so we don't keep retrying.
+                        self._stream_starts.pop(name_lower, None)
+                        continue
+                    stream = live_streams[0]
+                    description = template.format(user_name=stream['user_name'])
+
+                    for server_data in pending_servers:
+                        guild_id = server_data['guild_id']
+                        channel_id = server_data.get('custom_channel_id') or server_data['channel_id']
+                        channel = self.get_channel(channel_id)
+                        if not channel:
+                            continue
+                        try:
+                            embed_color = self.db.get_embed_color(guild_id)
+                            embed = discord.Embed(
+                                description=description,
+                                color=embed_color,
+                                timestamp=utcnow()
+                            )
+                            embed.set_author(
+                                name=stream['user_name'],
+                                url=f"https://twitch.tv/{stream['user_login']}",
+                                icon_url=stream.get('profile_image_url', '')
+                            )
+                            embed.add_field(name="Game", value=stream['game_name'] or "No category", inline=True)
+                            thumbnail_url = stream['thumbnail_url'].replace('{width}', '440').replace('{height}', '248')
+                            embed.set_image(url=thumbnail_url)
+                            embed.set_footer(text="Twitch", icon_url="https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png")
+                            view = discord.ui.View()
+                            view.add_item(discord.ui.Button(
+                                label="Watch Stream",
+                                url=f"https://twitch.tv/{stream['user_login']}",
+                                style=discord.ButtonStyle.link,
+                                emoji="🔴"
+                            ))
+                            msg = await channel.send(embed=embed, view=view)
+                            self.db.save_notification_message(guild_id, name_lower, channel_id, msg.id)
+                            self.db.record_milestone_sent(guild_id, name_lower, milestone_hours)
+                            logger.info(f"Sent {milestone_hours}h milestone for {name_lower} in guild {guild_id}")
+                        except Exception as e:
+                            logger.error(f"Error sending milestone notification: {e}")
         except Exception as e:
             logger.error(f"Error in milestone check: {e}", exc_info=True)
 
@@ -888,8 +1006,19 @@ class TwitchNotifierBot(discord.Client):
                     current_login = user["login"].lower()
                     stored_login = id_to_login.get(uid, "").lower()
                     if stored_login and current_login != stored_login:
-                        # Rename detected — update all rows across all guilds
+                        # Rename detected — update DB rows across all guilds.
+                        # update_streamer_login() cascades to notification_messages,
+                        # milestone_sent, unresolvable_streamers, etc.
                         affected = self.db.update_streamer_login(stored_login, current_login)
+                        # Also rewrite our in-memory live_streamers set so the
+                        # offline handler can match and auto-delete works.
+                        if stored_login in self.live_streamers:
+                            self.live_streamers.discard(stored_login)
+                            self.live_streamers.add(current_login)
+                        # Same for the milestone start tracker, if the streamer
+                        # is currently live (rename mid-stream is rare but real).
+                        if hasattr(self, '_stream_starts') and stored_login in self._stream_starts:
+                            self._stream_starts[current_login] = self._stream_starts.pop(stored_login)
                         renamed.append(f"{stored_login} → {current_login} ({affected} guild(s))")
                         logger.info(f"Streamer renamed: {stored_login} → {current_login} ({affected} guilds updated)")
 
@@ -913,7 +1042,7 @@ class TwitchNotifierBot(discord.Client):
 
         # Rate limit guild owner DM to once per hour per guild, same as send_owner_alert
         error_key = f"perm_issue:{guild.id}"
-        current_time = datetime.utcnow()
+        current_time = utcnow()
         if error_key in self.error_alerts_sent:
             time_diff = (current_time - self.error_alerts_sent[error_key]).total_seconds()
             if time_diff < self.alert_cooldown:
@@ -1035,7 +1164,7 @@ class TwitchNotifierBot(discord.Client):
                 url=f"https://twitch.tv/{stream['user_login']}",
                 description=f"**{stream['user_name']}** is now live!",
                 color=embed_color,
-                timestamp=datetime.utcnow()
+                timestamp=utcnow()
             )
             
             embed.set_author(
@@ -1094,8 +1223,13 @@ class TwitchNotifierBot(discord.Client):
                 message.id
             )
             
-            # Log stream event for leaderboard
-            self.db.log_stream_event(server_data['guild_id'], stream['user_login'])
+            # Log stream event for leaderboard — pass the actual stream start
+            # so duration metrics work correctly.
+            try:
+                started_at = parse_twitch_iso(stream['started_at']) if stream.get('started_at') else None
+            except Exception:
+                started_at = None
+            self.db.log_stream_event(server_data['guild_id'], stream['user_login'], started_at=started_at)
 
             # Log notification for history
             self.db.log_notification(server_data['guild_id'], stream['user_login'], effective_channel_id, 'sent')
@@ -1119,8 +1253,8 @@ class TwitchNotifierBot(discord.Client):
             )
             try:
                 self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('custom_channel_id') or server_data.get('channel_id', 0), 'failed')
-            except Exception:
-                pass
+            except Exception as log_err:
+                logger.debug(f"Could not write notification_log row: {log_err}")
 
         except Exception as e:
             logger.error(f"Error sending notification: {e}", exc_info=True)
@@ -1133,8 +1267,8 @@ class TwitchNotifierBot(discord.Client):
             )
             try:
                 self.db.log_notification(server_data['guild_id'], stream['user_login'], server_data.get('custom_channel_id') or server_data.get('channel_id', 0), 'failed')
-            except Exception:
-                pass
+            except Exception as log_err:
+                logger.debug(f"Could not write notification_log row: {log_err}")
     
     async def delete_offline_notifications(self, streamer_name: str):
         """Delete notification messages when streamer goes offline"""
@@ -1186,7 +1320,7 @@ class TwitchNotifierBot(discord.Client):
         try:
             # Check if we already sent this alert recently (rate limiting)
             error_key = f"{error_type}:{guild_id or 'global'}"
-            current_time = datetime.utcnow()
+            current_time = utcnow()
             
             if error_key in self.error_alerts_sent:
                 last_sent = self.error_alerts_sent[error_key]
@@ -1256,7 +1390,7 @@ class TwitchNotifierBot(discord.Client):
                 title=f"{emoji} {title}",
                 description=description,
                 color=color,
-                timestamp=datetime.utcnow()
+                timestamp=utcnow()
             )
             embed.set_footer(text="ExcelProtocol Log")
             await channel.send(embed=embed)
@@ -1285,7 +1419,7 @@ class TwitchNotifierBot(discord.Client):
                 )
                 total_deleted += deleted
             
-            self.cleanup_stats['last_run'] = datetime.utcnow()
+            self.cleanup_stats['last_run'] = utcnow()
             self.cleanup_stats['total_deleted'] += total_deleted
             logger.debug(f"Cleanup complete: {total_deleted} messages deleted")
         
@@ -1314,7 +1448,7 @@ class TwitchNotifierBot(discord.Client):
     async def monthly_leaderboard_cleanup(self):
         """Check daily if it is the first of the month and clean old stream events"""
         try:
-            now = datetime.utcnow()
+            now = utcnow()
             if now.day == 1:
                 deleted = self.db.cleanup_stream_events()
                 logger.info(f"Monthly leaderboard reset: deleted {deleted} old stream events")
@@ -1372,7 +1506,7 @@ class TwitchNotifierBot(discord.Client):
                         if resp.status == 200:
                             data = await resp.json()
                             from datetime import datetime, timedelta
-                            expires_at = (datetime.utcnow() + timedelta(seconds=data["expires_in"])).isoformat()
+                            expires_at = (utcnow() + timedelta(seconds=data["expires_in"])).isoformat()
                             self.db.set_broadcaster_token(
                                 t["guild_id"], t["twitch_user_id"], t["twitch_login"],
                                 data["access_token"], data.get("refresh_token", t["refresh_token"]), expires_at
@@ -1552,7 +1686,7 @@ class TwitchNotifierBot(discord.Client):
                 return 0
             
             # Calculate cutoff time
-            cutoff_time = datetime.utcnow() - timedelta(hours=interval_hours)
+            cutoff_time = utcnow() - timedelta(hours=interval_hours)
             
             # Fetch messages older than cutoff
             messages_to_delete = []
@@ -1750,21 +1884,8 @@ class VCControlView(discord.ui.View):
 # Initialize bot
 bot = TwitchNotifierBot()
 
-def sanitise_streamer_name(raw: str) -> str:
-    """Strip URLs and whitespace from a streamer input, returning just the username.
-    Handles inputs like 'https://twitch.tv/username', 'twitch.tv/username', '@username'."""
-    name = raw.strip()
-    # Strip full URL forms
-    for prefix in ("https://www.twitch.tv/", "http://www.twitch.tv/",
-                   "https://twitch.tv/", "http://twitch.tv/", "twitch.tv/"):
-        if name.lower().startswith(prefix):
-            name = name[len(prefix):]
-            break
-    # Strip leading @ 
-    name = name.lstrip("@")
-    # Strip any trailing slashes or query strings
-    name = name.split("/")[0].split("?")[0].strip()
-    return name.lower()
+# sanitise_streamer_name is imported from utils above — use that.
+# (Removed the local copy here so we have one source of truth.)
 
 # Slash Commands
 
@@ -1999,7 +2120,7 @@ async def bot_stats(interaction: discord.Interaction):
     cpu_percent = process.cpu_percent(interval=0.1)
     
     # Uptime
-    uptime = datetime.utcnow() - bot.start_time
+    uptime = utcnow() - bot.start_time
     days = uptime.days
     hours, remainder = divmod(uptime.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -2016,7 +2137,7 @@ async def bot_stats(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📊 Bot Statistics",
         color=bot.db.get_embed_color(interaction.guild_id),
-        timestamp=datetime.utcnow()
+        timestamp=utcnow()
     )
     
     # Memory bar visualization
@@ -2120,7 +2241,7 @@ async def test_notification(interaction: discord.Interaction):
         url=f"https://twitch.tv/{fake_stream['user_login']}",
         description=f"**{fake_stream['user_name']}** is now live!",
         color=bot.db.get_embed_color(interaction.guild_id),  # Use server custom color
-        timestamp=datetime.utcnow()
+        timestamp=utcnow()
     )
     
     embed.set_author(
@@ -2616,7 +2737,7 @@ async def cleanup_test(interaction: discord.Interaction, channel: discord.TextCh
     await interaction.response.defer(ephemeral=True)
     
     # Count messages that would be deleted
-    cutoff_time = datetime.utcnow() - timedelta(hours=config['interval_hours'])
+    cutoff_time = utcnow() - timedelta(hours=config['interval_hours'])
     count = 0
     
     try:
@@ -2742,7 +2863,7 @@ async def help_command(interaction: discord.Interaction):
             title="🟣 Twitch Chat Bot — Setup",
             description=(
                 "**Link your Twitch channel:**\n"
-                "`/twitchset channel:yourchannel`\n\n"
+                "Open the dashboard → Twitch tab → Connect Twitch\n\n"
                 "**Add or edit a custom command:**\n"
                 "`/cmd` — Opens a dropdown to pick an existing command or create new\n\n"
                 "**Remove a command:**\n"
@@ -2889,7 +3010,7 @@ async def bot_info(interaction: discord.Interaction):
     
     embed.add_field(
         name="⏱️ Uptime",
-        value=f"{(datetime.utcnow() - bot.start_time).days} days",
+        value=f"{(utcnow() - bot.start_time).days} days",
         inline=True
     )
     
@@ -3068,7 +3189,7 @@ async def manual_notif(
         url=f"https://twitch.tv/{stream['user_login']}",
         description=f"**{stream['user_name']}** is now live!",
         color=embed_color,
-        timestamp=datetime.utcnow()
+        timestamp=utcnow()
     )
     
     embed.set_author(
@@ -3229,7 +3350,7 @@ async def leaderboard(interaction: discord.Interaction):
     """Show the monthly leaderboard for this server"""
     rows = bot.db.get_server_leaderboard(interaction.guild_id, limit=10)
     
-    now = datetime.utcnow()
+    now = utcnow()
     month_name = now.strftime("%B %Y")
     
     embed = discord.Embed(
@@ -3246,8 +3367,24 @@ async def leaderboard(interaction: discord.Interaction):
         for i, row in enumerate(rows):
             medal = medals[i] if i < 3 else f"{i+1}."
             streams = row["stream_count"]
+            hours = row.get("hours_streamed", 0)
+            longest = row.get("longest_hours", 0)
+            streak = row.get("streak_days", 0)
             name = row["streamer_name"]
-            lines.append(f"{medal} [{name}](https://twitch.tv/{name}) — {streams} stream{'s' if streams != 1 else ''}")
+
+            # Build a metrics suffix that only shows what's known. If hours == 0
+            # (no completed sessions yet) we fall back to just the stream count.
+            parts = [f"{streams} stream{'s' if streams != 1 else ''}"]
+            if hours > 0:
+                parts.append(f"{hours}h total")
+            if longest > 0:
+                parts.append(f"{longest}h longest")
+            if streak > 1:
+                parts.append(f"🔥 {streak}-day streak")
+
+            lines.append(
+                f"{medal} [{name}](https://twitch.tv/{name}) — " + " · ".join(parts)
+            )
         embed.add_field(name="Rankings", value="\n".join(lines), inline=False)
     
     embed.set_footer(text="Resets on the 1st of each month")
@@ -3268,7 +3405,7 @@ async def global_leaderboard(interaction: discord.Interaction):
 
     rows = bot.db.get_global_leaderboard(limit=15)
     
-    now = datetime.utcnow()
+    now = utcnow()
     month_name = now.strftime("%B %Y")
     
     embed = discord.Embed(
@@ -3287,7 +3424,21 @@ async def global_leaderboard(interaction: discord.Interaction):
             name = row["streamer_name"]
             streams = row["total_streams"]
             servers = row["server_count"]
-            lines.append(f"{medal} [{name}](https://twitch.tv/{name}) — {streams} stream{'s' if streams != 1 else ''} across {servers} server{'s' if servers != 1 else ''}")
+            hours = row.get("hours_streamed", 0)
+            longest = row.get("longest_hours", 0)
+
+            parts = [
+                f"{streams} stream{'s' if streams != 1 else ''}",
+                f"{servers} server{'s' if servers != 1 else ''}",
+            ]
+            if hours > 0:
+                parts.append(f"{hours}h")
+            if longest > 0:
+                parts.append(f"{longest}h longest")
+
+            lines.append(
+                f"{medal} [{name}](https://twitch.tv/{name}) — " + " · ".join(parts)
+            )
 
         # Split into fields if over 1024 char limit
         current_field = []
@@ -3375,7 +3526,7 @@ async def db_stats(interaction: discord.Interaction):
 
     conn.close()
 
-    now = datetime.utcnow()
+    now = utcnow()
     month_name = now.strftime("%B %Y")
 
     embed = discord.Embed(

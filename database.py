@@ -1,6 +1,7 @@
 import sqlite3
 import logging
 import os
+import threading
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -20,14 +21,33 @@ class Database:
         db_dir = os.path.dirname(self.db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
-        
+
+        # WAL mode is persistent on the DB file once set, but we still set it
+        # in init_database() once. Track whether we've set it to skip the
+        # redundant PRAGMA on every subsequent connection.
+        self._wal_initialized = False
+        self._wal_lock = threading.Lock()
+
         self.init_database()
-    
+
     def get_connection(self):
-        """Create a database connection with WAL mode and busy timeout."""
+        """Create a database connection with WAL mode and busy timeout.
+
+        WAL is set persistently on the DB file in init_database(), so we only
+        need busy_timeout per connection. This is a minor optimization — the
+        previous version re-set WAL on every call, which is harmless but
+        wastes a syscall.
+        """
         conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout must be set per-connection
         conn.execute("PRAGMA busy_timeout=30000")
+        # Belt and braces: ensure WAL is on. The first connection from this
+        # process sets it; subsequent ones inherit the file-level setting.
+        if not self._wal_initialized:
+            with self._wal_lock:
+                if not self._wal_initialized:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    self._wal_initialized = True
         return conn
     
     def init_database(self):
@@ -187,6 +207,18 @@ class Database:
             conn.commit()
             logger.info("Migration: added live_role_id to server_settings")
 
+        # Migration: add welcome_channel_id and welcome_message to server_settings (Feature #8)
+        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("server_settings") WHERE name="welcome_channel_id"')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('ALTER TABLE server_settings ADD COLUMN welcome_channel_id INTEGER DEFAULT NULL')
+            conn.commit()
+            logger.info("Migration: added welcome_channel_id to server_settings")
+        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("server_settings") WHERE name="welcome_message"')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('ALTER TABLE server_settings ADD COLUMN welcome_message TEXT DEFAULT NULL')
+            conn.commit()
+            logger.info("Migration: added welcome_message to server_settings")
+
         # Migration: add body_text to reaction_roles
         cursor.execute('SELECT COUNT(*) FROM pragma_table_info("reaction_roles") WHERE name="body_text"')
         if cursor.fetchone()[0] == 0:
@@ -218,6 +250,14 @@ class Database:
             )
         ''')
 
+        # Migration: add ended_at to stream_events for duration tracking (Feature #7)
+        try:
+            cursor.execute('ALTER TABLE stream_events ADD COLUMN ended_at TIMESTAMP DEFAULT NULL')
+            conn.commit()
+            logger.info("Migration: added ended_at to stream_events")
+        except Exception:
+            pass  # Column already exists
+
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_stream_events_guild
             ON stream_events(guild_id, streamer_name)
@@ -233,6 +273,14 @@ class Database:
                 UNIQUE(streamer_name, stream_date)
             )
         ''')
+
+        # Migration: add ended_at to global_stream_events
+        try:
+            cursor.execute('ALTER TABLE global_stream_events ADD COLUMN ended_at TIMESTAMP DEFAULT NULL')
+            conn.commit()
+            logger.info("Migration: added ended_at to global_stream_events")
+        except Exception:
+            pass  # Column already exists
 
         # ----------------------------------------------------------------
         # Twitch chat bot tables (new -- existing tables untouched)
@@ -933,6 +981,36 @@ class Database:
         conn.commit()
         conn.close()
 
+    # ── Welcome messages (Feature #8) ─────────────────────────────────────────
+
+    def get_welcome_settings(self, guild_id: int) -> dict:
+        """Return {channel_id, message} for a guild's welcome configuration.
+        Both can be None — channel_id None means welcome is disabled."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT welcome_channel_id, welcome_message FROM server_settings WHERE guild_id = ?",
+            (guild_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return {"channel_id": None, "message": None}
+        return {"channel_id": row[0], "message": row[1]}
+
+    def set_welcome_settings(self, guild_id: int, channel_id: int | None, message: str | None):
+        """Configure the welcome message. Pass channel_id=None to disable."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO server_settings (guild_id, notification_channel_id, welcome_channel_id, welcome_message) "
+            "VALUES (?, 0, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET welcome_channel_id = ?, welcome_message = ?",
+            (guild_id, channel_id, message, channel_id, message)
+        )
+        conn.commit()
+        conn.close()
+
     def update_streamer_user_id(self, guild_id: int, streamer_name: str, twitch_user_id: str):
         """Store the Twitch user ID for a monitored streamer."""
         conn = self.get_connection()
@@ -945,14 +1023,60 @@ class Database:
         conn.close()
 
     def update_streamer_login(self, old_login: str, new_login: str):
-        """Update streamer_name across all guilds when a Twitch user renames."""
+        """Update streamer_name across all guilds when a Twitch user renames.
+
+        Cascades the rename to every table that stores streamer_name so we don't
+        leave orphan rows under the old name (which would prevent auto-delete,
+        leak unresolvable warnings, and break milestone dedup).
+
+        Returns number of rows updated in monitored_streamers (for logging).
+        """
+        old = old_login.lower()
+        new = new_login.lower()
         conn = self.get_connection()
         cursor = conn.cursor()
+
+        # Primary table — what the caller cares about for the return value.
         cursor.execute(
             'UPDATE monitored_streamers SET streamer_name = ? WHERE streamer_name = ?',
-            (new_login.lower(), old_login.lower())
+            (new, old)
         )
         affected = cursor.rowcount
+
+        # Cascade rename to every table that references streamer_name. Each table
+        # has different uniqueness constraints, so be careful: where a row under
+        # `new` could already exist (e.g. someone monitors both old and new
+        # by coincidence), DELETE the old to avoid UNIQUE conflicts.
+        for table, key_cols in [
+            ('notification_messages', ('guild_id', 'streamer_name', 'message_id')),
+            ('milestone_sent',        ('guild_id', 'streamer_name', 'milestone_hours')),
+            ('unresolvable_streamers',('streamer_name', 'guild_id')),
+            ('notification_log',      None),  # no UNIQUE on streamer_name; safe to bulk-update
+            ('stream_events',         None),  # ditto
+        ]:
+            try:
+                if key_cols is None:
+                    cursor.execute(
+                        f'UPDATE {table} SET streamer_name = ? WHERE streamer_name = ?',
+                        (new, old)
+                    )
+                else:
+                    # Delete any existing rows under the new name first to avoid
+                    # UNIQUE-constraint conflicts during the rename.
+                    cursor.execute(
+                        f'DELETE FROM {table} WHERE streamer_name = ? '
+                        f'AND ({", ".join(key_cols)}) IN ('
+                        f'  SELECT {", ".join(key_cols)} FROM {table} WHERE streamer_name = ?)',
+                        (new, old)
+                    )
+                    cursor.execute(
+                        f'UPDATE {table} SET streamer_name = ? WHERE streamer_name = ?',
+                        (new, old)
+                    )
+            except sqlite3.OperationalError as e:
+                # Table might not exist on very old DBs — log and continue.
+                logger.warning(f"Rename cascade skipped for {table}: {e}")
+
         conn.commit()
         conn.close()
         return affected
@@ -1350,32 +1474,125 @@ class Database:
     # Stream events (leaderboard)
     # ------------------------------------------------------------------
 
-    def log_stream_event(self, guild_id: int, streamer_name: str):
-        """Log a stream going live. Per-server for server leaderboard, deduplicated globally."""
+    def log_stream_event(self, guild_id: int, streamer_name: str, started_at=None):
+        """Log a stream going live. Per-server for server leaderboard, deduplicated globally.
+
+        If `started_at` (datetime) is provided, it's used as the actual stream start
+        timestamp from EventSub. Otherwise we fall back to CURRENT_TIMESTAMP, which
+        is what older code paths used.
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        # Per-server event (used for server leaderboard)
-        cursor.execute(
-            "INSERT INTO stream_events (guild_id, streamer_name) VALUES (?, ?)",
-            (guild_id, streamer_name.lower())
-        )
+        if started_at is not None:
+            # Store as ISO 8601 UTC (no tz suffix — SQLite uses naive timestamps)
+            ts = started_at.strftime('%Y-%m-%d %H:%M:%S') if hasattr(started_at, 'strftime') else str(started_at)
+            cursor.execute(
+                "INSERT INTO stream_events (guild_id, streamer_name, went_live_at) VALUES (?, ?, ?)",
+                (guild_id, streamer_name.lower(), ts)
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO stream_events (guild_id, streamer_name) VALUES (?, ?)",
+                (guild_id, streamer_name.lower())
+            )
 
         # Global event -- one per stream session per day (UNIQUE constraint deduplicates)
-        cursor.execute('''
-            INSERT OR IGNORE INTO global_stream_events (streamer_name, stream_date)
-            VALUES (?, date('now'))
-        ''', (streamer_name.lower(),))
+        if started_at is not None:
+            ts = started_at.strftime('%Y-%m-%d %H:%M:%S') if hasattr(started_at, 'strftime') else str(started_at)
+            cursor.execute('''
+                INSERT OR IGNORE INTO global_stream_events (streamer_name, stream_date, went_live_at)
+                VALUES (?, date('now'), ?)
+            ''', (streamer_name.lower(), ts))
+        else:
+            cursor.execute('''
+                INSERT OR IGNORE INTO global_stream_events (streamer_name, stream_date)
+                VALUES (?, date('now'))
+            ''', (streamer_name.lower(),))
+
+        conn.commit()
+        conn.close()
+
+    def mark_stream_ended(self, streamer_name: str, ended_at=None):
+        """Mark all open stream_events / global_stream_events for this streamer as ended.
+
+        Called from handle_stream_offline. Only updates rows where ended_at IS NULL,
+        and only the most recent open one per (guild, streamer) — older orphans (from
+        bot crashes mid-stream) stay open as a marker that we don't have full data.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        ts = (ended_at.strftime('%Y-%m-%d %H:%M:%S')
+              if ended_at is not None and hasattr(ended_at, 'strftime')
+              else "datetime('now')")
+
+        # Use a parametrised value when we have a real timestamp, otherwise SQLite literal
+        if ended_at is not None and hasattr(ended_at, 'strftime'):
+            cursor.execute('''
+                UPDATE stream_events SET ended_at = ?
+                WHERE id IN (
+                    SELECT MAX(id) FROM stream_events
+                    WHERE streamer_name = ? AND ended_at IS NULL
+                    GROUP BY guild_id
+                )
+            ''', (ts, streamer_name.lower()))
+            cursor.execute('''
+                UPDATE global_stream_events SET ended_at = ?
+                WHERE id = (
+                    SELECT MAX(id) FROM global_stream_events
+                    WHERE streamer_name = ? AND ended_at IS NULL
+                )
+            ''', (ts, streamer_name.lower()))
+        else:
+            cursor.execute('''
+                UPDATE stream_events SET ended_at = datetime('now')
+                WHERE id IN (
+                    SELECT MAX(id) FROM stream_events
+                    WHERE streamer_name = ? AND ended_at IS NULL
+                    GROUP BY guild_id
+                )
+            ''', (streamer_name.lower(),))
+            cursor.execute('''
+                UPDATE global_stream_events SET ended_at = datetime('now')
+                WHERE id = (
+                    SELECT MAX(id) FROM global_stream_events
+                    WHERE streamer_name = ? AND ended_at IS NULL
+                )
+            ''', (streamer_name.lower(),))
 
         conn.commit()
         conn.close()
 
     def get_server_leaderboard(self, guild_id: int, limit: int = 10) -> list:
-        """Get top streamers for a server this month"""
+        """Get top streamers for a server this month with enhanced metrics.
+
+        Returns each row with:
+          - streamer_name
+          - stream_count: how many times they went live this month (existing metric)
+          - hours_streamed: sum of (ended_at - went_live_at) for completed sessions
+          - longest_hours: longest single completed session this month
+          - streak_days: current consecutive-day streak (looking back from today)
+
+        Sessions without ended_at (active right now, or where the bot missed the
+        offline event) contribute to stream_count only — not to hours/longest.
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
+
+        # Hours + longest from completed sessions (ended_at NOT NULL)
         cursor.execute('''
-            SELECT streamer_name, COUNT(*) as stream_count
+            SELECT streamer_name,
+                   COUNT(*) AS stream_count,
+                   COALESCE(SUM(
+                       CASE WHEN ended_at IS NOT NULL
+                            THEN (julianday(ended_at) - julianday(went_live_at)) * 24
+                            ELSE 0 END
+                   ), 0) AS hours_streamed,
+                   COALESCE(MAX(
+                       CASE WHEN ended_at IS NOT NULL
+                            THEN (julianday(ended_at) - julianday(went_live_at)) * 24
+                            ELSE 0 END
+                   ), 0) AS longest_hours
             FROM stream_events
             WHERE guild_id = ?
               AND strftime('%Y-%m', went_live_at) = strftime('%Y-%m', 'now')
@@ -1384,21 +1601,76 @@ class Database:
             LIMIT ?
         ''', (guild_id, limit))
         rows = cursor.fetchall()
+
+        # For each top streamer, compute the streak — number of consecutive
+        # days (working backwards from today) on which they went live.
+        result = []
+        for r in rows:
+            streamer_name = r[0]
+            cursor.execute('''
+                SELECT DISTINCT date(went_live_at) AS d
+                FROM stream_events
+                WHERE guild_id = ? AND streamer_name = ?
+                  AND went_live_at >= date('now', '-60 days')
+                ORDER BY d DESC
+            ''', (guild_id, streamer_name))
+            days = [row[0] for row in cursor.fetchall()]
+            streak = 0
+            from datetime import date as _date, timedelta as _td
+            today = _date.today()
+            cursor_day = today
+            for d in days:
+                # Parse YYYY-MM-DD
+                try:
+                    dt = _date.fromisoformat(d)
+                except Exception:
+                    break
+                if dt == cursor_day:
+                    streak += 1
+                    cursor_day = cursor_day - _td(days=1)
+                elif dt == cursor_day + _td(days=1):
+                    # Already counted (initial today might match dt one day earlier)
+                    continue
+                else:
+                    break
+
+            result.append({
+                'streamer_name': streamer_name,
+                'stream_count': r[1],
+                'hours_streamed': round(r[2], 1),
+                'longest_hours': round(r[3], 1),
+                'streak_days': streak,
+            })
+
         conn.close()
-        return [{'streamer_name': r[0], 'stream_count': r[1]} for r in rows]
+        return result
 
     def get_global_leaderboard(self, limit: int = 15) -> list:
-        """Get top streamers globally this month -- counts unique stream sessions only"""
+        """Get top streamers globally this month -- counts unique stream sessions only.
+
+        Adds hours_streamed and longest_hours derived from global_stream_events
+        when ended_at is available (Feature #7 enhancement).
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             SELECT g.streamer_name,
-                   COUNT(*) as total_streams,
+                   COUNT(*) AS total_streams,
                    (SELECT COUNT(DISTINCT s.guild_id)
                     FROM stream_events s
                     WHERE s.streamer_name = g.streamer_name
                     AND strftime('%Y-%m', s.went_live_at) = strftime('%Y-%m', 'now')
-                   ) as server_count
+                   ) AS server_count,
+                   COALESCE(SUM(
+                       CASE WHEN g.ended_at IS NOT NULL
+                            THEN (julianday(g.ended_at) - julianday(g.went_live_at)) * 24
+                            ELSE 0 END
+                   ), 0) AS hours_streamed,
+                   COALESCE(MAX(
+                       CASE WHEN g.ended_at IS NOT NULL
+                            THEN (julianday(g.ended_at) - julianday(g.went_live_at)) * 24
+                            ELSE 0 END
+                   ), 0) AS longest_hours
             FROM global_stream_events g
             WHERE strftime('%Y-%m', g.went_live_at) = strftime('%Y-%m', 'now')
             GROUP BY g.streamer_name
@@ -1407,7 +1679,13 @@ class Database:
         ''', (limit,))
         rows = cursor.fetchall()
         conn.close()
-        return [{'streamer_name': r[0], 'total_streams': r[1], 'server_count': r[2]} for r in rows]
+        return [{
+            'streamer_name':  r[0],
+            'total_streams':  r[1],
+            'server_count':   r[2],
+            'hours_streamed': round(r[3], 1),
+            'longest_hours':  round(r[4], 1),
+        } for r in rows]
 
     def log_notification(self, guild_id: int, streamer_name: str, channel_id: int, status: str = 'sent'):
         """Log a notification attempt"""

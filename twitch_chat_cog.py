@@ -171,35 +171,8 @@ class CmdRemoveView(discord.ui.View):
 async def setup(discord_bot, twitch_chat_bot):
     """Register all Twitch slash commands directly on the bot tree"""
 
-    # ------------------------------------------------------------------
-    # /twitchset
-    # ------------------------------------------------------------------
-    @app_commands.default_permissions(manage_guild=True)
-    @discord_bot.tree.command(name="twitchset", description="Link this Discord server to your Twitch channel")
-    @app_commands.describe(channel="Your Twitch channel name (e.g. ninja)")
-    async def twitch_setchannel(interaction: discord.Interaction, channel: str):
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ You need 'Manage Server' permission.", ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
-        channel_name = channel.lower().strip().lstrip("@")
-
-        user = await discord_bot.twitch.get_user(channel_name)
-        if not user:
-            await interaction.followup.send(f"❌ Could not find Twitch channel **{channel_name}**. Check the spelling.", ephemeral=True)
-            return
-
-        discord_bot.db.set_twitch_channel(interaction.guild_id, channel_name)
-
-        if twitch_chat_bot:
-            await twitch_chat_bot.join_channel(channel_name)
-
-        await interaction.followup.send(
-            f"✅ Linked to **{user['display_name']}** (twitch.tv/{channel_name})\n"
-            f"The chat bot is now active in that channel!",
-            ephemeral=True
-        )
+    # /twitchset was removed — linking is now done via the dashboard.
+    # /twitchremove, /twitchstatus, and /twitchstats remain for convenience.
 
     # ------------------------------------------------------------------
     # /twitchremove
@@ -232,7 +205,7 @@ async def setup(discord_bot, twitch_chat_bot):
     async def twitch_status(interaction: discord.Interaction):
         row = discord_bot.db.get_twitch_channel(interaction.guild_id)
         if not row:
-            await interaction.response.send_message("❌ No Twitch channel linked. Use `/twitchset` to link one.", ephemeral=True)
+            await interaction.response.send_message("❌ No Twitch channel linked. Connect Twitch from the dashboard.", ephemeral=True)
             return
 
         channel_name = row["twitch_channel"]
@@ -292,7 +265,7 @@ async def setup(discord_bot, twitch_chat_bot):
 
         row = discord_bot.db.get_twitch_channel(interaction.guild_id)
         if not row:
-            await interaction.response.send_message("❌ No Twitch channel linked. Use `/twitchset` first.", ephemeral=True)
+            await interaction.response.send_message("❌ No Twitch channel linked. Connect Twitch from the dashboard first.", ephemeral=True)
             return
 
         channel_name = row["twitch_channel"]
@@ -342,7 +315,7 @@ async def setup(discord_bot, twitch_chat_bot):
     async def cmd_list(interaction: discord.Interaction):
         row = discord_bot.db.get_twitch_channel(interaction.guild_id)
         if not row:
-            await interaction.response.send_message("❌ No Twitch channel linked. Use `/twitchset` first.", ephemeral=True)
+            await interaction.response.send_message("❌ No Twitch channel linked. Connect Twitch from the dashboard first.", ephemeral=True)
             return
 
         channel_name = row["twitch_channel"]

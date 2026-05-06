@@ -1,9 +1,12 @@
 import asyncio
+import aiohttp
+from datetime import datetime
 from twitchio.ext import commands 
 import logging
-from datetime import datetime
 from database import Database
 from twitch_api import TwitchAPI
+from utils import utcnow, parse_twitch_iso
+from config import TWITCH_CLIENT_ID
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +25,8 @@ class TwitchChatBot(commands.Bot):
         self._cooldowns: dict[str, dict[str, datetime]] = {}
 
     async def event_ready(self):
-        import asyncio as _asyncio
         logger.info(f"Twitch chat bot ready | Nick: {self.nick}")
-        await _asyncio.sleep(3)
+        await asyncio.sleep(3)
         registered = self.db.get_all_twitch_channels()
         connected_names = [c.name.lower() for c in self.connected_channels]
         for row in registered:
@@ -37,21 +39,21 @@ class TwitchChatBot(commands.Bot):
                         break
                     except KeyError:
                         # twitchio internal race condition — join likely succeeded, verify
-                        await _asyncio.sleep(1)
+                        await asyncio.sleep(1)
                         if any(c.name.lower() == channel_name for c in self.connected_channels):
                             logger.info(f"Joined Twitch channel: {channel_name} (KeyError suppressed)")
                             break
                         elif attempt < 2:
-                            await _asyncio.sleep(4)
+                            await asyncio.sleep(4)
                         else:
                             logger.error(f"Failed to join {channel_name} after 3 attempts")
                     except Exception as e:
                         if attempt < 2:
                             logger.debug(f"Join attempt {attempt+1} failed for {channel_name}, retrying...")
-                            await _asyncio.sleep(5)
+                            await asyncio.sleep(5)
                         else:
                             logger.error(f"Failed to join {channel_name} after 3 attempts: {e}")
-                await _asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)
 
     async def event_message(self, message):
         if message.echo:
@@ -89,8 +91,8 @@ class TwitchChatBot(commands.Bot):
                 return True
             try:
                 await self._delete_msg(channel_name, message.id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"_delete_msg failed (non-fatal): {e}")
             try:
                 from dashboard_server import push_stop_to_overlay
                 await push_stop_to_overlay(channel_name)
@@ -106,8 +108,8 @@ class TwitchChatBot(commands.Bot):
                 return True
             try:
                 await self._delete_msg(channel_name, message.id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"_delete_msg failed (non-fatal): {e}")
             try:
                 from dashboard_server import push_skip_to_overlay
                 pushed = await push_skip_to_overlay(channel_name)
@@ -130,8 +132,8 @@ class TwitchChatBot(commands.Bot):
                 return True
             try:
                 await self._delete_msg(channel_name, message.id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"_delete_msg failed (non-fatal): {e}")
             try:
                 from dashboard_server import push_play_to_overlay
                 pushed = await push_play_to_overlay(channel_name, url, message.author.name)
@@ -213,7 +215,7 @@ class TwitchChatBot(commands.Bot):
 
             if last_date:
                 try:
-                    dt = datetime.strptime(last_date, "%Y-%m-%dT%H:%M:%SZ")
+                    dt = parse_twitch_iso(last_date)
                     date_str = dt.strftime("%b %d")
                 except Exception:
                     date_str = None
@@ -280,7 +282,7 @@ class TwitchChatBot(commands.Bot):
         return text
 
     async def _check_cooldown(self, channel: str, command: str, seconds: int) -> bool:
-        now = datetime.utcnow()
+        now = utcnow()
         channel_cooldowns = self._cooldowns.setdefault(channel, {})
         last_used = channel_cooldowns.get(command)
         if last_used and (now - last_used).total_seconds() < seconds:
@@ -292,9 +294,6 @@ class TwitchChatBot(commands.Bot):
     async def _delete_msg(self, channel_name: str, message_id: str):
         """Delete a chat message using the broadcaster's OAuth token — broadcaster can delete any message."""
         try:
-            import aiohttp
-            from config import TWITCH_CLIENT_ID
-
             # Look up guild_id from channel name
             all_channels = self.db.get_all_twitch_channels()
             guild_id = next((ch["guild_id"] for ch in all_channels

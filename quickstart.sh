@@ -1,59 +1,69 @@
-#!/bin/bash 
+#!/bin/bash
 
-# Quick Start Script for Twitch Notifier Bot
-# This script helps you set up the bot quickly
+# ExcelProtocol — Quick Start
+# Sets up local dev. Production deploys go through GitHub Actions to Fly.io.
 
-echo "🎮 Twitch Notifier Bot - Quick Start"
-echo "===================================="
+set -e
+
+echo "🤖 ExcelProtocol — Quick Start"
+echo "=============================="
 echo ""
 
-# Check if Python is installed
+# Check Python
 if ! command -v python3 &> /dev/null; then
-    echo "❌ Python 3 is not installed. Please install Python 3.8 or higher."
+    echo "❌ Python 3 is not installed. Install Python 3.11 or higher."
     exit 1
 fi
-
 echo "✅ Python found: $(python3 --version)"
 echo ""
 
-# Check if .env exists
+# Check .env
 if [ ! -f .env ]; then
-    echo "📝 Creating .env file from template..."
-    cp .env.example .env
-    echo "✅ Created .env file"
+    echo "📝 No .env file found. Creating a template..."
+    cat > .env <<'ENV'
+# Required
+DISCORD_TOKEN=
+TWITCH_CLIENT_ID=
+TWITCH_CLIENT_SECRET=
+
+# Required for stream notifications (HMAC secret for Twitch EventSub callbacks)
+EVENTSUB_SECRET=
+
+# Required for the dashboard
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=
+DISCORD_REDIRECT_URI=http://localhost:8080/auth/callback
+
+# Optional
+BOT_OWNER_ID=
+TWITCH_BOT_USERNAME=
+TWITCH_BOT_TOKEN=
+DASHBOARD_BASE_URL=http://localhost:8080
+DEV_TOKEN=
+ENV
+    echo "✅ Created .env template — fill in the required values before running."
     echo ""
-    echo "⚠️  IMPORTANT: Edit .env file with your credentials:"
-    echo "   - DISCORD_TOKEN"
-    echo "   - TWITCH_CLIENT_ID"
-    echo "   - TWITCH_CLIENT_SECRET"
-    echo ""
-    echo "Press Enter when you've added your credentials..."
+    echo "Press Enter when ready..."
     read
 else
-    echo "✅ .env file already exists"
+    echo "✅ .env exists"
 fi
 
-# Install dependencies
+# Install deps
 echo ""
 echo "📦 Installing dependencies..."
 pip3 install -r requirements.txt
-
-if [ $? -eq 0 ]; then
-    echo "✅ Dependencies installed"
-else
-    echo "❌ Failed to install dependencies"
-    exit 1
-fi
+echo "✅ Dependencies installed"
 
 echo ""
-echo "🚀 Setup complete!"
+echo "🚀 Setup complete."
 echo ""
-echo "To start the bot:"
+echo "To run locally:"
 echo "  python3 bot.py"
 echo ""
-echo "To deploy to Fly.io:"
-echo "  See DEPLOYMENT.md"
+echo "Dashboard (after bot starts):"
+echo "  http://localhost:8080/app/"
 echo ""
-echo "For testing:"
-echo "  See TESTING.md"
+echo "Production deploys happen automatically on push to main via GitHub Actions"
+echo "(see .github/workflows/deploy.yml)."
 echo ""

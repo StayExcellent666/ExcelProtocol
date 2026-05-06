@@ -758,8 +758,8 @@ async def setup(bot):
             if channel:
                 msg = await channel.fetch_message(int(message_id))
                 await msg.delete()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Could not delete RR message {message_id}: {e}")
 
         bot.db.rr_delete(int(message_id))
         await interaction.followup.send("✅ Reaction role message deleted.", ephemeral=True)
