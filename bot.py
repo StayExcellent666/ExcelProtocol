@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from database import Database
 from twitch_api import TwitchAPI
-from utils import utcnow, sanitise_streamer_name, parse_twitch_iso
+from utils import utcnow, sanitise_streamer_name, parse_twitch_iso, MILESTONE_DEFS, compute_hours_live, should_fire_milestone
 from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID, LOG_CHANNEL_ID
 from config import TWITCH_BOT_USERNAME, TWITCH_BOT_TOKEN
 
@@ -337,123 +337,73 @@ class TwitchNotifierBot(discord.Client):
         logger.info(f"Cleaned up all data for guild {guild.id}")
 
     async def on_member_join(self, member: discord.Member):
-        """Run safety filter, then send welcome message if configured."""
-        # ── Safety filter ────────────────────────────────────────────────────
-        kicked = False
+        """Run safety filter on new joins."""
         try:
             settings = self.db.get_safety_settings(member.guild.id)
-            if settings and settings['enabled'] and not member.bot:
-                # Bypass role short-circuit
-                bypassed = False
-                if settings['bypass_role_id']:
-                    bypass_role = member.guild.get_role(settings['bypass_role_id'])
-                    if bypass_role and bypass_role in member.roles:
-                        bypassed = True
+            if not settings or not settings['enabled'] or member.bot:
+                return
 
-                if not bypassed:
-                    account_age_days = (utcnow() - member.created_at).days
-                    reasons = []
+            # Bypass role short-circuit
+            if settings['bypass_role_id']:
+                bypass_role = member.guild.get_role(settings['bypass_role_id'])
+                if bypass_role and bypass_role in member.roles:
+                    return
 
-                    if account_age_days < settings['min_account_age_days']:
-                        reasons.append(f"account created {account_age_days} day(s) ago (minimum: {settings['min_account_age_days']})")
-                    if settings['check_no_avatar'] and not member.avatar:
-                        reasons.append("no profile picture")
-                    if settings['check_username_pattern']:
-                        if _SUSPICIOUS_USERNAME_RE.match(member.name.lower()):
-                            reasons.append(f"suspicious username pattern ({member.name})")
+            account_age_days = (utcnow() - member.created_at).days
+            reasons = []
 
-                    if reasons:
-                        reason_str = ", ".join(reasons)
-                        action = settings['action']
+            if account_age_days < settings['min_account_age_days']:
+                reasons.append(f"account created {account_age_days} day(s) ago (minimum: {settings['min_account_age_days']})")
+            if settings['check_no_avatar'] and not member.avatar:
+                reasons.append("no profile picture")
+            if settings['check_username_pattern']:
+                if _SUSPICIOUS_USERNAME_RE.match(member.name.lower()):
+                    reasons.append(f"suspicious username pattern ({member.name})")
 
-                        # DM the user before actioning
-                        if settings['dm_on_kick']:
-                            try:
-                                embed = discord.Embed(
-                                    title=f"{'Kicked' if action == 'kick' else 'Banned'} from {member.guild.name}",
-                                    description=(
-                                        f"You were automatically {'kicked' if action == 'kick' else 'banned'} from **{member.guild.name}** "
-                                        f"by ExcelProtocol's safety filter.\n\n"
-                                        f"**Reason:** {reason_str}\n\n"
-                                        f"{'You can rejoin once your account is older or contact a server admin.' if action == 'kick' else 'Please contact a server admin if you believe this was an error.'}"
-                                    ),
-                                    color=0xFF4444
-                                )
-                                await member.send(embed=embed)
-                            except Exception as e:
-                                logger.debug(f"Safety DM failed for {member} (DMs likely disabled): {e}")
+            if not reasons:
+                return
 
-                        try:
-                            if action == 'ban':
-                                await member.ban(reason=f"ExcelProtocol Safety: {reason_str}", delete_message_seconds=86400)
-                            else:
-                                await member.kick(reason=f"ExcelProtocol Safety: {reason_str}")
-                            kicked = True
-                        except discord.Forbidden:
-                            logger.warning(f"Safety: missing permissions to {action} {member} in {member.guild.name}")
-                        except Exception as e:
-                            logger.error(f"Safety: error actioning {member}: {e}")
+            reason_str = ", ".join(reasons)
+            action = settings['action']
 
-                        if kicked:
-                            self.db.log_safety_kick(member.guild.id, member.id, str(member), reason_str, action)
-                            logger.info(f"Safety {action}: {member} in {member.guild.name} — {reason_str}")
-                            await self.log_to_channel(
-                                "🛡️", f"Safety Filter — {action.capitalize()}",
-                                f"**{member}** (`{member.id}`) in **{member.guild.name}**\n**Reason:** {reason_str}",
-                                color=0xFF6B35
-                            )
+            # DM the user before actioning
+            if settings['dm_on_kick']:
+                try:
+                    embed = discord.Embed(
+                        title=f"{'Kicked' if action == 'kick' else 'Banned'} from {member.guild.name}",
+                        description=(
+                            f"You were automatically {'kicked' if action == 'kick' else 'banned'} from **{member.guild.name}** "
+                            f"by ExcelProtocol's safety filter.\n\n"
+                            f"**Reason:** {reason_str}\n\n"
+                            f"{'You can rejoin once your account is older or contact a server admin.' if action == 'kick' else 'Please contact a server admin if you believe this was an error.'}"
+                        ),
+                        color=0xFF4444
+                    )
+                    await member.send(embed=embed)
+                except Exception as e:
+                    logger.debug(f"Safety DM failed for {member} (DMs likely disabled): {e}")
+
+            try:
+                if action == 'ban':
+                    await member.ban(reason=f"ExcelProtocol Safety: {reason_str}", delete_message_seconds=86400)
+                else:
+                    await member.kick(reason=f"ExcelProtocol Safety: {reason_str}")
+            except discord.Forbidden:
+                logger.warning(f"Safety: missing permissions to {action} {member} in {member.guild.name}")
+                return
+            except Exception as e:
+                logger.error(f"Safety: error actioning {member}: {e}")
+                return
+
+            self.db.log_safety_kick(member.guild.id, member.id, str(member), reason_str, action)
+            logger.info(f"Safety {action}: {member} in {member.guild.name} — {reason_str}")
+            await self.log_to_channel(
+                "🛡️", f"Safety Filter — {action.capitalize()}",
+                f"**{member}** (`{member.id}`) in **{member.guild.name}**\n**Reason:** {reason_str}",
+                color=0xFF6B35
+            )
         except Exception as e:
             logger.error(f"Error in safety on_member_join for {member}: {e}", exc_info=True)
-
-        # If the safety filter kicked/banned them, don't welcome them.
-        if kicked:
-            return
-
-        # ── Welcome message (Feature #8) ─────────────────────────────────────
-        try:
-            await self._send_welcome(member)
-        except Exception as e:
-            logger.error(f"Welcome message failed for {member} in {member.guild.name}: {e}", exc_info=True)
-
-    async def _send_welcome(self, member: discord.Member):
-        """Send the configured welcome message to the configured channel.
-
-        No-op if welcome isn't configured (channel_id NULL) or the channel is gone.
-        Supports template variables: {user}, {username}, {server}, {member_count}.
-        """
-        if member.bot:
-            return
-        settings = self.db.get_welcome_settings(member.guild.id)
-        channel_id = settings.get("channel_id")
-        if not channel_id:
-            return  # not configured
-
-        channel = member.guild.get_channel(channel_id)
-        if not channel:
-            logger.debug(f"Welcome channel {channel_id} not found for guild {member.guild.id}")
-            return
-
-        # Default template if none set
-        template = settings.get("message") or (
-            "👋 Welcome to **{server}**, {user}! "
-            "You're our **{member_count}**th member!"
-        )
-
-        # Substitute variables
-        rendered = (
-            template
-            .replace("{user}", member.mention)
-            .replace("{username}", member.display_name)
-            .replace("{server}", member.guild.name)
-            .replace("{member_count}", str(member.guild.member_count or 0))
-        )
-
-        try:
-            await channel.send(rendered, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
-        except discord.Forbidden:
-            logger.warning(f"Welcome: no permission to send in {channel.name} ({member.guild.name})")
-        except Exception as e:
-            logger.error(f"Welcome: error sending in {channel.name}: {e}")
 
     async def on_voice_state_update(self, member, before, after):
         """Handle VC creator — create channels on join, delete when empty."""
@@ -862,14 +812,12 @@ class TwitchNotifierBot(discord.Client):
             )
 
     # ── Milestone Check ───────────────────────────────────────────────────────
+    # ── Milestone Check ───────────────────────────────────────────────────────
     # Uses cached started_at from EventSub, not Twitch polling. We only hit
     # the Twitch API when a milestone is about to fire and we need fresh
     # stream metadata (game, title, thumbnail) for the embed.
 
-    MILESTONES = (
-        (5,  "⏱️ **{user_name}** has been live for **5 HOURS!** They're not stopping anytime soon!"),
-        (10, "💀 **{user_name}** has been live for **10 HOURS STRAIGHT.** Send help. 👀"),
-    )
+    MILESTONES = MILESTONE_DEFS
 
     @tasks.loop(minutes=5)
     async def check_milestones(self):
@@ -882,14 +830,11 @@ class TwitchNotifierBot(discord.Client):
 
             # Snapshot the dict — handle_stream_offline may mutate it concurrently
             for name_lower, started_at in list(self._stream_starts.items()):
-                # Compute uptime locally (no API call)
-                # parse_twitch_iso returns timezone-aware UTC; ensure both sides match
-                if started_at.tzinfo is None:
-                    started_at = started_at.replace(tzinfo=timezone.utc)
-                hours_live = (now - started_at).total_seconds() / 3600
+                # Compute uptime locally (no API call) via testable helper
+                hours_live = compute_hours_live(started_at, now)
 
                 for milestone_hours, template in self.MILESTONES:
-                    if hours_live < milestone_hours:
+                    if not should_fire_milestone(hours_live, milestone_hours):
                         continue
 
                     # Find every guild that monitors this streamer AND has milestones
@@ -1471,9 +1416,9 @@ class TwitchNotifierBot(discord.Client):
             ),
             discord.Activity(
                 type=discord.ActivityType.listening,
-                name="Huge Database overhaul!"
+                name="listening to stream alerts across your servers 📡"
             ),
-            discord.Game(name="If something does not work, report through dashboard."),
+            discord.Game(name="playing excelprotocol.fly.dev 🎮"),
         ]
         current = self.rotate_status.current_loop % len(statuses)
         await self.change_presence(activity=statuses[current])

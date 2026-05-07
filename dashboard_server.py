@@ -470,14 +470,24 @@ _oauth_states: dict = {}
 # Twitch OAuth state store — {state: {guild_id, session_token, expires_at}}
 _twitch_oauth_states: dict = {}
 
+def _prune_oauth_states(states: dict, ttl_seconds: int = 600, now: float | None = None):
+    """Remove OAuth state entries older than ttl_seconds. Mutates `states` in place.
+
+    Pure helper extracted for testability — called from auth_login.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - ttl_seconds
+    stale = [k for k, v in list(states.items()) if v < cutoff]
+    for k in stale:
+        del states[k]
+    return len(stale)
+
+
 async def auth_login(request):
     state = secrets.token_hex(16)
     _oauth_states[state] = datetime.now(timezone.utc).timestamp()
-    # Clean up states older than 10 minutes
-    cutoff = datetime.now(timezone.utc).timestamp() - 600
-    stale = [k for k, v in list(_oauth_states.items()) if v < cutoff]
-    for k in stale:
-        del _oauth_states[k]
+    _prune_oauth_states(_oauth_states)
     url = (
         f"https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
@@ -1325,7 +1335,7 @@ async def get_server_settings(request):
     guild_id = request.match_info["guild_id"]
     rows = await db_fetch(
         "SELECT notification_channel_id, embed_color, auto_delete_notifications, milestone_notifications, "
-        "ping_role_id, live_role_id, welcome_channel_id, welcome_message "
+        "ping_role_id, live_role_id "
         "FROM server_settings WHERE guild_id = ?",
         (guild_id,)
     )
@@ -1341,8 +1351,6 @@ async def get_server_settings(request):
         "birthday_channel_id": str(bday[0]["channel_id"]) if bday else None,
         "ping_role_id": str(s["ping_role_id"]) if s.get("ping_role_id") else None,
         "live_role_id": str(s["live_role_id"]) if s.get("live_role_id") else None,
-        "welcome_channel_id": str(s["welcome_channel_id"]) if s.get("welcome_channel_id") else None,
-        "welcome_message": s.get("welcome_message") or None,
     })
 
 async def patch_server_settings(request):
@@ -1432,34 +1440,6 @@ async def patch_server_settings(request):
                 "INSERT INTO server_settings (guild_id, notification_channel_id, ping_role_id) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET ping_role_id = ?",
                 (guild_id, rid, rid)
             )
-
-    # ── Welcome message (Feature #8) ──────────────────────────────────────
-    # Accept welcome_channel_id (int or null/"" to disable) and welcome_message (string or null).
-    # The two are independent — you can set the message without changing the channel and vice versa.
-    if "welcome_channel_id" in body:
-        raw = body["welcome_channel_id"]
-        if raw is None or raw == "":
-            await db_execute(
-                "INSERT INTO server_settings (guild_id, notification_channel_id, welcome_channel_id) "
-                "VALUES (?, 0, NULL) ON CONFLICT(guild_id) DO UPDATE SET welcome_channel_id = NULL",
-                (guild_id,)
-            )
-        else:
-            cid = int(raw)
-            await db_execute(
-                "INSERT INTO server_settings (guild_id, notification_channel_id, welcome_channel_id) "
-                "VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET welcome_channel_id = ?",
-                (guild_id, cid, cid)
-            )
-
-    if "welcome_message" in body:
-        raw = body["welcome_message"]
-        msg = None if (raw is None or raw == "") else str(raw)[:1500]  # cap length
-        await db_execute(
-            "INSERT INTO server_settings (guild_id, notification_channel_id, welcome_message) "
-            "VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET welcome_message = ?",
-            (guild_id, msg, msg)
-        )
 
     return web.json_response({"ok": True})
 
@@ -1909,6 +1889,19 @@ async def _register_eventsub(broadcaster_user_id: str):
         logger.error(f"Error registering EventSub for {broadcaster_user_id}: {e}")
 
 # ── EventSub Webhook ──────────────────────────────────────────────────────────
+
+def verify_eventsub_signature(secret: bytes, msg_id: str, msg_timestamp: str,
+                              body: bytes, msg_signature: str) -> bool:
+    """Verify the HMAC-SHA256 signature on an incoming Twitch EventSub webhook.
+
+    Pure, testable. Returns True if the signature is valid, False otherwise.
+    Constant-time comparison via hmac.compare_digest.
+    """
+    hmac_msg = (msg_id + msg_timestamp + body.decode()).encode()
+    expected = "sha256=" + hmac.new(secret, hmac_msg, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, msg_signature)
+
+
 async def eventsub_callback(request):
     """Receive EventSub events from Twitch and push to overlay websockets."""
     body = await request.read()
@@ -1922,9 +1915,7 @@ async def eventsub_callback(request):
     msg_id        = request.headers.get("Twitch-Eventsub-Message-Id", "")
     msg_timestamp = request.headers.get("Twitch-Eventsub-Message-Timestamp", "")
     msg_signature = request.headers.get("Twitch-Eventsub-Message-Signature", "")
-    hmac_msg = (msg_id + msg_timestamp + body.decode()).encode()
-    expected = "sha256=" + hmac.new(secret, hmac_msg, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, msg_signature):
+    if not verify_eventsub_signature(secret, msg_id, msg_timestamp, body, msg_signature):
         raise web.HTTPForbidden(reason="Invalid signature")
 
     data = json.loads(body)

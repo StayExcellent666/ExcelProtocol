@@ -207,25 +207,6 @@ class Database:
             conn.commit()
             logger.info("Migration: added live_role_id to server_settings")
 
-        # Migration: add welcome_channel_id and welcome_message to server_settings (Feature #8)
-        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("server_settings") WHERE name="welcome_channel_id"')
-        if cursor.fetchone()[0] == 0:
-            cursor.execute('ALTER TABLE server_settings ADD COLUMN welcome_channel_id INTEGER DEFAULT NULL')
-            conn.commit()
-            logger.info("Migration: added welcome_channel_id to server_settings")
-        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("server_settings") WHERE name="welcome_message"')
-        if cursor.fetchone()[0] == 0:
-            cursor.execute('ALTER TABLE server_settings ADD COLUMN welcome_message TEXT DEFAULT NULL')
-            conn.commit()
-            logger.info("Migration: added welcome_message to server_settings")
-
-        # Migration: add body_text to reaction_roles
-        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("reaction_roles") WHERE name="body_text"')
-        if cursor.fetchone()[0] == 0:
-            cursor.execute('ALTER TABLE reaction_roles ADD COLUMN body_text TEXT DEFAULT NULL')
-            conn.commit()
-            logger.info("Migration: added body_text to reaction_roles")
-
         # Index for faster lookups
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_guild_id 
@@ -387,7 +368,9 @@ class Database:
             cursor.execute("PRAGMA table_info(vc_settings)")
             col_info = cursor.fetchall()
             col_names = {row[1] for row in col_info}
-            if 'id' not in col_names:
+            # Skip migration if the table doesn't exist yet (fresh DB) — it'll
+            # be created with the correct schema later in init_database.
+            if col_names and 'id' not in col_names:
                 # Safely read only columns that actually exist in the old table
                 safe_cols = [c for c in ['guild_id', 'trigger_channel_id', 'name_template', 'category_id'] if c in col_names]
                 cursor.execute(f"SELECT {', '.join(safe_cols)} FROM vc_settings")
@@ -446,6 +429,14 @@ class Database:
                 roles_json  TEXT NOT NULL DEFAULT '[]'
             )
         ''')
+
+        # Migration: add body_text to reaction_roles (must come AFTER the
+        # CREATE TABLE above, otherwise this fails on a fresh DB).
+        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("reaction_roles") WHERE name="body_text"')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('ALTER TABLE reaction_roles ADD COLUMN body_text TEXT DEFAULT NULL')
+            conn.commit()
+            logger.info("Migration: added body_text to reaction_roles")
 
         # Broadcaster OAuth tokens (for channel rewards / EventSub)
         cursor.execute('''
@@ -977,36 +968,6 @@ class Database:
             "INSERT INTO server_settings (guild_id, notification_channel_id, live_role_id) VALUES (?, 0, ?) "
             "ON CONFLICT(guild_id) DO UPDATE SET live_role_id = ?",
             (guild_id, role_id, role_id)
-        )
-        conn.commit()
-        conn.close()
-
-    # ── Welcome messages (Feature #8) ─────────────────────────────────────────
-
-    def get_welcome_settings(self, guild_id: int) -> dict:
-        """Return {channel_id, message} for a guild's welcome configuration.
-        Both can be None — channel_id None means welcome is disabled."""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT welcome_channel_id, welcome_message FROM server_settings WHERE guild_id = ?",
-            (guild_id,)
-        )
-        row = cursor.fetchone()
-        conn.close()
-        if not row:
-            return {"channel_id": None, "message": None}
-        return {"channel_id": row[0], "message": row[1]}
-
-    def set_welcome_settings(self, guild_id: int, channel_id: int | None, message: str | None):
-        """Configure the welcome message. Pass channel_id=None to disable."""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO server_settings (guild_id, notification_channel_id, welcome_channel_id, welcome_message) "
-            "VALUES (?, 0, ?, ?) "
-            "ON CONFLICT(guild_id) DO UPDATE SET welcome_channel_id = ?, welcome_message = ?",
-            (guild_id, channel_id, message, channel_id, message)
         )
         conn.commit()
         conn.close()

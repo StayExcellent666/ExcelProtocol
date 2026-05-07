@@ -53,3 +53,28 @@ def parse_twitch_iso(ts: str) -> datetime:
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
     return datetime.fromisoformat(ts)
+
+
+# ── Milestone math (pure, testable) ──────────────────────────────────────────
+
+MILESTONE_DEFS = (
+    (5,  "⏱️ **{user_name}** has been live for **5 HOURS!** They're not stopping anytime soon!"),
+    (10, "💀 **{user_name}** has been live for **10 HOURS STRAIGHT.** Send help. 👀"),
+)
+
+
+def compute_hours_live(started_at: datetime, now: datetime) -> float:
+    """Return hours since `started_at` as a float.
+
+    Tolerates a naive `started_at` by tagging it as UTC — the on_ready restore
+    path in bot.py can hand us a naive datetime parsed from SQLite's
+    CURRENT_TIMESTAMP. Both sides need consistent tz info or subtraction raises.
+    """
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return (now - started_at).total_seconds() / 3600
+
+
+def should_fire_milestone(hours_live: float, milestone_hours: int) -> bool:
+    """A milestone fires once `hours_live` reaches the threshold."""
+    return hours_live >= milestone_hours
