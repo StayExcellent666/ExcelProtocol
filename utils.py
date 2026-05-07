@@ -78,3 +78,27 @@ def compute_hours_live(started_at: datetime, now: datetime) -> float:
 def should_fire_milestone(hours_live: float, milestone_hours: int) -> bool:
     """A milestone fires once `hours_live` reaches the threshold."""
     return hours_live >= milestone_hours
+
+
+def is_already_offline_processed(name_lower: str, live_streamers, stream_starts) -> bool:
+    """Return True if this streamer's offline event has already been processed.
+
+    Used by handle_stream_offline to deduplicate Twitch's at-least-once webhook
+    deliveries. EventSub redelivers under network blips and across restarts, so
+    we may receive multiple stream.offline events for one actual offline.
+
+    A streamer is "already processed" if BOTH:
+      - they're not in the live_streamers set, AND
+      - they're not in the stream_starts cache
+
+    On a normal first-time offline, the streamer is in BOTH sets (populated
+    when stream.online fired). The handler discards them from both, then a
+    duplicate event sees empty state and skips.
+
+    Edge case: on a fresh restart with no DB-restored state, both sets are
+    empty for everyone — but `on_ready` populates them from
+    `notification_messages` for actively-notified streamers. Streamers we
+    have no record of legitimately have nothing to clean up, so a "duplicate"
+    log is correct to skip.
+    """
+    return name_lower not in live_streamers and name_lower not in stream_starts

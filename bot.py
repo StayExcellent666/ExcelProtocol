@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from database import Database
 from twitch_api import TwitchAPI
-from utils import utcnow, sanitise_streamer_name, parse_twitch_iso, MILESTONE_DEFS, compute_hours_live, should_fire_milestone
+from utils import utcnow, sanitise_streamer_name, parse_twitch_iso, MILESTONE_DEFS, compute_hours_live, should_fire_milestone, is_already_offline_processed
 from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID, LOG_CHANNEL_ID
 from config import TWITCH_BOT_USERNAME, TWITCH_BOT_TOKEN
 
@@ -772,13 +772,24 @@ class TwitchNotifierBot(discord.Client):
             )
 
     async def handle_stream_offline(self, user_login: str):
-        """Called by the dashboard webhook when a stream.offline event is received."""
+        """Called by the dashboard webhook when a stream.offline event is received.
+
+        EventSub guarantees at-least-once delivery, not exactly-once. Twitch may
+        redeliver an event if the previous attempt timed out or if our bot
+        restarted between deliveries. To avoid duplicate log entries we drop
+        any offline event whose streamer is already not tracked in either
+        live_streamers or _stream_starts.
+        """
+        name_lower = user_login.lower()
+
+        # Idempotency guard — skip duplicate offline events
+        if is_already_offline_processed(name_lower, self.live_streamers, self._stream_starts):
+            logger.debug(f"Duplicate stream.offline for {user_login} — already processed, skipping")
+            return
+
         try:
             logger.info(f"EventSub stream.offline: {user_login}")
-            name_lower = user_login.lower()
-            if name_lower in self.live_streamers:
-                self.live_streamers.discard(name_lower)
-            # Drop the cached start time
+            self.live_streamers.discard(name_lower)
             self._stream_starts.pop(name_lower, None)
 
             # Mark the most recent open stream_events row as ended for duration metrics
@@ -811,7 +822,6 @@ class TwitchNotifierBot(discord.Client):
                 color=0xFF4444
             )
 
-    # ── Milestone Check ───────────────────────────────────────────────────────
     # ── Milestone Check ───────────────────────────────────────────────────────
     # Uses cached started_at from EventSub, not Twitch polling. We only hit
     # the Twitch API when a milestone is about to fire and we need fresh
