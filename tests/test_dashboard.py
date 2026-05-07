@@ -1,0 +1,157 @@
+"""Tests for dashboard_server.py — security-critical primitives.
+
+Covers:
+  - HMAC verification of EventSub webhook signatures
+  - OAuth state TTL pruning
+  - Per-guild session access checks
+"""
+import hmac as _hmac
+import hashlib as _hashlib
+
+# Import after conftest sets env vars
+import dashboard_server
+
+
+# ── HMAC signature verification ───────────────────────────────────────────────
+
+class TestVerifyEventsubSignature:
+    """The HMAC verifier rejects tampered or wrongly-signed webhook payloads."""
+
+    SECRET = b"top-secret-eventsub-key"
+    MSG_ID = "abc-123"
+    MSG_TIMESTAMP = "2024-01-15T12:34:56Z"
+    BODY = b'{"event":"test"}'
+
+    def _sign(self, secret, msg_id, ts, body):
+        """Helper: produce a signature header value the way Twitch would."""
+        message = (msg_id + ts + body.decode()).encode()
+        return "sha256=" + _hmac.new(secret, message, _hashlib.sha256).hexdigest()
+
+    def test_valid_signature_accepted(self):
+        good_sig = self._sign(self.SECRET, self.MSG_ID, self.MSG_TIMESTAMP, self.BODY)
+        assert dashboard_server.verify_eventsub_signature(
+            self.SECRET, self.MSG_ID, self.MSG_TIMESTAMP, self.BODY, good_sig
+        ) is True
+
+    def test_wrong_secret_rejected(self):
+        wrong_sig = self._sign(b"different-secret", self.MSG_ID, self.MSG_TIMESTAMP, self.BODY)
+        assert dashboard_server.verify_eventsub_signature(
+            self.SECRET, self.MSG_ID, self.MSG_TIMESTAMP, self.BODY, wrong_sig
+        ) is False
+
+    def test_tampered_body_rejected(self):
+        good_sig = self._sign(self.SECRET, self.MSG_ID, self.MSG_TIMESTAMP, self.BODY)
+        tampered = b'{"event":"injected"}'
+        assert dashboard_server.verify_eventsub_signature(
+            self.SECRET, self.MSG_ID, self.MSG_TIMESTAMP, tampered, good_sig
+        ) is False
+
+    def test_tampered_msg_id_rejected(self):
+        good_sig = self._sign(self.SECRET, self.MSG_ID, self.MSG_TIMESTAMP, self.BODY)
+        assert dashboard_server.verify_eventsub_signature(
+            self.SECRET, "different-id", self.MSG_TIMESTAMP, self.BODY, good_sig
+        ) is False
+
+    def test_tampered_timestamp_rejected(self):
+        good_sig = self._sign(self.SECRET, self.MSG_ID, self.MSG_TIMESTAMP, self.BODY)
+        assert dashboard_server.verify_eventsub_signature(
+            self.SECRET, self.MSG_ID, "1999-01-01T00:00:00Z", self.BODY, good_sig
+        ) is False
+
+    def test_empty_signature_rejected(self):
+        assert dashboard_server.verify_eventsub_signature(
+            self.SECRET, self.MSG_ID, self.MSG_TIMESTAMP, self.BODY, ""
+        ) is False
+
+    def test_malformed_signature_rejected(self):
+        # Missing sha256= prefix
+        assert dashboard_server.verify_eventsub_signature(
+            self.SECRET, self.MSG_ID, self.MSG_TIMESTAMP, self.BODY, "abcdef"
+        ) is False
+
+    def test_uses_constant_time_compare(self):
+        """Confirm we're using hmac.compare_digest, not == (timing-attack resistant).
+
+        Indirect test: we just confirm the function uses the imported hmac module,
+        which we trust to use compare_digest. This is checked at the source level
+        in the actual code path.
+        """
+        import inspect
+        src = inspect.getsource(dashboard_server.verify_eventsub_signature)
+        assert "compare_digest" in src, \
+            "verify_eventsub_signature should use hmac.compare_digest for constant-time comparison"
+
+
+# ── OAuth state TTL ───────────────────────────────────────────────────────────
+
+class TestPruneOauthStates:
+    """The OAuth state store must drop entries older than 10 minutes."""
+
+    def test_recent_states_kept(self):
+        states = {"recent": 1000.0, "also-recent": 1000.0}
+        # "now" = 1300 (5 min later, well within 10-min TTL)
+        dashboard_server._prune_oauth_states(states, ttl_seconds=600, now=1300.0)
+        assert "recent" in states
+        assert "also-recent" in states
+
+    def test_expired_states_dropped(self):
+        states = {"old": 1000.0}
+        # "now" = 2000 (16 min later, past 10-min TTL)
+        n_dropped = dashboard_server._prune_oauth_states(states, ttl_seconds=600, now=2000.0)
+        assert "old" not in states
+        assert n_dropped == 1
+
+    def test_mixed_states(self):
+        states = {"old1": 1000.0, "old2": 1100.0, "fresh": 1900.0}
+        # "now" = 1950
+        dashboard_server._prune_oauth_states(states, ttl_seconds=600, now=1950.0)
+        # cutoff = 1950 - 600 = 1350; old1 (1000) and old2 (1100) are stale
+        assert "old1" not in states
+        assert "old2" not in states
+        assert "fresh" in states
+
+    def test_at_cutoff_boundary(self):
+        # Exactly at the boundary should be kept (strictly less than cutoff is dropped)
+        states = {"borderline": 1000.0}
+        dashboard_server._prune_oauth_states(states, ttl_seconds=600, now=1600.0)
+        assert "borderline" in states  # 1000 == cutoff (1600 - 600), kept
+
+    def test_empty_dict_doesnt_crash(self):
+        states = {}
+        n = dashboard_server._prune_oauth_states(states, ttl_seconds=600, now=1000.0)
+        assert n == 0
+
+
+# ── _session_can_access_guild ─────────────────────────────────────────────────
+
+class TestSessionCanAccessGuild:
+    """Per-guild session access: only members of that guild may read its data."""
+
+    def test_dev_token_full_access(self):
+        session = {"dev": True, "guilds": []}
+        assert dashboard_server._session_can_access_guild(session, "12345") is True
+
+    def test_member_can_access(self):
+        session = {"guilds": [{"id": "100"}, {"id": "200"}]}
+        assert dashboard_server._session_can_access_guild(session, "100") is True
+        assert dashboard_server._session_can_access_guild(session, "200") is True
+
+    def test_non_member_denied(self):
+        session = {"guilds": [{"id": "100"}]}
+        assert dashboard_server._session_can_access_guild(session, "999") is False
+
+    def test_string_int_normalisation(self):
+        """Guild IDs may come as int or str — comparison should normalise."""
+        session = {"guilds": [{"id": 100}]}  # int
+        assert dashboard_server._session_can_access_guild(session, "100") is True
+        # Other direction
+        session = {"guilds": [{"id": "100"}]}  # str
+        assert dashboard_server._session_can_access_guild(session, 100) is True
+
+    def test_empty_guilds_denies(self):
+        session = {"guilds": []}
+        assert dashboard_server._session_can_access_guild(session, "100") is False
+
+    def test_missing_guilds_field_denies(self):
+        session = {}  # no guilds key at all
+        assert dashboard_server._session_can_access_guild(session, "100") is False
