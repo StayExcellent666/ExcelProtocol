@@ -1,6 +1,11 @@
 """Tests for utils.py — pure helper functions."""
 from datetime import datetime, timezone, timedelta
-from utils import sanitise_streamer_name, utcnow, parse_twitch_iso
+from utils import (
+    sanitise_streamer_name,
+    utcnow,
+    parse_twitch_iso,
+    is_already_offline_processed,
+)
 
 
 # ── sanitise_streamer_name ────────────────────────────────────────────────────
@@ -107,3 +112,54 @@ class TestParseTwitchIso:
         dt = parse_twitch_iso("2024-01-15T12:34:56Z")
         delta = utcnow() - dt
         assert delta.total_seconds() > 0  # past time → positive delta
+
+
+# ── is_already_offline_processed ──────────────────────────────────────────────
+
+class TestIsAlreadyOfflineProcessed:
+    """Idempotency guard for handle_stream_offline.
+
+    Returns True only when the streamer is absent from BOTH tracking sets,
+    meaning a previous offline event already cleaned them up.
+    """
+
+    def test_actively_live_streamer_not_processed(self):
+        """Streamer in both sets — first offline event, must process."""
+        live = {"alice"}
+        starts = {"alice": datetime.now(timezone.utc)}
+        assert is_already_offline_processed("alice", live, starts) is False
+
+    def test_only_in_live_set_not_processed(self):
+        """Streamer in live_streamers but not _stream_starts (e.g., on_ready
+        restored from DB but couldn't parse the timestamp)."""
+        live = {"alice"}
+        starts = {}
+        assert is_already_offline_processed("alice", live, starts) is False
+
+    def test_only_in_stream_starts_not_processed(self):
+        """Defensive — shouldn't normally happen but if state is inconsistent
+        we err on the side of processing."""
+        live = set()
+        starts = {"alice": datetime.now(timezone.utc)}
+        assert is_already_offline_processed("alice", live, starts) is False
+
+    def test_already_cleaned_up_returns_true(self):
+        """The duplicate scenario — both sets empty for this streamer."""
+        live = {"bob"}  # other streamers may be live
+        starts = {"bob": datetime.now(timezone.utc)}
+        assert is_already_offline_processed("alice", live, starts) is True
+
+    def test_empty_state_returns_true(self):
+        """Bot just started with no restored state — duplicate offline events
+        for streamers we never tracked are correctly treated as already-done."""
+        assert is_already_offline_processed("alice", set(), {}) is True
+
+    def test_uses_lowercase_key(self):
+        """Caller is responsible for lowercasing — function does NOT case-fold.
+        This documents the contract."""
+        live = {"alice"}  # lowercase
+        starts = {"alice": datetime.now(timezone.utc)}
+        # If caller passes uppercase, function won't find it → returns True
+        assert is_already_offline_processed("ALICE", live, starts) is True
+        # Lowercase lookup works correctly
+        assert is_already_offline_processed("alice", live, starts) is False
