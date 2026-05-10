@@ -2786,6 +2786,47 @@ function GlobalStatsTab() {
           </div>
         </div>
       </div>
+
+      {stats?.global_leaderboard?.length > 0 && (
+        <div style={{ ...C.card, marginBottom:16 }}>
+          <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:15, color:"var(--text)", textShadow:"0 0 14px rgba(0,245,212,0.3), 0 0 28px rgba(0,245,212,0.1)", marginBottom:4 }}>🌍 Global Leaderboard</div>
+          <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:12 }}>Most active streamers across all servers — month to date</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+            {stats.global_leaderboard.map((s,i) => {
+              const medal = ["🥇","🥈","🥉"][i] || `#${i+1}`;
+              return (
+                <div key={s.streamer_name} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:"1px solid var(--border)", gap:10 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0, flex:"0 1 auto" }}>
+                    <span style={{ color:"var(--text3)", fontSize:11, fontFamily:"'JetBrains Mono',monospace", minWidth:24 }}>{medal}</span>
+                    <a href={`https://twitch.tv/${s.streamer_name}`} target="_blank" rel="noreferrer"
+                       style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", textDecoration:"none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                      {s.streamer_name}
+                    </a>
+                  </div>
+                  <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end", fontSize:11, fontFamily:"'JetBrains Mono',monospace" }}>
+                    <span style={{ color:"var(--cyan)" }}>{s.total_streams} stream{s.total_streams !== 1 ? "s" : ""}</span>
+                    <span style={{ color:"var(--text3)" }}>·</span>
+                    <span style={{ color:"var(--cyan)" }}>{s.server_count} server{s.server_count !== 1 ? "s" : ""}</span>
+                    {s.hours_streamed > 0 && (
+                      <>
+                        <span style={{ color:"var(--text3)" }}>·</span>
+                        <span style={{ color:"var(--green)" }}>{s.hours_streamed}h</span>
+                      </>
+                    )}
+                    {s.longest_hours > 0 && (
+                      <>
+                        <span style={{ color:"var(--text3)" }}>·</span>
+                        <span style={{ color:"var(--yellow)" }}>{s.longest_hours}h longest</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div style={{ display:"flex", justifyContent:"flex-end" }}>
         <button onClick={load} style={{ ...C.btnSecondary, fontSize:12 }}>↻ Refresh</button>
       </div>

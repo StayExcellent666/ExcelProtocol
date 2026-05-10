@@ -2769,6 +2769,16 @@ async def get_global_stats(request):
     except Exception as _e:
         logger.debug(f"suppressed exception: {_e}")
 
+    # Global monthly leaderboard (same data as /globalleaderboard slash command).
+    # Pulled here so the dev Global Stats tab shows month-to-date activity
+    # alongside the lifetime totals above.
+    leaderboard = []
+    try:
+        if _bot_ref:
+            leaderboard = _bot_ref.db.get_global_leaderboard(limit=15)
+    except Exception as _e:
+        logger.debug(f"suppressed exception fetching global leaderboard: {_e}")
+
     return web.json_response({
         "total_servers":       servers[0]["c"] if servers else 0,
         "total_streamer_rows": streamer_rows[0]["c"] if streamer_rows else 0,
@@ -2780,6 +2790,7 @@ async def get_global_stats(request):
         "eventsub_count":      eventsub_count,
         "top_streamers":       top_streamers,
         "servers_by_count":    enriched_servers,
+        "global_leaderboard":  leaderboard,
     })
 
 
