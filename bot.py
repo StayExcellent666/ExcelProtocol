@@ -124,40 +124,68 @@ class TwitchNotifierBot(discord.Client):
         logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
         logger.info('------')
 
-        # Bug 2 fix: re-populate live_streamers from the DB so that streamers who
-        # were already notified before a restart are not double-notified, and so
-        # their stored message IDs can still be deleted when they go offline.
-        # Also restore _stream_starts (best-effort) using the earliest notification
-        # time per streamer as a fallback for the original stream.online timestamp.
-        # That timestamp is good to within ~15s (the thumbnail-wait delay), which
-        # is plenty accurate for 5h/10h milestone gating.
+        # Re-populate live_streamers from the DB so streamers who were already
+        # notified before a restart are not double-notified, and so their stored
+        # message IDs can still be deleted when they go offline.
+        #
+        # Also restore _stream_starts (best-effort) for milestone gating. We
+        # use MAX(sent_at) per streamer (not MIN) and filter to recent
+        # notifications only — older entries leak across stream sessions and
+        # falsely trigger 5h/10h milestones immediately after restart.
+        # Twitch caps live streams at ~48h so anything older than 12h is
+        # definitely a previous session.
+        STREAM_START_MAX_AGE_HOURS = 12
+
         try:
             conn = self.db.get_connection()
             cursor = conn.cursor()
+
+            # Query 1: every distinct streamer with any notification on file
+            # — this is the cleanup-tracking set. Filtered to last 7 days so
+            # we don't carry forward truly ancient entries either.
             cursor.execute(
-                "SELECT streamer_name, MIN(sent_at) AS first_seen "
-                "FROM notification_messages GROUP BY streamer_name"
+                "SELECT DISTINCT streamer_name FROM notification_messages "
+                "WHERE sent_at > datetime('now', '-7 days')"
+            )
+            for (name,) in cursor.fetchall():
+                self.live_streamers.add(name.lower())
+
+            # Query 2: most-recent notification per streamer, filtered to
+            # last 12h, used to restore _stream_starts.
+            cursor.execute(
+                "SELECT streamer_name, MAX(sent_at) AS most_recent "
+                "FROM notification_messages "
+                "WHERE sent_at > datetime('now', ?) "
+                "GROUP BY streamer_name",
+                (f'-{STREAM_START_MAX_AGE_HOURS} hours',)
             )
             rows = cursor.fetchall()
             conn.close()
+
             restored_starts = 0
-            for name, first_seen in rows:
-                self.live_streamers.add(name.lower())
-                if first_seen:
-                    try:
-                        # SQLite CURRENT_TIMESTAMP is naive UTC; tag it.
-                        # Format: 'YYYY-MM-DD HH:MM:SS' (no timezone).
-                        ts = first_seen.replace('T', ' ').rstrip('Z')
-                        dt = datetime.strptime(ts.split('.')[0], '%Y-%m-%d %H:%M:%S')
-                        dt = dt.replace(tzinfo=timezone.utc)
-                        self._stream_starts[name.lower()] = dt
-                        restored_starts += 1
-                    except Exception as e:
-                        logger.debug(f"Could not parse sent_at='{first_seen}' for {name}: {e}")
-            if rows:
+            now_utc = utcnow()
+            for name, most_recent in rows:
+                if not most_recent:
+                    continue
+                try:
+                    ts = most_recent.replace('T', ' ').rstrip('Z')
+                    dt = datetime.strptime(ts.split('.')[0], '%Y-%m-%d %H:%M:%S')
+                    dt = dt.replace(tzinfo=timezone.utc)
+                    # Defense in depth — even if the SQL filter is wrong (e.g.
+                    # clock skew), refuse to restore a started_at older than
+                    # the cap. Better to lose milestone tracking for one
+                    # session than to falsely fire milestones.
+                    if (now_utc - dt).total_seconds() / 3600 > STREAM_START_MAX_AGE_HOURS:
+                        continue
+                    self._stream_starts[name.lower()] = dt
+                    restored_starts += 1
+                except Exception as e:
+                    logger.debug(f"Could not parse sent_at='{most_recent}' for {name}: {e}")
+
+            if self.live_streamers:
                 logger.info(
-                    f"Restored {len(rows)} active streamer(s) from notification_messages "
-                    f"into live_streamers ({restored_starts} with usable start times)"
+                    f"Restored {len(self.live_streamers)} streamer(s) into live_streamers "
+                    f"({restored_starts} with usable recent start times)"
                 )
         except Exception as e:
             logger.error(f"Failed to restore live_streamers from DB on startup: {e}")

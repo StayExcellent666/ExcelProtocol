@@ -256,6 +256,122 @@ class TestStreamEvents:
         assert rows["bob"] is not None, "Valid 6h row should NOT have been reset"
 
 
+# ── on_ready stream-start restoration (regression for false milestone bug) ────
+
+class TestOnReadyStreamStartsRestore:
+    """When the bot restarts, _stream_starts is restored from
+    notification_messages.sent_at as a fallback for the original
+    EventSub started_at.
+
+    Round 6 fixes a bug where MIN(sent_at) was used instead of MAX, which
+    caused milestones to fire spuriously at restart for streamers who had
+    old notifications in the DB. These tests verify the SQL produces the
+    right values.
+    """
+
+    def _insert_notification(self, db, streamer, sent_at_iso, guild_id=100,
+                             channel_id=5000, message_id=None):
+        """Helper: insert a notification_messages row with a specific timestamp."""
+        if message_id is None:
+            # Generate unique IDs
+            self._counter = getattr(self, '_counter', 0) + 1
+            message_id = 1000000 + self._counter
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO notification_messages (guild_id, streamer_name, channel_id, message_id, sent_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (guild_id, streamer.lower(), channel_id, message_id, sent_at_iso)
+        )
+        conn.commit()
+        conn.close()
+
+    def test_query_returns_max_sent_at_not_min(self, db):
+        """If a streamer has multiple notifications, we want the MOST recent
+        one, not the oldest. The buggy version used MIN(sent_at) which
+        returned a 7-day-old timestamp and triggered false milestones."""
+        # 7 days ago and 1 hour ago for the same streamer
+        from datetime import datetime as _dt, timedelta as _td, timezone
+        old = (_dt.now(timezone.utc).replace(tzinfo=None) - _td(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+        recent = (_dt.now(timezone.utc).replace(tzinfo=None) - _td(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert_notification(db, "alice", old)
+        self._insert_notification(db, "alice", recent)
+
+        # Run the same query the bot's on_ready uses
+        conn = db.get_connection()
+        row = conn.execute(
+            "SELECT streamer_name, MAX(sent_at) AS most_recent "
+            "FROM notification_messages "
+            "WHERE sent_at > datetime('now', '-12 hours') "
+            "GROUP BY streamer_name"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "alice"
+        # Should match `recent` (1 hour ago), not `old` (7 days ago)
+        assert recent in row[1] or row[1] in recent
+
+    def test_query_filters_old_notifications(self, db):
+        """A streamer with ONLY old notifications (>12h) is excluded from
+        the start-time restore. Their entry in live_streamers can still be
+        populated by the separate broader query, but they get no start time
+        — preventing the milestone false-fire bug entirely."""
+        from datetime import datetime as _dt, timedelta as _td, timezone
+        old = (_dt.now(timezone.utc).replace(tzinfo=None) - _td(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert_notification(db, "alice", old)
+
+        conn = db.get_connection()
+        rows = conn.execute(
+            "SELECT streamer_name FROM notification_messages "
+            "WHERE sent_at > datetime('now', '-12 hours') "
+            "GROUP BY streamer_name"
+        ).fetchall()
+        conn.close()
+        assert rows == [], "Streamer with only old notifications should be filtered out"
+
+    def test_live_streamers_query_uses_7day_window(self, db):
+        """The broader live_streamers restore query uses a 7-day window so
+        cleanup-tracking still works for streamers notified up to a week ago,
+        but not ancient entries."""
+        from datetime import datetime as _dt, timedelta as _td, timezone
+        within = (_dt.now(timezone.utc).replace(tzinfo=None) - _td(days=3)).strftime('%Y-%m-%d %H:%M:%S')
+        ancient = (_dt.now(timezone.utc).replace(tzinfo=None) - _td(days=10)).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert_notification(db, "alice", within)
+        self._insert_notification(db, "bob", ancient)
+
+        conn = db.get_connection()
+        rows = conn.execute(
+            "SELECT DISTINCT streamer_name FROM notification_messages "
+            "WHERE sent_at > datetime('now', '-7 days')"
+        ).fetchall()
+        conn.close()
+        names = {r[0] for r in rows}
+        assert "alice" in names
+        assert "bob" not in names, "10-day-old entry should not be restored"
+
+    def test_handles_streamer_with_no_recent_notifications(self, db):
+        """Edge case: streamer in live_streamers (recent enough for cleanup)
+        but no notifications in the last 12h. Their start time is just not
+        restored — the milestone code will skip them on next check."""
+        from datetime import datetime as _dt, timedelta as _td, timezone
+        # 2 days ago — within 7d (live_streamers) but outside 12h (no start)
+        ts = (_dt.now(timezone.utc).replace(tzinfo=None) - _td(days=2)).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert_notification(db, "alice", ts)
+
+        conn = db.get_connection()
+        live_rows = conn.execute(
+            "SELECT DISTINCT streamer_name FROM notification_messages "
+            "WHERE sent_at > datetime('now', '-7 days')"
+        ).fetchall()
+        start_rows = conn.execute(
+            "SELECT streamer_name FROM notification_messages "
+            "WHERE sent_at > datetime('now', '-12 hours') "
+            "GROUP BY streamer_name"
+        ).fetchall()
+        conn.close()
+        assert ("alice",) in live_rows
+        assert start_rows == []
+
+
 # ── update_streamer_login (rename cascade) ────────────────────────────────────
 
 class TestRenameCascade:
