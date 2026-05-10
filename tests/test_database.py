@@ -142,6 +142,119 @@ class TestStreamEvents:
         for r in rows:
             assert r[1] is not None, f"guild {r[0]} row was not closed"
 
+    def test_mark_stream_ended_does_not_clobber_historical_global_row(self, db):
+        """Regression test for the Round 5 bug.
+
+        global_stream_events has UNIQUE(streamer_name, stream_date), so a
+        second go-live on the same day doesn't insert a new row. If the bot
+        receives a SECOND offline event for that day after the first one
+        already set ended_at, the historical (yesterday's, last week's,
+        last month's) NULL-ended_at row must NOT be clobbered.
+
+        The bug originally caused 'streamed for 217 hours' nonsense in
+        /globalleaderboard. This test ensures it stays fixed.
+        """
+        # Simulate a HISTORICAL open row from a past day where the bot crashed
+        # before receiving offline. Insert directly to bypass the date('now') logic.
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, NULL)",
+            ("alice", "2026-04-01", "2026-04-01 12:00:00")
+        )
+        conn.commit()
+        conn.close()
+
+        # Today, alice goes live — UNIQUE(streamer_name, stream_date) allows it
+        # because the historical row has stream_date='2026-04-01'.
+        # Insert today's row directly so we don't depend on sqlite's date('now').
+        from datetime import datetime as _dt
+        today_str = _dt.now().strftime("%Y-%m-%d")
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, ?, datetime('now'), NULL)",
+            ("alice", today_str)
+        )
+        conn.commit()
+        conn.close()
+
+        # Now mark_stream_ended fires
+        end = datetime.now(timezone.utc)
+        db.mark_stream_ended("alice", ended_at=end)
+
+        # Verify: today's row got ended_at, but APRIL row did NOT
+        conn = db.get_connection()
+        rows = conn.execute(
+            "SELECT stream_date, ended_at FROM global_stream_events WHERE streamer_name='alice' ORDER BY stream_date"
+        ).fetchall()
+        conn.close()
+        april_row = next(r for r in rows if r[0] == "2026-04-01")
+        today_row = next(r for r in rows if r[0] == today_str)
+        assert april_row[1] is None, \
+            f"Historical April row was clobbered with ended_at={april_row[1]} — the bug is back"
+        assert today_row[1] is not None, "Today's row should have been closed"
+
+    def test_mark_stream_ended_does_not_clobber_historical_per_server_row(self, db):
+        """Per-server stream_events: same protection. If a streamer was logged
+        days ago and never closed (bot crash), today's offline must not steal
+        the old row's ended_at slot."""
+        # Insert a historical open row directly
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO stream_events (guild_id, streamer_name, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, NULL)",
+            (100, "alice", "2026-04-01 12:00:00")
+        )
+        conn.commit()
+        conn.close()
+
+        # Today, alice goes live in the same guild
+        db.log_stream_event(guild_id=100, streamer_name="alice")
+        # And goes offline
+        db.mark_stream_ended("alice", ended_at=datetime.now(timezone.utc))
+
+        # Verify: today's row closed, April row still NULL
+        conn = db.get_connection()
+        rows = conn.execute(
+            "SELECT date(went_live_at), ended_at FROM stream_events WHERE streamer_name='alice' ORDER BY id"
+        ).fetchall()
+        conn.close()
+        april_row = next(r for r in rows if r[0] == "2026-04-01")
+        assert april_row[1] is None, \
+            f"Historical April row clobbered with ended_at={april_row[1]}"
+
+    def test_cleanup_migration_resets_long_sessions(self, tmp_db_path):
+        """The one-time cleanup migration must reset rows where ended_at is
+        more than 24 hours after went_live_at (impossible Twitch sessions
+        produced by the old buggy code)."""
+        # Set up DB with a corrupted row, then re-init to trigger the cleanup
+        from database import Database
+        db = Database(db_path=tmp_db_path)
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("alice", "2026-05-01", "2026-05-01 00:00:00", "2026-05-10 00:00:00")  # 9 days "long"
+        )
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("bob", "2026-05-01", "2026-05-01 12:00:00", "2026-05-01 18:00:00")  # 6h, valid
+        )
+        conn.commit()
+        conn.close()
+
+        # Re-initialize — cleanup migration should run
+        db2 = Database(db_path=tmp_db_path)
+        conn = db2.get_connection()
+        rows = {r[0]: r[1] for r in conn.execute(
+            "SELECT streamer_name, ended_at FROM global_stream_events"
+        ).fetchall()}
+        conn.close()
+        assert rows["alice"] is None, "Corrupted 9-day row should have been reset to NULL"
+        assert rows["bob"] is not None, "Valid 6h row should NOT have been reset"
+
 
 # ── update_streamer_login (rename cascade) ────────────────────────────────────
 
