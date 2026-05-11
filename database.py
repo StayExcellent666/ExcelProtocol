@@ -1586,24 +1586,50 @@ class Database:
         conn.commit()
         conn.close()
 
-    def get_server_leaderboard(self, guild_id: int, limit: int = 10) -> list:
+    # Allowed leaderboard sort modes. Defined at class level so the slash
+    # commands can reference them for choices() validation.
+    LEADERBOARD_SORTS = ('consistency', 'hours', 'longest')
+
+    def get_server_leaderboard(self, guild_id: int, limit: int = 10,
+                                sort_by: str = 'consistency') -> list:
         """Get top streamers for a server this month with enhanced metrics.
 
         Returns each row with:
           - streamer_name
-          - stream_count: how many times they went live this month (existing metric)
+          - stream_count: how many times they went live this month
           - hours_streamed: sum of (ended_at - went_live_at) for completed sessions
           - longest_hours: longest single completed session this month
-          - streak_days: current consecutive-day streak (looking back from today)
+          - streak_days: current consecutive-day streak
 
-        Sessions without ended_at (active right now, or where the bot missed the
-        offline event) contribute to stream_count only — not to hours/longest.
+        sort_by controls the ORDER BY:
+          - 'consistency' (default) — order by stream_count DESC
+          - 'hours'       — order by hours_streamed DESC; rows with 0h filtered out
+          - 'longest'     — order by longest_hours DESC; rows with 0h filtered out
+
+        Sessions without ended_at don't contribute to hours/longest. For the
+        hours and longest sorts, streamers with all-NULL ended_at rows are
+        excluded from the result entirely (they'd just be a row of zeros).
         """
+        if sort_by not in self.LEADERBOARD_SORTS:
+            sort_by = 'consistency'
+
+        # ORDER BY clause varies by sort mode. Tiebreakers ensure stable ordering.
+        order_clauses = {
+            'consistency': 'ORDER BY stream_count DESC, hours_streamed DESC, streamer_name ASC',
+            'hours':       'ORDER BY hours_streamed DESC, stream_count DESC, streamer_name ASC',
+            'longest':     'ORDER BY longest_hours DESC, hours_streamed DESC, streamer_name ASC',
+        }
+        # For hours/longest, filter out streamers with no completed sessions.
+        having_clause = {
+            'consistency': '',
+            'hours':       'HAVING hours_streamed > 0',
+            'longest':     'HAVING longest_hours > 0',
+        }
+
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        # Hours + longest from completed sessions (ended_at NOT NULL)
-        cursor.execute('''
+        sql = f'''
             SELECT streamer_name,
                    COUNT(*) AS stream_count,
                    COALESCE(SUM(
@@ -1620,9 +1646,11 @@ class Database:
             WHERE guild_id = ?
               AND strftime('%Y-%m', went_live_at) = strftime('%Y-%m', 'now')
             GROUP BY streamer_name
-            ORDER BY stream_count DESC
+            {having_clause[sort_by]}
+            {order_clauses[sort_by]}
             LIMIT ?
-        ''', (guild_id, limit))
+        '''
+        cursor.execute(sql, (guild_id, limit))
         rows = cursor.fetchall()
 
         # For each top streamer, compute the streak — number of consecutive
@@ -1668,15 +1696,32 @@ class Database:
         conn.close()
         return result
 
-    def get_global_leaderboard(self, limit: int = 15) -> list:
-        """Get top streamers globally this month -- counts unique stream sessions only.
+    def get_global_leaderboard(self, limit: int = 15,
+                                sort_by: str = 'consistency') -> list:
+        """Get top streamers globally this month with three sort modes.
 
-        Adds hours_streamed and longest_hours derived from global_stream_events
-        when ended_at is available (Feature #7 enhancement).
+        sort_by:
+          - 'consistency' (default) — order by total_streams DESC
+          - 'hours'       — order by hours_streamed DESC; 0-hour streamers excluded
+          - 'longest'     — order by longest_hours DESC; 0-longest excluded
         """
+        if sort_by not in self.LEADERBOARD_SORTS:
+            sort_by = 'consistency'
+
+        order_clauses = {
+            'consistency': 'ORDER BY total_streams DESC, hours_streamed DESC, g.streamer_name ASC',
+            'hours':       'ORDER BY hours_streamed DESC, total_streams DESC, g.streamer_name ASC',
+            'longest':     'ORDER BY longest_hours DESC, hours_streamed DESC, g.streamer_name ASC',
+        }
+        having_clause = {
+            'consistency': '',
+            'hours':       'HAVING hours_streamed > 0',
+            'longest':     'HAVING longest_hours > 0',
+        }
+
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('''
+        sql = f'''
             SELECT g.streamer_name,
                    COUNT(*) AS total_streams,
                    (SELECT COUNT(DISTINCT s.guild_id)
@@ -1697,9 +1742,11 @@ class Database:
             FROM global_stream_events g
             WHERE strftime('%Y-%m', g.went_live_at) = strftime('%Y-%m', 'now')
             GROUP BY g.streamer_name
-            ORDER BY total_streams DESC
+            {having_clause[sort_by]}
+            {order_clauses[sort_by]}
             LIMIT ?
-        ''', (limit,))
+        '''
+        cursor.execute(sql, (limit,))
         rows = cursor.fetchall()
         conn.close()
         return [{

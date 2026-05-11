@@ -3328,22 +3328,58 @@ async def notif_log(interaction: discord.Interaction, streamer: str, limit: int 
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# Sort-mode metadata shared by both leaderboard slash commands.
+# Maps sort_by → {emoji, title_suffix, description}.
+_LB_META = {
+    "consistency": {
+        "emoji": "🏆",
+        "label": "Most Active",
+        "desc_server": "Most active streamers tracked in **{guild}** this month",
+        "desc_global": "Most active streamers across all servers this month",
+    },
+    "hours": {
+        "emoji": "⏱️",
+        "label": "Most Hours Streamed",
+        "desc_server": "Streamers with the most total hours in **{guild}** this month",
+        "desc_global": "Streamers with the most total hours across all servers this month",
+    },
+    "longest": {
+        "emoji": "💀",
+        "label": "Longest Stream",
+        "desc_server": "Streamers with the longest single sessions in **{guild}** this month",
+        "desc_global": "Streamers with the longest single sessions across all servers this month",
+    },
+}
+
+
 @bot.tree.command(name="leaderboard", description="Top streamers in this server this month")
-async def leaderboard(interaction: discord.Interaction):
+@app_commands.describe(type="What to rank by (default: most active)")
+@app_commands.choices(type=[
+    app_commands.Choice(name="🏆 Most Active",        value="consistency"),
+    app_commands.Choice(name="⏱️ Most Hours Streamed", value="hours"),
+    app_commands.Choice(name="💀 Longest Stream",      value="longest"),
+])
+async def leaderboard(interaction: discord.Interaction,
+                      type: app_commands.Choice[str] = None):
     """Show the monthly leaderboard for this server"""
-    rows = bot.db.get_server_leaderboard(interaction.guild_id, limit=10)
-    
+    sort_by = type.value if type else "consistency"
+    meta = _LB_META[sort_by]
+    rows = bot.db.get_server_leaderboard(interaction.guild_id, limit=10, sort_by=sort_by)
+
     now = utcnow()
     month_name = now.strftime("%B %Y")
-    
+
     embed = discord.Embed(
-        title=f"🏆 Streamer Leaderboard — {month_name}",
-        description=f"Most active streamers tracked in **{interaction.guild.name}** this month",
+        title=f"{meta['emoji']} {meta['label']} — {month_name}",
+        description=meta["desc_server"].format(guild=interaction.guild.name),
         color=bot.db.get_embed_color(interaction.guild_id)
     )
-    
+
     if not rows:
-        embed.add_field(name="No data yet", value="Stream events will appear here once monitored streamers go live this month.", inline=False)
+        empty_msg = "Stream events will appear here once monitored streamers go live this month."
+        if sort_by != "consistency":
+            empty_msg = "No streamers with completed sessions yet this month. Try `/leaderboard type:🏆 Most Active` for the activity ranking."
+        embed.add_field(name="No data yet", value=empty_msg, inline=False)
     else:
         medals = ["🥇", "🥈", "🥉"]
         lines = []
@@ -3355,8 +3391,7 @@ async def leaderboard(interaction: discord.Interaction):
             streak = row.get("streak_days", 0)
             name = row["streamer_name"]
 
-            # Build a metrics suffix that only shows what's known. If hours == 0
-            # (no completed sessions yet) we fall back to just the stream count.
+            # Always show all available metrics — only the SORT changes per mode.
             parts = [f"{streams} stream{'s' if streams != 1 else ''}"]
             if hours > 0:
                 parts.append(f"{hours}h total")
@@ -3369,7 +3404,7 @@ async def leaderboard(interaction: discord.Interaction):
                 f"{medal} [{name}](https://twitch.tv/{name}) — " + " · ".join(parts)
             )
         embed.add_field(name="Rankings", value="\n".join(lines), inline=False)
-    
+
     embed.set_footer(text="Resets on the 1st of each month")
     await interaction.response.send_message(embed=embed)
 
@@ -3377,7 +3412,14 @@ async def leaderboard(interaction: discord.Interaction):
 
 @app_commands.default_permissions(administrator=True)
 @bot.tree.command(name="globalleaderboard", description="[Owner only] Top streamers across all servers this month")
-async def global_leaderboard(interaction: discord.Interaction):
+@app_commands.describe(type="What to rank by (default: most active)")
+@app_commands.choices(type=[
+    app_commands.Choice(name="🏆 Most Active",        value="consistency"),
+    app_commands.Choice(name="⏱️ Most Hours Streamed", value="hours"),
+    app_commands.Choice(name="💀 Longest Stream",      value="longest"),
+])
+async def global_leaderboard(interaction: discord.Interaction,
+                              type: app_commands.Choice[str] = None):
     """Owner-only global leaderboard across all servers"""
     if interaction.user.id != BOT_OWNER_ID:
         await interaction.response.send_message(
@@ -3386,19 +3428,24 @@ async def global_leaderboard(interaction: discord.Interaction):
         )
         return
 
-    rows = bot.db.get_global_leaderboard(limit=15)
-    
+    sort_by = type.value if type else "consistency"
+    meta = _LB_META[sort_by]
+    rows = bot.db.get_global_leaderboard(limit=15, sort_by=sort_by)
+
     now = utcnow()
     month_name = now.strftime("%B %Y")
-    
+
     embed = discord.Embed(
-        title=f"🌍 Global Leaderboard — {month_name}",
-        description="Most active streamers across all servers this month",
+        title=f"🌍 {meta['label']} — {month_name}",
+        description=meta["desc_global"],
         color=0x9146FF
     )
-    
+
     if not rows:
-        embed.add_field(name="No data yet", value="No stream events recorded this month yet.", inline=False)
+        empty_msg = "No stream events recorded this month yet."
+        if sort_by != "consistency":
+            empty_msg = "No streamers with completed sessions yet this month."
+        embed.add_field(name="No data yet", value=empty_msg, inline=False)
     else:
         medals = ["🥇", "🥈", "🥉"]
         lines = []
@@ -3439,7 +3486,7 @@ async def global_leaderboard(interaction: discord.Interaction):
                 current_length += line_length
         if current_field:
             embed.add_field(name="Rankings" if field_num == 1 else f"Rankings (continued {field_num})", value="\n".join(current_field), inline=False)
-    
+
     embed.set_footer(text="Resets on the 1st of each month")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 

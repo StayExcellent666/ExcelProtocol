@@ -2713,6 +2713,7 @@ function ChannelRewardsTab({ guildId }) {
 function GlobalStatsTab() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [lbSort, setLbSort] = useState("consistency");  // 'consistency' | 'hours' | 'longest'
   const load = useCallback(async () => {
     setLoading(true);
     try { setStats(await apiFetch("/api/dev/global-stats")); }
@@ -2787,45 +2788,104 @@ function GlobalStatsTab() {
         </div>
       </div>
 
-      {stats?.global_leaderboard?.length > 0 && (
-        <div style={{ ...C.card, marginBottom:16 }}>
-          <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:15, color:"var(--text)", textShadow:"0 0 14px rgba(0,245,212,0.3), 0 0 28px rgba(0,245,212,0.1)", marginBottom:4 }}>🌍 Global Leaderboard</div>
-          <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:12 }}>Most active streamers across all servers — month to date</div>
-          <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
-            {stats.global_leaderboard.map((s,i) => {
-              const medal = ["🥇","🥈","🥉"][i] || `#${i+1}`;
-              return (
-                <div key={s.streamer_name} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:"1px solid var(--border)", gap:10 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0, flex:"0 1 auto" }}>
-                    <span style={{ color:"var(--text3)", fontSize:11, fontFamily:"'JetBrains Mono',monospace", minWidth:24 }}>{medal}</span>
-                    <a href={`https://twitch.tv/${s.streamer_name}`} target="_blank" rel="noreferrer"
-                       style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", textDecoration:"none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                      {s.streamer_name}
-                    </a>
-                  </div>
-                  <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end", fontSize:11, fontFamily:"'JetBrains Mono',monospace" }}>
-                    <span style={{ color:"var(--cyan)" }}>{s.total_streams} stream{s.total_streams !== 1 ? "s" : ""}</span>
-                    <span style={{ color:"var(--text3)" }}>·</span>
-                    <span style={{ color:"var(--cyan)" }}>{s.server_count} server{s.server_count !== 1 ? "s" : ""}</span>
-                    {s.hours_streamed > 0 && (
-                      <>
+      {(() => {
+        // Pick the active leaderboard array based on the selected sort tab.
+        // Backwards compat: fall back to legacy `global_leaderboard` field if
+        // the new per-sort fields aren't present (e.g. stale API).
+        const lbData = {
+          consistency: stats?.global_leaderboard_consistency ?? stats?.global_leaderboard ?? [],
+          hours:       stats?.global_leaderboard_hours       ?? [],
+          longest:     stats?.global_leaderboard_longest     ?? [],
+        };
+        const lbMeta = {
+          consistency: { emoji: "🏆", label: "Most Active",         desc: "Most active streamers across all servers — month to date" },
+          hours:       { emoji: "⏱️", label: "Most Hours Streamed", desc: "Streamers with the most total hours this month" },
+          longest:     { emoji: "💀", label: "Longest Stream",      desc: "Streamers with the longest single sessions this month" },
+        };
+        const activeRows = lbData[lbSort] || [];
+        const activeMeta = lbMeta[lbSort];
+
+        // Only show the card if ANY sort has data — avoids an empty card on fresh DBs
+        const anyData = lbData.consistency.length > 0 || lbData.hours.length > 0 || lbData.longest.length > 0;
+        if (!anyData) return null;
+
+        const TabBtn = ({ id }) => {
+          const m = lbMeta[id];
+          const active = lbSort === id;
+          return (
+            <button
+              onClick={() => setLbSort(id)}
+              style={{
+                background: active ? "rgba(0,245,212,0.12)" : "transparent",
+                border: `1px solid ${active ? "rgba(0,245,212,0.5)" : "var(--border)"}`,
+                color: active ? "var(--cyan)" : "var(--text3)",
+                padding: "5px 10px",
+                borderRadius: 6,
+                cursor: "pointer",
+                fontSize: 11,
+                fontFamily: "'JetBrains Mono',monospace",
+                whiteSpace: "nowrap",
+              }}>
+              {m.emoji} {m.label}
+            </button>
+          );
+        };
+
+        return (
+          <div style={{ ...C.card, marginBottom:16 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4, gap:10, flexWrap:"wrap" }}>
+              <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:15, color:"var(--text)", textShadow:"0 0 14px rgba(0,245,212,0.3), 0 0 28px rgba(0,245,212,0.1)" }}>
+                🌍 {activeMeta.label}
+              </div>
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                <TabBtn id="consistency" />
+                <TabBtn id="hours" />
+                <TabBtn id="longest" />
+              </div>
+            </div>
+            <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:12 }}>{activeMeta.desc}</div>
+            {activeRows.length === 0 ? (
+              <div style={{ fontSize:12, color:"var(--text3)", fontFamily:"'Outfit',sans-serif", padding:"12px 0" }}>
+                No streamers with completed sessions yet this month.
+              </div>
+            ) : (
+              <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                {activeRows.map((s,i) => {
+                  const medal = ["🥇","🥈","🥉"][i] || `#${i+1}`;
+                  return (
+                    <div key={s.streamer_name} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"6px 0", borderBottom:"1px solid var(--border)", gap:10 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0, flex:"0 1 auto" }}>
+                        <span style={{ color:"var(--text3)", fontSize:11, fontFamily:"'JetBrains Mono',monospace", minWidth:24 }}>{medal}</span>
+                        <a href={`https://twitch.tv/${s.streamer_name}`} target="_blank" rel="noreferrer"
+                           style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", textDecoration:"none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                          {s.streamer_name}
+                        </a>
+                      </div>
+                      <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end", fontSize:11, fontFamily:"'JetBrains Mono',monospace" }}>
+                        <span style={{ color:"var(--cyan)" }}>{s.total_streams} stream{s.total_streams !== 1 ? "s" : ""}</span>
                         <span style={{ color:"var(--text3)" }}>·</span>
-                        <span style={{ color:"var(--green)" }}>{s.hours_streamed}h</span>
-                      </>
-                    )}
-                    {s.longest_hours > 0 && (
-                      <>
-                        <span style={{ color:"var(--text3)" }}>·</span>
-                        <span style={{ color:"var(--yellow)" }}>{s.longest_hours}h longest</span>
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+                        <span style={{ color:"var(--cyan)" }}>{s.server_count} server{s.server_count !== 1 ? "s" : ""}</span>
+                        {s.hours_streamed > 0 && (
+                          <>
+                            <span style={{ color:"var(--text3)" }}>·</span>
+                            <span style={{ color:"var(--green)" }}>{s.hours_streamed}h</span>
+                          </>
+                        )}
+                        {s.longest_hours > 0 && (
+                          <>
+                            <span style={{ color:"var(--text3)" }}>·</span>
+                            <span style={{ color:"var(--yellow)" }}>{s.longest_hours}h longest</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       <div style={{ display:"flex", justifyContent:"flex-end" }}>
         <button onClick={load} style={{ ...C.btnSecondary, fontSize:12 }}>↻ Refresh</button>

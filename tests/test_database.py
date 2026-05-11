@@ -689,3 +689,120 @@ class TestServerLeaderboard:
         rows = db.get_server_leaderboard(guild_id=100)
         assert rows[0]["streamer_name"] == "bob"
         assert rows[1]["streamer_name"] == "alice"
+
+    def test_sort_by_hours(self, db):
+        """sort_by='hours' orders by total hours streamed, not stream count."""
+        now = datetime.now(timezone.utc)
+        # alice: 1 long 8-hour stream → fewer streams but more hours
+        self._insert_session(db, 100, "alice", now - timedelta(hours=10),
+                             end=now - timedelta(hours=2))
+        # bob: 3 short streams totaling 3 hours
+        for i in range(3):
+            self._insert_session(db, 100, "bob",
+                                 now - timedelta(hours=20 + i),
+                                 end=now - timedelta(hours=19 + i))
+
+        rows = db.get_server_leaderboard(guild_id=100, sort_by='hours')
+        assert rows[0]["streamer_name"] == "alice", \
+            f"Hours sort: alice (8h) should be #1, got {rows[0]['streamer_name']}"
+        assert rows[1]["streamer_name"] == "bob"
+        assert 7.9 <= rows[0]["hours_streamed"] <= 8.1
+
+    def test_sort_by_longest(self, db):
+        """sort_by='longest' orders by single-longest-session."""
+        now = datetime.now(timezone.utc)
+        # alice: 2 streams of 3h each (6h total, but no single stream >3h)
+        self._insert_session(db, 100, "alice", now - timedelta(hours=20),
+                             end=now - timedelta(hours=17))
+        self._insert_session(db, 100, "alice", now - timedelta(hours=10),
+                             end=now - timedelta(hours=7))
+        # bob: 1 long 5h stream (less total hours, but longest single session)
+        self._insert_session(db, 100, "bob", now - timedelta(hours=8),
+                             end=now - timedelta(hours=3))
+
+        rows = db.get_server_leaderboard(guild_id=100, sort_by='longest')
+        assert rows[0]["streamer_name"] == "bob", \
+            f"Longest sort: bob (5h) should be #1, got {rows[0]['streamer_name']}"
+        assert rows[1]["streamer_name"] == "alice"
+        assert 4.9 <= rows[0]["longest_hours"] <= 5.1
+
+    def test_sort_hours_filters_streamers_with_no_completed_sessions(self, db):
+        """A streamer with only open sessions (no ended_at) shouldn't appear
+        in the hours leaderboard at all — they'd just be a row of zeros."""
+        now = datetime.now(timezone.utc)
+        # alice: 1 completed 2-hour stream
+        self._insert_session(db, 100, "alice", now - timedelta(hours=4),
+                             end=now - timedelta(hours=2))
+        # bob: 5 streams but NONE completed (all ended_at IS NULL)
+        for i in range(5):
+            self._insert_session(db, 100, "bob", now - timedelta(hours=i*2))
+
+        # Consistency: both appear (bob #1 with 5 streams)
+        rows_c = db.get_server_leaderboard(guild_id=100, sort_by='consistency')
+        names = [r["streamer_name"] for r in rows_c]
+        assert "alice" in names and "bob" in names
+
+        # Hours: only alice (bob has 0 hours)
+        rows_h = db.get_server_leaderboard(guild_id=100, sort_by='hours')
+        names_h = [r["streamer_name"] for r in rows_h]
+        assert "alice" in names_h, "alice should be in hours leaderboard"
+        assert "bob" not in names_h, "bob has no completed sessions, shouldn't be in hours sort"
+
+    def test_invalid_sort_falls_back_to_consistency(self, db):
+        """Defensive: an unknown sort_by value falls back to 'consistency'
+        rather than raising — protects against frontend bugs / typos."""
+        now = datetime.now(timezone.utc)
+        self._insert_session(db, 100, "alice", now)
+        for _ in range(3):
+            self._insert_session(db, 100, "bob", now)
+        rows = db.get_server_leaderboard(guild_id=100, sort_by='garbage')
+        # Should behave like 'consistency' — bob (3 streams) ranks above alice (1)
+        assert rows[0]["streamer_name"] == "bob"
+
+    def test_global_leaderboard_three_sorts(self, db):
+        """Same three sort modes work on global leaderboard."""
+        # Insert directly into global_stream_events
+        conn = db.get_connection()
+        now = datetime.now(timezone.utc)
+        # Set up three streamers with different metrics
+        # alice: 5 short streams (high count, low hours)
+        for i in range(5):
+            day = (now - timedelta(days=i)).strftime('%Y-%m-%d')
+            conn.execute(
+                "INSERT INTO global_stream_events "
+                "(streamer_name, stream_date, went_live_at, ended_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("alice", day, f"{day} 12:00:00", f"{day} 12:30:00")  # 30min each
+            )
+        # bob: 1 long 10-hour stream (low count, high hours, high longest)
+        day = now.strftime('%Y-%m-%d')
+        conn.execute(
+            "INSERT INTO global_stream_events "
+            "(streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("bob", day, f"{day} 02:00:00", f"{day} 12:00:00")
+        )
+        # carol: 3 streams totalling 9 hours (mid count, mid hours)
+        for i in range(3):
+            day = (now - timedelta(days=i+5)).strftime('%Y-%m-%d')
+            conn.execute(
+                "INSERT INTO global_stream_events "
+                "(streamer_name, stream_date, went_live_at, ended_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("carol", day, f"{day} 10:00:00", f"{day} 13:00:00")  # 3h each
+            )
+        conn.commit()
+        conn.close()
+
+        # Consistency: alice wins (5 streams)
+        rows = db.get_global_leaderboard(sort_by='consistency')
+        assert rows[0]["streamer_name"] == "alice"
+
+        # Hours: bob wins (10h)
+        rows = db.get_global_leaderboard(sort_by='hours')
+        assert rows[0]["streamer_name"] == "bob"
+        assert 9.9 <= rows[0]["hours_streamed"] <= 10.1
+
+        # Longest: bob wins again (10h single session)
+        rows = db.get_global_leaderboard(sort_by='longest')
+        assert rows[0]["streamer_name"] == "bob"

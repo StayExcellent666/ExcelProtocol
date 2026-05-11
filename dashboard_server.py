@@ -2770,12 +2770,16 @@ async def get_global_stats(request):
         logger.debug(f"suppressed exception: {_e}")
 
     # Global monthly leaderboard (same data as /globalleaderboard slash command).
-    # Pulled here so the dev Global Stats tab shows month-to-date activity
-    # alongside the lifetime totals above.
-    leaderboard = []
+    # Returns all three sort modes in one response so the dashboard can switch
+    # tabs without a round-trip per click.
+    lb_consistency = []
+    lb_hours = []
+    lb_longest = []
     try:
         if _bot_ref:
-            leaderboard = _bot_ref.db.get_global_leaderboard(limit=15)
+            lb_consistency = _bot_ref.db.get_global_leaderboard(limit=15, sort_by='consistency')
+            lb_hours       = _bot_ref.db.get_global_leaderboard(limit=15, sort_by='hours')
+            lb_longest     = _bot_ref.db.get_global_leaderboard(limit=15, sort_by='longest')
     except Exception as _e:
         logger.debug(f"suppressed exception fetching global leaderboard: {_e}")
 
@@ -2790,7 +2794,11 @@ async def get_global_stats(request):
         "eventsub_count":      eventsub_count,
         "top_streamers":       top_streamers,
         "servers_by_count":    enriched_servers,
-        "global_leaderboard":  leaderboard,
+        # Backwards compat — old field is alias for consistency sort
+        "global_leaderboard":             lb_consistency,
+        "global_leaderboard_consistency": lb_consistency,
+        "global_leaderboard_hours":       lb_hours,
+        "global_leaderboard_longest":     lb_longest,
     })
 
 
