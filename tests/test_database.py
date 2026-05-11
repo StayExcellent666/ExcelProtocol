@@ -142,6 +142,129 @@ class TestStreamEvents:
         for r in rows:
             assert r[1] is not None, f"guild {r[0]} row was not closed"
 
+    def test_mark_stream_ended_cross_midnight_stream(self, db):
+        """Round 9 regression: a stream that starts before midnight UTC and
+        ends after midnight UTC must be tracked correctly. Earlier code used
+        `date(went_live_at) = date('now')` which would fail to match across
+        midnight."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        # Simulate: stream went live 5 hours ago (before midnight) and is
+        # ending now (after midnight). Insert directly to control timestamps.
+        five_hours_ago = (_dt.now(timezone.utc) - _td(hours=5)).replace(tzinfo=None)
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO stream_events (guild_id, streamer_name, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, NULL)",
+            (100, "alice", five_hours_ago.strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, date(?), ?, NULL)",
+            ("alice", five_hours_ago.strftime('%Y-%m-%d %H:%M:%S'),
+             five_hours_ago.strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+
+        # End the stream now
+        db.mark_stream_ended("alice", ended_at=_dt.now(timezone.utc))
+
+        # Both rows should be closed even though went_live_at is from yesterday
+        # (or today depending on what time of day the test runs at)
+        conn = db.get_connection()
+        per_server = conn.execute(
+            "SELECT ended_at FROM stream_events WHERE streamer_name='alice'"
+        ).fetchone()
+        global_ = conn.execute(
+            "SELECT ended_at FROM global_stream_events WHERE streamer_name='alice'"
+        ).fetchone()
+        conn.close()
+        assert per_server[0] is not None, \
+            "Cross-midnight stream's per-server row should have been closed"
+        assert global_[0] is not None, \
+            "Cross-midnight stream's global row should have been closed"
+
+    def test_mark_stream_ended_24_hour_stream(self, db):
+        """A 24-hour charity stream / subathon must track its duration correctly.
+        Tests the realistic upper bound for legitimate streams."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        # Stream started 24h ago
+        day_ago = (_dt.now(timezone.utc) - _td(hours=24)).replace(tzinfo=None)
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO stream_events (guild_id, streamer_name, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, NULL)",
+            (100, "alice", day_ago.strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+
+        # End now — 24 hours later
+        now = _dt.now(timezone.utc)
+        db.mark_stream_ended("alice", ended_at=now)
+
+        # Compute the recorded duration
+        conn = db.get_connection()
+        row = conn.execute(
+            "SELECT (julianday(ended_at) - julianday(went_live_at)) * 24 AS hours "
+            "FROM stream_events WHERE streamer_name='alice'"
+        ).fetchone()
+        conn.close()
+        assert row[0] is not None, "24h stream's ended_at must be set"
+        # Allow ±10 minutes of tolerance for test timing
+        assert 23.8 <= row[0] <= 24.2, f"Expected ~24h duration, got {row[0]}h"
+
+    def test_mark_stream_ended_47_hour_stream_within_window(self, db):
+        """47h stream (just inside the 48h Twitch cap) must close correctly."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        forty_seven_h_ago = (_dt.now(timezone.utc) - _td(hours=47)).replace(tzinfo=None)
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO stream_events (guild_id, streamer_name, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, NULL)",
+            (100, "alice", forty_seven_h_ago.strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+
+        db.mark_stream_ended("alice", ended_at=_dt.now(timezone.utc))
+
+        conn = db.get_connection()
+        row = conn.execute(
+            "SELECT ended_at FROM stream_events WHERE streamer_name='alice'"
+        ).fetchone()
+        conn.close()
+        assert row[0] is not None, "47h stream should still be within the 48h window"
+
+    def test_mark_stream_ended_49_hour_orphan_stays_null(self, db):
+        """A 49-hour-old NULL row is an orphan (bot missed offline event) and
+        must NOT be clobbered by a later unrelated offline event. This is
+        the original Round 5 protection — preserved with the 48h window."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        forty_nine_h_ago = (_dt.now(timezone.utc) - _td(hours=49)).replace(tzinfo=None)
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO stream_events (guild_id, streamer_name, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, NULL)",
+            (100, "alice", forty_nine_h_ago.strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+
+        db.mark_stream_ended("alice", ended_at=_dt.now(timezone.utc))
+
+        conn = db.get_connection()
+        row = conn.execute(
+            "SELECT ended_at FROM stream_events WHERE streamer_name='alice'"
+        ).fetchone()
+        conn.close()
+        assert row[0] is None, \
+            "49h-old orphan must NOT be clobbered — that's the original bug we fixed"
+
     def test_mark_stream_ended_does_not_clobber_historical_global_row(self, db):
         """Regression test for the Round 5 bug.
 
@@ -226,9 +349,9 @@ class TestStreamEvents:
 
     def test_cleanup_migration_resets_long_sessions(self, tmp_db_path):
         """The one-time cleanup migration must reset rows where ended_at is
-        more than 24 hours after went_live_at (impossible Twitch sessions
-        produced by the old buggy code)."""
-        # Set up DB with a corrupted row, then re-init to trigger the cleanup
+        more than 12 hours after went_live_at (corrupted Twitch sessions
+        produced by the old buggy code; >12h is overwhelmingly cross-day
+        corruption rather than a real marathon stream)."""
         from database import Database
         db = Database(db_path=tmp_db_path)
         conn = db.get_connection()
@@ -242,10 +365,24 @@ class TestStreamEvents:
             "VALUES (?, ?, ?, ?)",
             ("bob", "2026-05-01", "2026-05-01 12:00:00", "2026-05-01 18:00:00")  # 6h, valid
         )
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("carol", "2026-05-01", "2026-05-01 01:00:00", "2026-05-02 00:00:00")  # 23h, corrupted
+        )
         conn.commit()
         conn.close()
 
-        # Re-initialize — cleanup migration should run
+        # The fixture's `db` instance was created with an empty DB and ran the
+        # cleanup with no rows present. We need a NEW Database to trigger the
+        # cleanup now that the corrupted rows exist. But the meta flag is
+        # already set from the first init, so we need to remove it first.
+        conn = db.get_connection()
+        conn.execute("DELETE FROM meta WHERE key='ended_at_cleanup_v2'")
+        conn.commit()
+        conn.close()
+
+        # Re-initialize — cleanup migration should run now
         db2 = Database(db_path=tmp_db_path)
         conn = db2.get_connection()
         rows = {r[0]: r[1] for r in conn.execute(
@@ -254,6 +391,39 @@ class TestStreamEvents:
         conn.close()
         assert rows["alice"] is None, "Corrupted 9-day row should have been reset to NULL"
         assert rows["bob"] is not None, "Valid 6h row should NOT have been reset"
+        assert rows["carol"] is None, "23h cross-day row should have been reset to NULL"
+
+    def test_cleanup_migration_runs_only_once(self, tmp_db_path):
+        """Cleanup v2 must be gated by a meta flag — after it runs once, it
+        cannot run again even if legit 13h+ marathon streams exist later."""
+        from database import Database
+        db = Database(db_path=tmp_db_path)
+
+        # First boot ran the migration (with no corrupted data). Flag should be set.
+        conn = db.get_connection()
+        flag = conn.execute("SELECT value FROM meta WHERE key='ended_at_cleanup_v2'").fetchone()
+        conn.close()
+        assert flag is not None, "Meta flag should be set after first init"
+
+        # Insert a legit 14h marathon row AFTER initial cleanup ran
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("marathon", "2026-05-15", "2026-05-15 10:00:00", "2026-05-16 00:00:00")  # 14h
+        )
+        conn.commit()
+        conn.close()
+
+        # Restart (re-init Database) — flag is still set, so cleanup must NOT run
+        db2 = Database(db_path=tmp_db_path)
+        conn = db2.get_connection()
+        row = conn.execute(
+            "SELECT ended_at FROM global_stream_events WHERE streamer_name='marathon'"
+        ).fetchone()
+        conn.close()
+        assert row[0] is not None, \
+            "Legit 14h row was nulled — cleanup should NOT have re-run after meta flag was set"
 
 
 # ── on_ready stream-start restoration (regression for false milestone bug) ────

@@ -264,32 +264,50 @@ class Database:
             pass  # Column already exists
 
         # One-time data cleanup: reset corrupted ended_at values caused by the
-        # mark_stream_ended bug (fixed in Round 5). Any session lasting >24h is
-        # impossible (Twitch terminates streams that long) and was caused by an
-        # offline event clobbering a historical row's ended_at.
-        # Reset to NULL so duration metrics treat them as "incomplete data" rather
-        # than fabricated 200-hour sessions.
-        try:
-            cursor.execute('''
-                UPDATE global_stream_events SET ended_at = NULL
-                WHERE ended_at IS NOT NULL
-                  AND (julianday(ended_at) - julianday(went_live_at)) > 1
-            ''')
-            n_global = cursor.rowcount
-            cursor.execute('''
-                UPDATE stream_events SET ended_at = NULL
-                WHERE ended_at IS NOT NULL
-                  AND (julianday(ended_at) - julianday(went_live_at)) > 1
-            ''')
-            n_per_server = cursor.rowcount
-            if n_global or n_per_server:
+        # mark_stream_ended bug (fixed in Round 5). Twitch streams almost never
+        # exceed 12h in practice — durations longer than that are overwhelmingly
+        # likely to be cross-day corruption from the pre-Round-5 code.
+        # Tracked with a `meta` table flag so the cleanup runs exactly once per
+        # DB, no matter how many times the bot restarts. This avoids nulling out
+        # legit long marathon streams that might happen after the fix.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+
+        # Cleanup v1 (Round 5): >24h was too lenient. Skip if it ran but mark
+        # so we know v2 supersedes it.
+        # Cleanup v2 (Round 8): >12h covers the realistic case.
+        cursor.execute("SELECT value FROM meta WHERE key = 'ended_at_cleanup_v2'")
+        row = cursor.fetchone()
+        if row is None:
+            try:
+                cursor.execute('''
+                    UPDATE global_stream_events SET ended_at = NULL
+                    WHERE ended_at IS NOT NULL
+                      AND (julianday(ended_at) - julianday(went_live_at)) * 24 > 12
+                ''')
+                n_global = cursor.rowcount
+                cursor.execute('''
+                    UPDATE stream_events SET ended_at = NULL
+                    WHERE ended_at IS NOT NULL
+                      AND (julianday(ended_at) - julianday(went_live_at)) * 24 > 12
+                ''')
+                n_per_server = cursor.rowcount
+                cursor.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('ended_at_cleanup_v2', ?)",
+                    (str(n_global + n_per_server),)
+                )
                 conn.commit()
                 logger.info(
-                    f"Cleanup: reset {n_global} corrupted global_stream_events rows "
-                    f"and {n_per_server} stream_events rows (>24h sessions)"
+                    f"Cleanup v2: reset {n_global} global_stream_events rows "
+                    f"and {n_per_server} stream_events rows (>12h sessions). "
+                    f"Cleanup is now marked complete and will not re-run."
                 )
-        except Exception as e:
-            logger.warning(f"ended_at cleanup skipped: {e}")
+            except Exception as e:
+                logger.warning(f"ended_at cleanup v2 skipped: {e}")
 
         # ----------------------------------------------------------------
         # Twitch chat bot tables (new -- existing tables untouched)
@@ -1507,21 +1525,23 @@ class Database:
 
         Only updates rows where:
           - ended_at IS NULL (still open), AND
-          - went_live_at is from today (UTC).
+          - went_live_at is within the last 48 hours (Twitch's hard cap on
+            stream length — any older NULL row is an orphan from a missed
+            offline event, not the current stream)
 
-        The "from today" scoping prevents a critical bug: global_stream_events
-        has UNIQUE(streamer_name, stream_date), so re-going-live on the same
-        day doesn't insert a new row. Without the date scope, a second offline
-        of the day would find no open row for today and clobber the oldest
-        still-open historical row — producing nonsense durations like
-        "stream lasted 217 hours". Per-server stream_events doesn't have the
-        UNIQUE constraint but the same scoping protects against bot-crash
-        orphans.
+        The 48-hour window is the key correctness property:
+          - Allows cross-midnight streams (start 11pm, end 4am) — fixed
+          - Allows 24-hour charity streams / subathons up to 48h — fixed
+          - Excludes ancient orphans from clobbering (the original bug)
 
-        Older orphans (bot died mid-stream, never received the offline event)
-        intentionally stay NULL forever — they're a marker that we don't have
-        clean data, and we don't want a future offline event to assign them a
-        wrong end timestamp.
+        For per-server stream_events, we further restrict to MAX(id) per
+        guild so each monitored guild's most-recent open row is closed
+        (not all of them, in case there are multiple historical NULLs).
+
+        Older orphans (bot died mid-stream, never received offline event)
+        intentionally stay NULL forever — they're a marker that we don't
+        have clean data, and we don't want a future offline event to
+        assign them a wrong end timestamp.
         """
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -1535,7 +1555,7 @@ class Database:
                     SELECT MAX(id) FROM stream_events
                     WHERE streamer_name = ?
                       AND ended_at IS NULL
-                      AND date(went_live_at) = date('now')
+                      AND went_live_at > datetime('now', '-48 hours')
                     GROUP BY guild_id
                 )
             ''', (ts, streamer_name.lower()))
@@ -1543,7 +1563,7 @@ class Database:
                 UPDATE global_stream_events SET ended_at = ?
                 WHERE streamer_name = ?
                   AND ended_at IS NULL
-                  AND date(went_live_at) = date('now')
+                  AND went_live_at > datetime('now', '-48 hours')
             ''', (ts, streamer_name.lower()))
         else:
             cursor.execute('''
@@ -1552,7 +1572,7 @@ class Database:
                     SELECT MAX(id) FROM stream_events
                     WHERE streamer_name = ?
                       AND ended_at IS NULL
-                      AND date(went_live_at) = date('now')
+                      AND went_live_at > datetime('now', '-48 hours')
                     GROUP BY guild_id
                 )
             ''', (streamer_name.lower(),))
@@ -1560,7 +1580,7 @@ class Database:
                 UPDATE global_stream_events SET ended_at = datetime('now')
                 WHERE streamer_name = ?
                   AND ended_at IS NULL
-                  AND date(went_live_at) = date('now')
+                  AND went_live_at > datetime('now', '-48 hours')
             ''', (streamer_name.lower(),))
 
         conn.commit()
