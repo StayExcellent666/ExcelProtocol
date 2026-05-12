@@ -265,6 +265,83 @@ class TestStreamEvents:
         assert row[0] is None, \
             "49h-old orphan must NOT be clobbered — that's the original bug we fixed"
 
+    def test_mark_stream_ended_multiple_open_rows_only_closes_latest(self, db):
+        """Round 11 regression: if multiple NULL rows exist for the same
+        streamer in the 48h window (because previous offline events were
+        missed), the new offline event must ONLY close the most recent one.
+        Closing all of them assigns the same ended_at to multiple rows
+        and produces fake cross-day durations on the older rows."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        # Insert TWO open rows on consecutive days (simulating bardocksenpai's
+        # corruption pattern: stream.online fired twice but a stream.offline
+        # was missed between them)
+        thirty_h_ago = (_dt.now(timezone.utc) - _td(hours=30)).replace(tzinfo=None)
+        five_h_ago = (_dt.now(timezone.utc) - _td(hours=5)).replace(tzinfo=None)
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, date(?), ?, NULL)",
+            ("alice", thirty_h_ago.strftime('%Y-%m-%d %H:%M:%S'),
+             thirty_h_ago.strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, date(?), ?, NULL)",
+            ("alice", five_h_ago.strftime('%Y-%m-%d %H:%M:%S'),
+             five_h_ago.strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+
+        # End the current stream now
+        db.mark_stream_ended("alice", ended_at=_dt.now(timezone.utc))
+
+        conn = db.get_connection()
+        rows = conn.execute(
+            "SELECT went_live_at, ended_at FROM global_stream_events "
+            "WHERE streamer_name='alice' ORDER BY id"
+        ).fetchall()
+        conn.close()
+
+        # Older row (30h-ago) must stay NULL — it's the orphan from the
+        # missed offline event. Only the newest row should be closed.
+        assert rows[0][1] is None, \
+            f"Older NULL row should not have been closed, got ended_at={rows[0][1]}"
+        assert rows[1][1] is not None, \
+            "Most recent NULL row should have been closed"
+
+    def test_mark_stream_ended_per_server_multiple_open_only_closes_latest(self, db):
+        """Same MAX(id) protection on per-server stream_events."""
+        from datetime import datetime as _dt, timedelta as _td
+
+        thirty_h_ago = (_dt.now(timezone.utc) - _td(hours=30)).replace(tzinfo=None)
+        five_h_ago = (_dt.now(timezone.utc) - _td(hours=5)).replace(tzinfo=None)
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO stream_events (guild_id, streamer_name, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, NULL)",
+            (100, "alice", thirty_h_ago.strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.execute(
+            "INSERT INTO stream_events (guild_id, streamer_name, went_live_at, ended_at) "
+            "VALUES (?, ?, ?, NULL)",
+            (100, "alice", five_h_ago.strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+
+        db.mark_stream_ended("alice", ended_at=_dt.now(timezone.utc))
+
+        conn = db.get_connection()
+        rows = conn.execute(
+            "SELECT ended_at FROM stream_events WHERE streamer_name='alice' "
+            "AND guild_id=100 ORDER BY id"
+        ).fetchall()
+        conn.close()
+        assert rows[0][0] is None, "Older orphan must stay NULL"
+        assert rows[1][0] is not None, "Latest row must be closed"
+
     def test_mark_stream_ended_does_not_clobber_historical_global_row(self, db):
         """Regression test for the Round 5 bug.
 

@@ -1527,16 +1527,23 @@ class Database:
           - ended_at IS NULL (still open), AND
           - went_live_at is within the last 48 hours (Twitch's hard cap on
             stream length — any older NULL row is an orphan from a missed
-            offline event, not the current stream)
+            offline event, not the current stream), AND
+          - the row is the MOST RECENT matching open row (MAX(id))
 
         The 48-hour window is the key correctness property:
           - Allows cross-midnight streams (start 11pm, end 4am) — fixed
           - Allows 24-hour charity streams / subathons up to 48h — fixed
           - Excludes ancient orphans from clobbering (the original bug)
 
-        For per-server stream_events, we further restrict to MAX(id) per
-        guild so each monitored guild's most-recent open row is closed
-        (not all of them, in case there are multiple historical NULLs).
+        The MAX(id) constraint is the other key correctness property: if
+        multiple open rows exist for the same streamer (e.g., the bot
+        missed a previous offline event but the next stream.online still
+        inserted a fresh row), we ONLY close the most recent one. Closing
+        all of them would assign the same end-time to multiple rows and
+        produce cross-day "long stream" corruption.
+
+        Per-server stream_events uses MAX(id) per guild (since each guild
+        has its own row). Global table uses a single MAX(id).
 
         Older orphans (bot died mid-stream, never received offline event)
         intentionally stay NULL forever — they're a marker that we don't
@@ -1561,9 +1568,12 @@ class Database:
             ''', (ts, streamer_name.lower()))
             cursor.execute('''
                 UPDATE global_stream_events SET ended_at = ?
-                WHERE streamer_name = ?
-                  AND ended_at IS NULL
-                  AND went_live_at > datetime('now', '-48 hours')
+                WHERE id = (
+                    SELECT MAX(id) FROM global_stream_events
+                    WHERE streamer_name = ?
+                      AND ended_at IS NULL
+                      AND went_live_at > datetime('now', '-48 hours')
+                )
             ''', (ts, streamer_name.lower()))
         else:
             cursor.execute('''
@@ -1578,9 +1588,12 @@ class Database:
             ''', (streamer_name.lower(),))
             cursor.execute('''
                 UPDATE global_stream_events SET ended_at = datetime('now')
-                WHERE streamer_name = ?
-                  AND ended_at IS NULL
-                  AND went_live_at > datetime('now', '-48 hours')
+                WHERE id = (
+                    SELECT MAX(id) FROM global_stream_events
+                    WHERE streamer_name = ?
+                      AND ended_at IS NULL
+                      AND went_live_at > datetime('now', '-48 hours')
+                )
             ''', (streamer_name.lower(),))
 
         conn.commit()
