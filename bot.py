@@ -49,6 +49,11 @@ class TwitchNotifierBot(discord.Client):
         # compute uptime locally without polling Twitch.
         self._stream_starts: dict[str, datetime] = {}
 
+        # Filled by _reconcile_live_state during startup so the Bot Started
+        # log message can include the action counts. Default empty so the
+        # log message is safe even if reconciliation fails before it runs.
+        self._last_reconcile_counts: dict = {}
+
         # Track bot start time for uptime calculation
         self.start_time = utcnow()
         
@@ -245,14 +250,10 @@ class TwitchNotifierBot(discord.Client):
             self.check_streamer_renames.start()
             logger.info("Streamer rename check loop started")
 
-        guild_count = len(self.guilds)
-        await self.log_to_channel(
-            "🤖", "Bot Started",
-            f"ExcelProtocol is online.\n**Servers:** {guild_count}",
-            color=0x00CC66
-        )
-
-        # Sync EventSub subscriptions on startup (async so it doesn't block ready)
+        # Sync EventSub subscriptions on startup (async so it doesn't block ready).
+        # The "Bot Started" log message is deferred to fire from
+        # _initial_eventsub_sync after reconciliation, so the message can include
+        # accurate live-count / EventSub-subscription-count stats.
         asyncio.create_task(self._initial_eventsub_sync())
     
     async def _register_eventsub_for_user(self, user_id: str, user_login: str):
@@ -277,15 +278,14 @@ class TwitchNotifierBot(discord.Client):
                 )
 
     async def _initial_eventsub_sync(self):
-        """Run EventSub sync on startup with a small delay to let things settle."""
+        """Run EventSub sync + reconciliation on startup. Posts the enriched
+        Bot Started message at the end with the full operational stats."""
         await asyncio.sleep(5)
+
+        # Count of EventSub subscriptions seen after sync (used in Bot Started msg)
+        eventsub_count = 0
         try:
             await self._sync_eventsub_subscriptions(alert_on_mismatch=False)
-            await self.log_to_channel(
-                "📡", "EventSub Subscriptions Synced",
-                "Stream online/offline subscriptions registered for all monitored streamers.",
-                color=0x00CC66
-            )
         except Exception as e:
             logger.error(f"Initial EventSub sync failed: {e}", exc_info=True)
             await self.log_to_channel(
@@ -294,12 +294,14 @@ class TwitchNotifierBot(discord.Client):
                 color=0xFF4444
             )
 
-        # Reconcile our tracked state with Twitch reality. This catches:
-        #   - Streams that went live while the bot was down (notify if fresh,
-        #     absorb if pre-existing)
-        #   - Streams we still think are live but Twitch says have ended
-        #     (clean up stale state)
-        # See _reconcile_live_state for full behavior.
+        # Read the EventSub sub count for the Bot Started message
+        try:
+            subs = await self.twitch.get_subscriptions()
+            eventsub_count = len([s for s in subs if s.get("type") in ("stream.online", "stream.offline")])
+        except Exception as _e:
+            logger.debug(f"Could not count EventSub subscriptions for Bot Started msg: {_e}")
+
+        # Reconcile our tracked state with Twitch reality
         try:
             await self._reconcile_live_state()
         except Exception as e:
@@ -310,6 +312,59 @@ class TwitchNotifierBot(discord.Client):
                 f"`{type(e).__name__}: {str(e)[:300]}`",
                 color=0xFF6B35
             )
+
+        # Post the enriched Bot Started message with the full operational picture.
+        try:
+            await self._post_startup_message(eventsub_count)
+        except Exception as e:
+            logger.error(f"Failed to post Bot Started message: {e}", exc_info=True)
+
+    async def _post_startup_message(self, eventsub_count: int):
+        """Build and send the Bot Started log message with operational stats."""
+        # Gather counts from DB
+        all_streamers = self.db.get_all_streamers()
+        total_rows = len(all_streamers)
+        unique_streamers = len({s['streamer_name'].lower() for s in all_streamers})
+        live_now = len(self.live_streamers)
+        guild_count = len(self.guilds)
+
+        # DB file size, best-effort
+        db_size_str = ""
+        try:
+            db_path = self.db.db_path if hasattr(self.db, 'db_path') else '/data/twitch_bot.db'
+            if os.path.exists(db_path):
+                bytes_ = os.path.getsize(db_path)
+                if bytes_ < 1024 * 1024:
+                    db_size_str = f"{bytes_ // 1024} KB"
+                else:
+                    db_size_str = f"{bytes_ / (1024 * 1024):.1f} MB"
+        except Exception:
+            db_size_str = ""
+
+        # Reconciliation summary — only show if there were non-no-action items
+        rc = self._last_reconcile_counts or {}
+        reconcile_line = ""
+        if rc and (rc.get('notify') or rc.get('absorb') or rc.get('cleanup')):
+            reconcile_line = (
+                f"\n**Reconciled:** notified {rc.get('notify',0)} · "
+                f"absorbed {rc.get('absorb',0)} · cleaned up {rc.get('cleanup',0)}"
+            )
+
+        message_lines = [
+            f"ExcelProtocol is online.",
+            f"**Servers:** {guild_count}",
+            f"**Streamers:** {unique_streamers} unique ({total_rows} rows)",
+            f"**Live now:** {live_now}",
+            f"**EventSub subs:** {eventsub_count}",
+        ]
+        if db_size_str:
+            message_lines.append(f"**DB:** {db_size_str}")
+
+        await self.log_to_channel(
+            "🤖", "Bot Started",
+            "\n".join(message_lines) + reconcile_line,
+            color=0x00CC66
+        )
 
     async def _reconcile_live_state(self):
         """One-shot reconciliation of our state with Twitch's reality.
@@ -381,13 +436,14 @@ class TwitchNotifierBot(discord.Client):
             except Exception as e:
                 logger.error(f"Reconcile action {action} for {login} failed: {e}")
 
+        # Save the reconciliation counts on `self` so the caller (_initial_eventsub_sync)
+        # can include them in the Bot Started log message.
+        self._last_reconcile_counts = counts
         if counts['notify'] or counts['absorb'] or counts['cleanup']:
-            await self.log_to_channel(
-                "🔄", "State Reconciled",
-                f"Synced state with Twitch on startup.\n"
-                f"Notified: {counts['notify']} · Absorbed: {counts['absorb']} · "
-                f"Cleaned up: {counts['cleanup']} · Already-correct: {counts['no_action']}",
-                color=0x00CC66
+            logger.info(
+                f"Reconciliation complete — notify={counts['notify']} "
+                f"absorb={counts['absorb']} cleanup={counts['cleanup']} "
+                f"no_action={counts['no_action']}"
             )
         else:
             logger.info(f"Reconciliation complete — all {counts['no_action']} streamers already in correct state")
