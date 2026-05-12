@@ -404,3 +404,56 @@ class TwitchAPI:
         except Exception as e:
             logger.error(f"Error listing EventSub subscriptions: {e}")
         return all_subs
+
+    async def get_streams_by_logins(self, logins: list) -> dict:
+        """Batch fetch live stream data for multiple user_logins.
+
+        Returns a dict mapping `user_login.lower() -> stream_dict` for any
+        streamer who is currently live. Streamers not in the dict are offline.
+
+        Twitch's /streams endpoint accepts up to 100 user_login params per
+        request, so we batch into groups of 100. Used for startup
+        reconciliation — figuring out which monitored streamers are
+        currently live so we can sync our state with reality.
+        """
+        if not logins:
+            return {}
+        result = {}
+        session = await self.get_session()
+        headers = await self._headers()
+
+        # Twitch caps at 100 logins per request
+        BATCH_SIZE = 100
+        for i in range(0, len(logins), BATCH_SIZE):
+            batch = logins[i:i + BATCH_SIZE]
+            # aiohttp accepts list of tuples for repeated params
+            params = [("user_login", login) for login in batch]
+            try:
+                async with session.get(
+                    f"{self.base_url}/streams",
+                    headers=headers,
+                    params=params
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"get_streams_by_logins batch failed: HTTP {resp.status}")
+                        continue
+                    data = await resp.json()
+                    for stream in data.get("data", []):
+                        login = stream.get("user_login", "").lower()
+                        if login:
+                            result[login] = stream
+            except Exception as e:
+                logger.error(f"Error fetching stream batch: {e}")
+                continue
+
+        # Enrich each live stream with profile image (best-effort, one batch call)
+        if result:
+            try:
+                user_ids = [s["user_id"] for s in result.values() if s.get("user_id")]
+                images = await self._get_profile_images(user_ids)
+                for stream in result.values():
+                    stream["profile_image_url"] = images.get(stream.get("user_id", ""), "")
+            except Exception as e:
+                logger.debug(f"Could not enrich streams with profile images: {e}")
+
+        return result

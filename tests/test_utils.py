@@ -5,6 +5,7 @@ from utils import (
     utcnow,
     parse_twitch_iso,
     is_already_offline_processed,
+    classify_reconcile_action,
 )
 
 
@@ -163,3 +164,117 @@ class TestIsAlreadyOfflineProcessed:
         assert is_already_offline_processed("ALICE", live, starts) is True
         # Lowercase lookup works correctly
         assert is_already_offline_processed("alice", live, starts) is False
+
+
+# ── classify_reconcile_action ─────────────────────────────────────────────────
+
+class TestClassifyReconcileAction:
+    """Decision logic for startup reconciliation: what to do for each
+    streamer when our state and Twitch's state are compared."""
+
+    def _now(self):
+        return datetime(2026, 5, 12, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_both_agree_live(self):
+        """Twitch says live, we say live → no action."""
+        now = self._now()
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=True,
+            started_at=now - timedelta(hours=2), now=now
+        )
+        assert action == 'no_action'
+
+    def test_both_agree_offline(self):
+        """Twitch says offline, we say offline → no action."""
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=False, in_live_streamers=False,
+            started_at=None, now=self._now()
+        )
+        assert action == 'no_action'
+
+    def test_fresh_stream_we_missed_is_notify(self):
+        """Twitch live, we don't know, started 2min ago → send full notification."""
+        now = self._now()
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=False,
+            started_at=now - timedelta(minutes=2), now=now
+        )
+        assert action == 'notify'
+
+    def test_old_stream_we_missed_is_absorb(self):
+        """Twitch live, we don't know, started 4 hours ago → absorb silently."""
+        now = self._now()
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=False,
+            started_at=now - timedelta(hours=4), now=now
+        )
+        assert action == 'absorb'
+
+    def test_no_started_at_falls_back_to_absorb(self):
+        """If Twitch didn't return a started_at, assume pre-existing — better
+        to skip a notification than to spam one for an already-live stream."""
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=False,
+            started_at=None, now=self._now()
+        )
+        assert action == 'absorb'
+
+    def test_threshold_boundary(self):
+        """Right at the 10-minute threshold should still notify (inclusive)."""
+        now = self._now()
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=False,
+            started_at=now - timedelta(minutes=10), now=now
+        )
+        assert action == 'notify'
+        # 11 minutes ago — past threshold
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=False,
+            started_at=now - timedelta(minutes=11), now=now
+        )
+        assert action == 'absorb'
+
+    def test_we_think_live_but_offline_is_cleanup(self):
+        """We have stale state, Twitch says they're done → clean up."""
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=False, in_live_streamers=True,
+            started_at=None, now=self._now()
+        )
+        assert action == 'cleanup'
+
+    def test_naive_started_at_tolerated(self):
+        """on_ready restore path may produce a naive started_at — must not crash."""
+        now = self._now()
+        naive_start = datetime(2026, 5, 12, 11, 0, 0)  # 1h ago, no tzinfo
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=False,
+            started_at=naive_start, now=now
+        )
+        assert action == 'absorb'  # 1h ago is past 10min threshold
+
+    def test_clock_skew_treated_as_fresh(self):
+        """Negative age (started_at in the future due to clock skew) →
+        treat as fresh rather than as ancient stream."""
+        now = self._now()
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=False,
+            started_at=now + timedelta(seconds=30), now=now
+        )
+        assert action == 'notify'
+
+    def test_custom_threshold(self):
+        """fresh_threshold_minutes parameter changes the boundary."""
+        now = self._now()
+        # 30 min ago, default 10min threshold → absorb
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=False,
+            started_at=now - timedelta(minutes=30), now=now
+        )
+        assert action == 'absorb'
+        # Same input, threshold of 60min → notify
+        action = classify_reconcile_action(
+            "alice", twitch_says_live=True, in_live_streamers=False,
+            started_at=now - timedelta(minutes=30), now=now,
+            fresh_threshold_minutes=60
+        )
+        assert action == 'notify'

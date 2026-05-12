@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from database import Database
 from twitch_api import TwitchAPI
-from utils import utcnow, sanitise_streamer_name, parse_twitch_iso, MILESTONE_DEFS, compute_hours_live, should_fire_milestone, is_already_offline_processed
+from utils import utcnow, sanitise_streamer_name, parse_twitch_iso, MILESTONE_DEFS, compute_hours_live, should_fire_milestone, is_already_offline_processed, classify_reconcile_action
 from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID, LOG_CHANNEL_ID
 from config import TWITCH_BOT_USERNAME, TWITCH_BOT_TOKEN
 
@@ -293,6 +293,104 @@ class TwitchNotifierBot(discord.Client):
                 f"`{type(e).__name__}: {str(e)[:300]}`\n\nStream notifications may not work until the next sync attempt (30 min).",
                 color=0xFF4444
             )
+
+        # Reconcile our tracked state with Twitch reality. This catches:
+        #   - Streams that went live while the bot was down (notify if fresh,
+        #     absorb if pre-existing)
+        #   - Streams we still think are live but Twitch says have ended
+        #     (clean up stale state)
+        # See _reconcile_live_state for full behavior.
+        try:
+            await self._reconcile_live_state()
+        except Exception as e:
+            logger.error(f"Startup reconciliation failed: {e}", exc_info=True)
+            await self.log_to_channel(
+                "⚠️", "Reconciliation Failed",
+                f"Could not reconcile state with Twitch on startup.\n"
+                f"`{type(e).__name__}: {str(e)[:300]}`",
+                color=0xFF6B35
+            )
+
+    async def _reconcile_live_state(self):
+        """One-shot reconciliation of our state with Twitch's reality.
+
+        Called once after EventSub sync on startup. For each monitored
+        streamer, compare:
+          - What Twitch's /streams endpoint reports (live or not)
+          - What we think (live_streamers set)
+
+        And take one of four actions per `classify_reconcile_action`:
+          - notify: Twitch live, we don't know, recent start → send like new
+          - absorb: Twitch live, we don't know, old start → track silently
+          - cleanup: Twitch offline, we think live → wipe stale state
+          - no_action: states match
+
+        ONE batched API call per ~100 streamers. Not a recurring poll —
+        just a startup self-heal.
+        """
+        streamers = self.db.get_all_streamers()
+        if not streamers:
+            return
+
+        # Deduplicate streamer names (same name across multiple guilds = one entry)
+        unique_logins = sorted({s['streamer_name'].lower() for s in streamers})
+        logger.info(f"Reconciling state with Twitch for {len(unique_logins)} unique streamer(s)...")
+
+        live_data = await self.twitch.get_streams_by_logins(unique_logins)
+        now = utcnow()
+
+        counts = {'notify': 0, 'absorb': 0, 'cleanup': 0, 'no_action': 0}
+        for login in unique_logins:
+            stream = live_data.get(login)
+            twitch_says_live = stream is not None
+            in_live = login in self.live_streamers
+
+            started_at = None
+            if stream and stream.get('started_at'):
+                try:
+                    started_at = parse_twitch_iso(stream['started_at'])
+                except Exception:
+                    started_at = None
+
+            action = classify_reconcile_action(
+                login, twitch_says_live, in_live, started_at, now
+            )
+            counts[action] = counts.get(action, 0) + 1
+
+            try:
+                if action == 'notify':
+                    # Process as if stream.online just fired — full notification flow
+                    logger.info(f"Reconcile: {login} went live during outage — notifying")
+                    user_id = stream.get('user_id')
+                    if user_id:
+                        await self.handle_stream_online(login, user_id)
+                elif action == 'absorb':
+                    # Pre-existing stream — silently track without re-notifying
+                    logger.info(f"Reconcile: {login} already live (started {started_at}), absorbing")
+                    self.live_streamers.add(login)
+                    if started_at:
+                        self._stream_starts[login] = started_at
+                elif action == 'cleanup':
+                    # We thought they were live, Twitch says no
+                    logger.info(f"Reconcile: {login} no longer live, cleaning up stale state")
+                    self.live_streamers.discard(login)
+                    self._stream_starts.pop(login, None)
+                    # Do NOT mark_stream_ended — we don't know when they actually
+                    # ended, so leaving the row as NULL is more honest than
+                    # writing a wrong timestamp. Per-decision A.
+            except Exception as e:
+                logger.error(f"Reconcile action {action} for {login} failed: {e}")
+
+        if counts['notify'] or counts['absorb'] or counts['cleanup']:
+            await self.log_to_channel(
+                "🔄", "State Reconciled",
+                f"Synced state with Twitch on startup.\n"
+                f"Notified: {counts['notify']} · Absorbed: {counts['absorb']} · "
+                f"Cleaned up: {counts['cleanup']} · Already-correct: {counts['no_action']}",
+                color=0x00CC66
+            )
+        else:
+            logger.info(f"Reconciliation complete — all {counts['no_action']} streamers already in correct state")
 
     async def close(self):
         """Called when bot is shutting down cleanly."""
