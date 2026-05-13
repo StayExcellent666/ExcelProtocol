@@ -342,6 +342,40 @@ class TestStreamEvents:
         assert rows[0][0] is None, "Older orphan must stay NULL"
         assert rows[1][0] is not None, "Latest row must be closed"
 
+    def test_multi_session_same_day_each_gets_own_row(self, db):
+        """Round 14: each stream.online creates its OWN row in
+        global_stream_events. A streamer who crashes and resumes twice on
+        the same day has 3 separate rows, each with accurate duration."""
+        now = datetime.now(timezone.utc)
+        # Three sessions same day with gaps representing crashes
+        s1_start = now - timedelta(hours=6)
+        s1_end = s1_start + timedelta(hours=1)
+        s2_start = s1_end + timedelta(minutes=10)
+        s2_end = s2_start + timedelta(hours=1)
+        s3_start = s2_end + timedelta(minutes=20)
+
+        db.log_stream_event(guild_id=100, streamer_name="alice", started_at=s1_start)
+        db.mark_stream_ended("alice", ended_at=s1_end)
+        db.log_stream_event(guild_id=100, streamer_name="alice", started_at=s2_start)
+        db.mark_stream_ended("alice", ended_at=s2_end)
+        db.log_stream_event(guild_id=100, streamer_name="alice", started_at=s3_start)
+        # Third session left open (streamer still live)
+
+        conn = db.get_connection()
+        rows = conn.execute(
+            "SELECT went_live_at, ended_at FROM global_stream_events "
+            "WHERE streamer_name='alice' ORDER BY id"
+        ).fetchall()
+        conn.close()
+
+        # All THREE rows should exist (old UNIQUE constraint would have blocked
+        # rows 2 and 3 from being inserted)
+        assert len(rows) == 3, f"Expected 3 rows for 3 sessions, got {len(rows)}"
+        # Sessions 1 and 2 closed, session 3 still open
+        assert rows[0][1] is not None, "Session 1 should be closed"
+        assert rows[1][1] is not None, "Session 2 should be closed"
+        assert rows[2][1] is None, "Session 3 should still be open"
+
     def test_mark_stream_ended_does_not_clobber_historical_global_row(self, db):
         """Regression test for the Round 5 bug.
 
@@ -695,25 +729,40 @@ class TestServerLeaderboard:
         assert rows == []
 
     def test_counts_streams(self, db):
+        """stream_count counts distinct DAYS, not session rows. Two sessions
+        on the same day = 1 day (e.g., stream crashed and resumed)."""
         now = datetime.now(timezone.utc)
         self._insert_session(db, 100, "alice", now)
-        self._insert_session(db, 100, "alice", now)
+        self._insert_session(db, 100, "alice", now)  # same day = same count
         rows = db.get_server_leaderboard(guild_id=100)
         assert len(rows) == 1
         assert rows[0]["streamer_name"] == "alice"
-        assert rows[0]["stream_count"] == 2
+        assert rows[0]["stream_count"] == 1, \
+            f"Two same-day sessions = 1 day, got {rows[0]['stream_count']}"
+
+    def test_counts_distinct_days(self, db):
+        """Sessions on different days each count as a separate day."""
+        now = datetime.now(timezone.utc)
+        self._insert_session(db, 100, "alice", now - timedelta(days=2))
+        self._insert_session(db, 100, "alice", now - timedelta(days=1))
+        self._insert_session(db, 100, "alice", now)
+        rows = db.get_server_leaderboard(guild_id=100)
+        assert rows[0]["stream_count"] == 3
 
     def test_hours_streamed_only_counts_completed(self, db):
-        """Open sessions (no ended_at) shouldn't contribute to hours_streamed."""
+        """Open sessions (no ended_at) shouldn't contribute to hours_streamed.
+        But they DO contribute to stream_count (days) if on a unique day."""
         now = datetime.now(timezone.utc)
-        # Completed 3-hour session
+        # Completed 3-hour session 10 hours ago (same day as 'now' or yesterday)
         start1 = now - timedelta(hours=10)
         end1 = start1 + timedelta(hours=3)
         self._insert_session(db, 100, "alice", start1, end1)
-        # Currently-live session — no end yet
+        # Currently-live session — no end yet, possibly same day
         self._insert_session(db, 100, "alice", now - timedelta(hours=1))
         rows = db.get_server_leaderboard(guild_id=100)
-        assert rows[0]["stream_count"] == 2
+        # stream_count is days — could be 1 or 2 depending on whether they
+        # cross midnight in this test run. Use >=1 to be robust.
+        assert rows[0]["stream_count"] >= 1
         # hours_streamed should be ~3.0, NOT 4.0 (the open session doesn't count)
         assert 2.9 <= rows[0]["hours_streamed"] <= 3.1, \
             f"hours_streamed {rows[0]['hours_streamed']}, expected ~3.0"
@@ -758,11 +807,13 @@ class TestServerLeaderboard:
         assert rows[0]["streak_days"] == 1
 
     def test_ordering_by_stream_count(self, db):
+        """stream_count counts distinct days. Bob on 3 different days
+        ranks above alice on 1 day."""
         now = datetime.now(timezone.utc)
-        # alice: 1 stream, bob: 3 streams
         self._insert_session(db, 100, "alice", now)
-        for _ in range(3):
-            self._insert_session(db, 100, "bob", now)
+        # Spread bob across 3 distinct days so he gets day_count=3
+        for d in range(3):
+            self._insert_session(db, 100, "bob", now - timedelta(days=d))
         rows = db.get_server_leaderboard(guild_id=100)
         assert rows[0]["streamer_name"] == "bob"
         assert rows[1]["streamer_name"] == "alice"
@@ -830,8 +881,8 @@ class TestServerLeaderboard:
         rather than raising — protects against frontend bugs / typos."""
         now = datetime.now(timezone.utc)
         self._insert_session(db, 100, "alice", now)
-        for _ in range(3):
-            self._insert_session(db, 100, "bob", now)
+        for d in range(3):
+            self._insert_session(db, 100, "bob", now - timedelta(days=d))
         rows = db.get_server_leaderboard(guild_id=100, sort_by='garbage')
         # Should behave like 'consistency' — bob (3 streams) ranks above alice (1)
         assert rows[0]["streamer_name"] == "bob"

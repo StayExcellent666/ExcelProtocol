@@ -244,7 +244,10 @@ class Database:
             ON stream_events(guild_id, streamer_name)
         ''')
 
-        # Global stream events -- one row per stream session regardless of server count
+        # Global stream events -- one row per stream.online event.
+        # NOTE: historically had UNIQUE(streamer_name, stream_date) which caused
+        # corruption when streams had multiple sessions per day (crashes/resumes).
+        # The structural_v3 migration below drops it.
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS global_stream_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -262,6 +265,61 @@ class Database:
             logger.info("Migration: added ended_at to global_stream_events")
         except Exception:
             pass  # Column already exists
+
+        # Structural migration: rebuild global_stream_events WITHOUT the
+        # UNIQUE(streamer_name, stream_date) constraint. The old constraint
+        # forced one row per streamer per day, which broke multi-session days
+        # (streams with crashes/resumes corrupted neighboring rows because the
+        # second offline event had no row to write to).
+        #
+        # Tracked via meta flag so it runs exactly once. Idempotent thereafter.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+        cursor.execute("SELECT value FROM meta WHERE key = 'global_events_structural_v3'")
+        if cursor.fetchone() is None:
+            try:
+                # Check if the old constraint actually exists before doing surgery.
+                # If it doesn't (e.g. fresh DB created after this migration shipped),
+                # we set the flag and move on.
+                cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='global_stream_events'")
+                existing_sql = cursor.fetchone()
+                has_unique = existing_sql and 'UNIQUE' in (existing_sql[0] or '')
+
+                if has_unique:
+                    logger.info("Structural migration v3: rebuilding global_stream_events without UNIQUE constraint")
+                    cursor.execute('''
+                        CREATE TABLE global_stream_events_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            streamer_name TEXT NOT NULL,
+                            stream_date TEXT NOT NULL DEFAULT (date('now')),
+                            went_live_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            ended_at TIMESTAMP DEFAULT NULL
+                        )
+                    ''')
+                    cursor.execute('''
+                        INSERT INTO global_stream_events_new
+                            (id, streamer_name, stream_date, went_live_at, ended_at)
+                        SELECT id, streamer_name, stream_date, went_live_at, ended_at
+                        FROM global_stream_events
+                    ''')
+                    cursor.execute('DROP TABLE global_stream_events')
+                    cursor.execute('ALTER TABLE global_stream_events_new RENAME TO global_stream_events')
+                    cursor.execute('''
+                        CREATE INDEX IF NOT EXISTS idx_global_events_streamer
+                        ON global_stream_events(streamer_name, went_live_at)
+                    ''')
+                    logger.info("Structural migration v3: complete")
+
+                cursor.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('global_events_structural_v3', '1')"
+                )
+                conn.commit()
+            except Exception as e:
+                logger.warning(f"Structural v3 migration skipped: {e}")
 
         # One-time data cleanup: reset corrupted ended_at values caused by the
         # mark_stream_ended bug (fixed in Round 5). Twitch streams almost never
@@ -308,6 +366,38 @@ class Database:
                 )
             except Exception as e:
                 logger.warning(f"ended_at cleanup v2 skipped: {e}")
+
+        # Cleanup v4 — runs once AFTER the structural v3 migration to wipe
+        # the >12h corruption that accumulated post-r11. v2 already ran on
+        # this DB so we need a separate flag. After this, no more >12h rows
+        # can be born (multi-session days now create their own rows).
+        cursor.execute("SELECT value FROM meta WHERE key = 'ended_at_cleanup_v4'")
+        if cursor.fetchone() is None:
+            try:
+                cursor.execute('''
+                    UPDATE global_stream_events SET ended_at = NULL
+                    WHERE ended_at IS NOT NULL
+                      AND (julianday(ended_at) - julianday(went_live_at)) * 24 > 12
+                ''')
+                n_global = cursor.rowcount
+                cursor.execute('''
+                    UPDATE stream_events SET ended_at = NULL
+                    WHERE ended_at IS NOT NULL
+                      AND (julianday(ended_at) - julianday(went_live_at)) * 24 > 12
+                ''')
+                n_per_server = cursor.rowcount
+                cursor.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('ended_at_cleanup_v4', ?)",
+                    (str(n_global + n_per_server),)
+                )
+                conn.commit()
+                if n_global or n_per_server:
+                    logger.info(
+                        f"Cleanup v4: reset {n_global} global + {n_per_server} per-server "
+                        f"rows with >12h durations (post-r11 corruption)"
+                    )
+            except Exception as e:
+                logger.warning(f"ended_at cleanup v4 skipped: {e}")
 
         # ----------------------------------------------------------------
         # Twitch chat bot tables (new -- existing tables untouched)
@@ -1482,11 +1572,12 @@ class Database:
     # ------------------------------------------------------------------
 
     def log_stream_event(self, guild_id: int, streamer_name: str, started_at=None):
-        """Log a stream going live. Per-server for server leaderboard, deduplicated globally.
+        """Log a stream going live. One row per session in both tables.
 
-        If `started_at` (datetime) is provided, it's used as the actual stream start
-        timestamp from EventSub. Otherwise we fall back to CURRENT_TIMESTAMP, which
-        is what older code paths used.
+        Each `stream.online` event from Twitch creates exactly one row in
+        each of `stream_events` (per guild) and `global_stream_events`
+        (cross-guild). Multi-session days produce multiple rows. The
+        leaderboard SQL deduplicates by date when counting "days streamed."
         """
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -1498,22 +1589,17 @@ class Database:
                 "INSERT INTO stream_events (guild_id, streamer_name, went_live_at) VALUES (?, ?, ?)",
                 (guild_id, streamer_name.lower(), ts)
             )
+            cursor.execute('''
+                INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at)
+                VALUES (?, date(?), ?)
+            ''', (streamer_name.lower(), ts, ts))
         else:
             cursor.execute(
                 "INSERT INTO stream_events (guild_id, streamer_name) VALUES (?, ?)",
                 (guild_id, streamer_name.lower())
             )
-
-        # Global event -- one per stream session per day (UNIQUE constraint deduplicates)
-        if started_at is not None:
-            ts = started_at.strftime('%Y-%m-%d %H:%M:%S') if hasattr(started_at, 'strftime') else str(started_at)
             cursor.execute('''
-                INSERT OR IGNORE INTO global_stream_events (streamer_name, stream_date, went_live_at)
-                VALUES (?, date('now'), ?)
-            ''', (streamer_name.lower(), ts))
-        else:
-            cursor.execute('''
-                INSERT OR IGNORE INTO global_stream_events (streamer_name, stream_date)
+                INSERT INTO global_stream_events (streamer_name, stream_date)
                 VALUES (?, date('now'))
             ''', (streamer_name.lower(),))
 
@@ -1644,7 +1730,7 @@ class Database:
 
         sql = f'''
             SELECT streamer_name,
-                   COUNT(*) AS stream_count,
+                   COUNT(DISTINCT date(went_live_at)) AS stream_count,
                    COALESCE(SUM(
                        CASE WHEN ended_at IS NOT NULL
                             THEN (julianday(ended_at) - julianday(went_live_at)) * 24
@@ -1736,7 +1822,7 @@ class Database:
         cursor = conn.cursor()
         sql = f'''
             SELECT g.streamer_name,
-                   COUNT(*) AS total_streams,
+                   COUNT(DISTINCT date(g.went_live_at)) AS total_streams,
                    (SELECT COUNT(DISTINCT s.guild_id)
                     FROM stream_events s
                     WHERE s.streamer_name = g.streamer_name
