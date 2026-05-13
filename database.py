@@ -1611,15 +1611,19 @@ class Database:
 
         Only updates rows where:
           - ended_at IS NULL (still open), AND
-          - went_live_at is within the last 48 hours (Twitch's hard cap on
-            stream length — any older NULL row is an orphan from a missed
-            offline event, not the current stream), AND
+          - went_live_at is within the last 48 hours — covers all realistic
+            streams up to Twitch's hard cap. Orphan prevention is handled
+            by the 15-minute health-check polling loop in bot.py, which
+            closes any open row whose streamer Twitch reports as offline.
+            That way orphans can't accumulate beyond ~15 minutes and won't
+            get clobbered by future offline events.
           - the row is the MOST RECENT matching open row (MAX(id))
 
-        The 48-hour window is the key correctness property:
-          - Allows cross-midnight streams (start 11pm, end 4am) — fixed
-          - Allows 24-hour charity streams / subathons up to 48h — fixed
-          - Excludes ancient orphans from clobbering (the original bug)
+        The 48-hour window:
+          - Allows cross-midnight streams (start 11pm, end 8am) — supported
+          - Allows 24-hour charity streams / subathons up to 48h — supported
+          - Safe because polling closes orphans promptly (won't accumulate
+            > 15-min worth before being detected and closed)
 
         The MAX(id) constraint is the other key correctness property: if
         multiple open rows exist for the same streamer (e.g., the bot
@@ -1896,6 +1900,37 @@ class Database:
         if deleted:
             logger.info(f"Trimmed {deleted} old notification log entries")
         return deleted
+
+    def null_all_ended_at(self) -> tuple:
+        """Reset every ended_at to NULL in both stream_events tables.
+
+        Used by the dashboard 'Reset hours' button. Stream count history
+        is preserved — only the hours/longest metrics get wiped. After
+        this runs, leaderboards show 0h for everyone until new streams
+        finish.
+
+        Returns (n_global, n_per_server) for logging/UI feedback.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE global_stream_events SET ended_at = NULL WHERE ended_at IS NOT NULL")
+        n_global = cursor.rowcount
+        cursor.execute("UPDATE stream_events SET ended_at = NULL WHERE ended_at IS NOT NULL")
+        n_per_server = cursor.rowcount
+        conn.commit()
+        conn.close()
+        logger.info(f"null_all_ended_at: reset {n_global} global + {n_per_server} per-server rows")
+        return (n_global, n_per_server)
+
+    def get_open_session_count(self) -> int:
+        """Count rows in global_stream_events with NULL ended_at.
+        Used by the dashboard to show 'orphan count' / 'currently open'."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM global_stream_events WHERE ended_at IS NULL")
+        n = cursor.fetchone()[0]
+        conn.close()
+        return n
 
     def cleanup_stream_events(self):
         """Delete all stream events from previous months"""

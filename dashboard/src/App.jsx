@@ -2991,6 +2991,105 @@ function DbToolsTab() {
           label="Sync Now"
         />
 
+        {/* ── Stream Hours Tracking section ─────────────────────────────── */}
+        <div style={{ marginTop:20, marginBottom:8, fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:14, color:"var(--text)", textShadow:"0 0 14px rgba(0,245,212,0.3), 0 0 28px rgba(0,245,212,0.1)" }}>
+          ⏱️ Stream Hours Tracking
+        </div>
+        <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:8 }}>
+          Polling health check runs every 15 min — closes orphan rows when Twitch reports streamers as offline
+        </div>
+
+        <div style={{ ...C.card, padding:"14px 18px" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: (status?.live_streamers?.length ?? 0) > 0 ? 12 : 0 }}>
+            <div>
+              <div style={{ fontSize:14, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>Currently Live Streamers</div>
+              <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>
+                In-memory <code>live_streamers</code> set with hours-live calculated from EventSub start times
+              </div>
+              <div style={{ fontSize:11, color: (status?.live_streamers?.length ?? 0) > 0 ? "var(--cyan)" : "var(--text3)", marginTop:3, fontFamily:"'JetBrains Mono',monospace" }}>
+                {status?.live_streamers?.length ?? 0} live now
+              </div>
+            </div>
+          </div>
+          {(status?.live_streamers?.length ?? 0) > 0 && (
+            <div style={{ display:"flex", flexDirection:"column", gap:4, maxHeight:280, overflowY:"auto", borderTop:"1px solid var(--border)", paddingTop:10 }}>
+              {status.live_streamers.map(s => (
+                <div key={s.streamer_name} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"4px 0", fontSize:12 }}>
+                  <a href={`https://twitch.tv/${s.streamer_name}`} target="_blank" rel="noreferrer" style={{ color:"var(--text)", textDecoration:"none", fontFamily:"'Outfit',sans-serif" }}>
+                    {s.streamer_name}
+                  </a>
+                  <span style={{ color: s.hours_live === null ? "var(--text3)" : "var(--cyan)", fontFamily:"'JetBrains Mono',monospace" }}>
+                    {s.hours_live === null ? "—" : `${s.hours_live}h live`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div style={{ ...C.card, padding:"14px 18px" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: (status?.recent_orphan_closures?.length ?? 0) > 0 ? 12 : 0 }}>
+            <div>
+              <div style={{ fontSize:14, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>Recent Orphan Closures</div>
+              <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>
+                Streams the 15-min health poll detected as offline and closed (missed EventSub offline events)
+              </div>
+              <div style={{ fontSize:11, color: (status?.recent_orphan_closures?.length ?? 0) > 0 ? "var(--yellow)" : "var(--green)", marginTop:3, fontFamily:"'JetBrains Mono',monospace" }}>
+                {status?.recent_orphan_closures?.length ?? 0} closure{(status?.recent_orphan_closures?.length ?? 0) === 1 ? "" : "s"} since last restart
+              </div>
+            </div>
+          </div>
+          {(status?.recent_orphan_closures?.length ?? 0) > 0 && (
+            <div style={{ display:"flex", flexDirection:"column", gap:4, maxHeight:280, overflowY:"auto", borderTop:"1px solid var(--border)", paddingTop:10 }}>
+              {status.recent_orphan_closures.map((c, i) => (
+                <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"4px 0", fontSize:12, gap:10 }}>
+                  <a href={`https://twitch.tv/${c.streamer_name}`} target="_blank" rel="noreferrer" style={{ color:"var(--text)", textDecoration:"none", fontFamily:"'Outfit',sans-serif" }}>
+                    {c.streamer_name}
+                  </a>
+                  <div style={{ display:"flex", gap:8, alignItems:"center", fontFamily:"'JetBrains Mono',monospace" }}>
+                    {c.hours_live_at_close !== null && c.hours_live_at_close !== undefined && (
+                      <span style={{ color:"var(--cyan)" }}>{c.hours_live_at_close}h live</span>
+                    )}
+                    <span style={{ color:"var(--text3)", fontSize:10 }}>{c.closed_at}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div style={{ ...C.card, display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 18px" }}>
+          <div>
+            <div style={{ fontSize:14, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>Open Stream Rows</div>
+            <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>
+              <code>global_stream_events</code> rows with NULL <code>ended_at</code> — currently-live + orphans from missed offlines
+            </div>
+            <div style={{ fontSize:11, color: (status?.open_session_count ?? 0) > (status?.live_streamers?.length ?? 0) ? "var(--yellow)" : "var(--green)", marginTop:3, fontFamily:"'JetBrains Mono',monospace" }}>
+              {status?.open_session_count ?? 0} open row{(status?.open_session_count ?? 0) === 1 ? "" : "s"}
+              {(status?.open_session_count ?? 0) > (status?.live_streamers?.length ?? 0) && (status?.live_streamers?.length !== undefined) && (
+                <span style={{ color:"var(--text3)" }}> ({(status.open_session_count - status.live_streamers.length)} likely orphans)</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ ...C.card, display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 18px" }}>
+          <div>
+            <div style={{ fontSize:14, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>Reset All Saved Hours</div>
+            <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>
+              Sets every <code>ended_at</code> to NULL in both stream_events tables. Stream counts preserved; hours/longest go to 0.
+            </div>
+            {results["reset_hours"] && <div style={{ fontSize:11, color:"var(--cyan)", marginTop:4, fontFamily:"'JetBrains Mono',monospace" }}>✓ {results["reset_hours"]}</div>}
+          </div>
+          <button
+            onClick={() => { if (window.confirm("Reset ALL saved hours? Stream counts will be preserved but every hours/longest value resets to 0.")) run("reset_hours"); }}
+            disabled={running["reset_hours"]}
+            style={{ ...C.btnDanger, fontSize:12, opacity: running["reset_hours"] ? 0.5 : 1 }}
+          >
+            {running["reset_hours"] ? "Running…" : "Reset Hours"}
+          </button>
+        </div>
+
         {status?.bad_streamer_names?.length > 0 && (
           <div style={{ ...C.card, marginTop:4 }}>
             <div style={{ fontSize:12, color:"var(--yellow)", fontFamily:"'JetBrains Mono',monospace", marginBottom:8 }}>Bad names found:</div>

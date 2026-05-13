@@ -54,6 +54,12 @@ class TwitchNotifierBot(discord.Client):
         # log message is safe even if reconciliation fails before it runs.
         self._last_reconcile_counts: dict = {}
 
+        # Ring buffer of recent orphan closures detected by the 15-minute
+        # health-check polling loop. Each entry: dict with streamer_name,
+        # closed_at (iso str), hours_live_at_close. Kept short (~50) for
+        # the dashboard observability widget.
+        self._recent_orphan_closures: list = []
+
         # Track bot start time for uptime calculation
         self.start_time = utcnow()
         
@@ -209,6 +215,11 @@ class TwitchNotifierBot(discord.Client):
         if not self.monthly_leaderboard_cleanup.is_running():
             self.monthly_leaderboard_cleanup.start()
             logger.info("Monthly leaderboard cleanup loop started")
+
+        # Start live-streamer health-poll loop (15min, closes orphan rows)
+        if not self.poll_live_streamers_health.is_running():
+            self.poll_live_streamers_health.start()
+            logger.info("Live-streamer health poll loop started")
 
         # Start status rotation loop
         if not self.rotate_status.is_running():
@@ -1597,6 +1608,80 @@ class TwitchNotifierBot(discord.Client):
     @monthly_leaderboard_cleanup.before_loop
     async def before_monthly_leaderboard_cleanup(self):
         await self.wait_until_ready()
+
+    @tasks.loop(minutes=15)
+    async def poll_live_streamers_health(self):
+        """Light polling: confirm every streamer in live_streamers is still
+        actually live according to Twitch. Catches missed offline events
+        from EventSub drops, network issues, deploys etc.
+
+        For each streamer in our `live_streamers` set:
+          - Twitch says live → no action
+          - Twitch says offline → we missed the offline event. Run
+            mark_stream_ended now (best-effort: ended_at=now), remove from
+            tracking, record in _recent_orphan_closures for dashboard.
+
+        Only polls streamers we already think are live (typically 3-15
+        streamers), so cost is negligible: ~1 batched API call every
+        15 minutes = 96 calls/day. Twitch limit is 800/minute.
+
+        This is the SAFETY NET that allows the 48h window in
+        mark_stream_ended to be safe — orphans can't accumulate beyond
+        15 minutes before being detected and closed.
+        """
+        try:
+            # Take a snapshot of live_streamers; the set mutates during
+            # the loop body when we close orphans
+            snapshot = sorted(self.live_streamers)
+            if not snapshot:
+                return
+
+            live_data = await self.twitch.get_streams_by_logins(snapshot)
+
+            closed_count = 0
+            for login in snapshot:
+                if login in live_data:
+                    continue  # Twitch confirms live, all good
+
+                # Twitch says offline. We missed the offline event.
+                try:
+                    now = utcnow()
+                    started = self._stream_starts.get(login)
+                    hours_live = None
+                    if started:
+                        try:
+                            hours_live = round((now - started).total_seconds() / 3600, 2)
+                        except Exception:
+                            hours_live = None
+
+                    self.db.mark_stream_ended(login, ended_at=now)
+                    self.live_streamers.discard(login)
+                    self._stream_starts.pop(login, None)
+
+                    # Record for dashboard observability (cap at 50 entries)
+                    self._recent_orphan_closures.append({
+                        'streamer_name': login,
+                        'closed_at': now.strftime('%Y-%m-%d %H:%M:%S UTC'),
+                        'hours_live_at_close': hours_live,
+                    })
+                    if len(self._recent_orphan_closures) > 50:
+                        self._recent_orphan_closures = self._recent_orphan_closures[-50:]
+
+                    closed_count += 1
+                    logger.info(f"Health poll: closed orphan for {login} (was live ~{hours_live}h)")
+                except Exception as e:
+                    logger.error(f"Failed to close orphan for {login}: {e}")
+
+            if closed_count > 0:
+                logger.info(f"Health poll: closed {closed_count} orphan(s) from missed offline events")
+        except Exception as e:
+            logger.error(f"poll_live_streamers_health error: {e}", exc_info=True)
+
+    @poll_live_streamers_health.before_loop
+    async def before_poll_live_streamers_health(self):
+        await self.wait_until_ready()
+        # Wait an extra minute after startup so reconciliation finishes first
+        await asyncio.sleep(60)
 
     @tasks.loop(seconds=20)
     async def rotate_status(self):

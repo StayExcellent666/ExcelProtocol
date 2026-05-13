@@ -2833,12 +2833,51 @@ async def db_tools_status(request):
     # stat_channels
     stat_channels = await db_fetch("SELECT guild_id, channel_id, format, last_updated FROM stat_channels")
 
+    # Live streamers (in-memory set), with hours-live computed from _stream_starts
+    live_list = []
+    if _bot_ref:
+        try:
+            now = datetime.now(timezone.utc)
+            for login in sorted(_bot_ref.live_streamers):
+                started = _bot_ref._stream_starts.get(login)
+                hours_live = None
+                if started:
+                    try:
+                        hours_live = round((now - started).total_seconds() / 3600, 2)
+                    except Exception:
+                        hours_live = None
+                live_list.append({
+                    "streamer_name": login,
+                    "hours_live": hours_live,
+                })
+        except Exception as _e:
+            logger.debug(f"Failed to enumerate live streamers: {_e}")
+
+    # Recent orphan closures from the 15-min health-poll loop
+    recent_closures = []
+    if _bot_ref:
+        try:
+            recent_closures = list(reversed(getattr(_bot_ref, '_recent_orphan_closures', [])))
+        except Exception:
+            pass
+
+    # Count of currently-open (NULL ended_at) global_stream_events rows
+    orphan_count = 0
+    try:
+        if _bot_ref:
+            orphan_count = _bot_ref.db.get_open_session_count()
+    except Exception as _e:
+        logger.debug(f"orphan_count query failed: {_e}")
+
     return web.json_response({
         "orphaned_notification_messages": [r["streamer_name"] for r in orphaned_notifs],
         "orphaned_permission_issues": [{"guild_id": str(r["guild_id"]), "channel_id": str(r["channel_id"])} for r in orphaned_perms],
         "bad_streamer_names": [{"name": r["streamer_name"], "guild_count": r["guild_count"]} for r in bad_names],
         "notification_log_rows": log_count[0]["c"] if log_count else 0,
         "stat_channels": [{"guild_id": str(r["guild_id"]), "channel_id": str(r["channel_id"]), "format": r["format"], "last_updated": r["last_updated"]} for r in stat_channels],
+        "live_streamers": live_list,
+        "recent_orphan_closures": recent_closures,
+        "open_session_count": orphan_count,
     })
 
 
@@ -2895,6 +2934,21 @@ async def db_tools_action(request):
             asyncio.create_task(_bot_ref._sync_eventsub_subscriptions())
             return web.json_response({"ok": True, "message": "EventSub sync triggered."})
         return web.json_response({"ok": False, "message": "Bot not available."})
+
+    elif action == "reset_hours":
+        # Reset every ended_at to NULL in both stream_events tables.
+        # Wipes hours/longest metrics across the board; preserves stream
+        # counts (the row still exists, just with no end timestamp).
+        if not _bot_ref:
+            return web.json_response({"ok": False, "message": "Bot not available."})
+        try:
+            n_global, n_per_server = _bot_ref.db.null_all_ended_at()
+            return web.json_response({
+                "ok": True,
+                "message": f"Reset {n_global} global + {n_per_server} per-server ended_at to NULL."
+            })
+        except Exception as e:
+            return web.json_response({"ok": False, "message": f"Reset failed: {e}"})
 
     raise web.HTTPBadRequest(reason=f"Unknown action: {action}")
 
