@@ -3005,7 +3005,7 @@ function StreamEventsViewer() {
 
       {events.length > 0 && (
         <div style={{ borderTop:"1px solid var(--border)", maxHeight:440, overflowY:"auto" }}>
-          <div style={{ display:"grid", gridTemplateColumns:"1.4fr 1.5fr 1.5fr 0.6fr 0.7fr", gap:14, fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", padding:"8px 12px 8px 4px", borderBottom:"1px solid var(--border)", textTransform:"uppercase", alignItems:"center" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1.4fr 1.5fr 1.5fr 0.6fr 0.5fr", gap:14, fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", padding:"8px 32px 8px 4px", borderBottom:"1px solid var(--border)", textTransform:"uppercase", alignItems:"center" }}>
             <div>Streamer</div>
             <div>Went Live</div>
             <div>Ended At</div>
@@ -3013,7 +3013,7 @@ function StreamEventsViewer() {
             <div style={{ textAlign:"right" }}>Status</div>
           </div>
           {events.map(ev => (
-            <div key={ev.id} style={{ display:"grid", gridTemplateColumns:"1.4fr 1.5fr 1.5fr 0.6fr 0.7fr", gap:14, fontSize:11, padding:"6px 12px 6px 4px", borderBottom:"1px solid var(--border)", alignItems:"center", fontFamily:"'JetBrains Mono',monospace" }}>
+            <div key={ev.id} style={{ display:"grid", gridTemplateColumns:"1.4fr 1.5fr 1.5fr 0.6fr 0.5fr", gap:14, fontSize:11, padding:"6px 32px 6px 4px", borderBottom:"1px solid var(--border)", alignItems:"center", fontFamily:"'JetBrains Mono',monospace" }}>
               <a href={`https://twitch.tv/${ev.streamer_name}`} target="_blank" rel="noreferrer" style={{ color:"var(--text)", textDecoration:"none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", minWidth:0 }}>
                 {ev.streamer_name}
               </a>
@@ -3153,11 +3153,11 @@ function DbToolsTab() {
           {(status?.live_streamers?.length ?? 0) > 0 && (
             <div style={{ display:"flex", flexDirection:"column", gap:4, maxHeight:280, overflowY:"auto", borderTop:"1px solid var(--border)", paddingTop:10 }}>
               {status.live_streamers.map(s => (
-                <div key={s.streamer_name} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"4px 0", fontSize:12 }}>
+                <div key={s.streamer_name} style={{ display:"grid", gridTemplateColumns:"1fr 100px", gap:14, alignItems:"center", padding:"4px 32px 4px 0", fontSize:12 }}>
                   <a href={`https://twitch.tv/${s.streamer_name}`} target="_blank" rel="noreferrer" style={{ color:"var(--text)", textDecoration:"none", fontFamily:"'Outfit',sans-serif" }}>
                     {s.streamer_name}
                   </a>
-                  <span style={{ color: s.hours_live === null ? "var(--text3)" : "var(--cyan)", fontFamily:"'JetBrains Mono',monospace" }}>
+                  <span style={{ color: s.hours_live === null ? "var(--text3)" : "var(--cyan)", fontFamily:"'JetBrains Mono',monospace", textAlign:"right" }}>
                     {s.hours_live === null ? "—" : `${s.hours_live}h live`}
                   </span>
                 </div>
@@ -3181,11 +3181,11 @@ function DbToolsTab() {
           {(status?.recent_orphan_closures?.length ?? 0) > 0 && (
             <div style={{ display:"flex", flexDirection:"column", gap:4, maxHeight:280, overflowY:"auto", borderTop:"1px solid var(--border)", paddingTop:10 }}>
               {status.recent_orphan_closures.map((c, i) => (
-                <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"4px 0", fontSize:12, gap:10 }}>
+                <div key={i} style={{ display:"grid", gridTemplateColumns:"1fr 220px", gap:14, alignItems:"center", padding:"4px 32px 4px 0", fontSize:12 }}>
                   <a href={`https://twitch.tv/${c.streamer_name}`} target="_blank" rel="noreferrer" style={{ color:"var(--text)", textDecoration:"none", fontFamily:"'Outfit',sans-serif" }}>
                     {c.streamer_name}
                   </a>
-                  <div style={{ display:"flex", gap:8, alignItems:"center", fontFamily:"'JetBrains Mono',monospace" }}>
+                  <div style={{ display:"flex", gap:8, alignItems:"center", justifyContent:"flex-end", fontFamily:"'JetBrains Mono',monospace" }}>
                     {c.hours_live_at_close !== null && c.hours_live_at_close !== undefined && (
                       <span style={{ color:"var(--cyan)" }}>{c.hours_live_at_close}h live</span>
                     )}
