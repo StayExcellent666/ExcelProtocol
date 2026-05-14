@@ -2802,6 +2802,42 @@ async def get_global_stats(request):
     })
 
 
+# ── Dev: Stream Events log ────────────────────────────────────────────────────
+async def dev_stream_events(request):
+    """Dev-only event log viewer. Returns recent global_stream_events rows
+    with computed duration and status, optionally filtered by streamer name
+    and month."""
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Dev access required")
+    if not _bot_ref:
+        return web.json_response({"events": [], "error": "Bot not available"})
+
+    streamer = request.query.get("streamer", "").strip() or None
+    month = request.query.get("month", "").strip() or None
+    try:
+        limit = max(1, min(int(request.query.get("limit", "100")), 500))
+    except ValueError:
+        limit = 100
+
+    # Validate month format if given (YYYY-MM)
+    if month:
+        import re
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            month = None
+
+    try:
+        events = _bot_ref.db.get_stream_events(streamer=streamer, month=month, limit=limit)
+    except Exception as e:
+        logger.error(f"dev_stream_events failed: {e}", exc_info=True)
+        return web.json_response({"events": [], "error": str(e)})
+
+    return web.json_response({
+        "events": events,
+        "filters": {"streamer": streamer, "month": month, "limit": limit},
+    })
+
+
 # ── Dev: DB Tools ─────────────────────────────────────────────────────────────
 async def db_tools_status(request):
     """Dev-only: show orphaned records and fixable issues."""
@@ -3788,6 +3824,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get  ("/api/dev/global-stats",   get_global_stats)
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
     app.router.add_post ("/api/dev/db-tools",       db_tools_action)
+    app.router.add_get  ("/api/dev/stream-events",  dev_stream_events)
     app.router.add_get   ("/api/guild/{guild_id}/stat-channels",            get_stat_channels)
     app.router.add_get   ("/api/guild/{guild_id}/vc-settings",                          get_vc_settings)
     app.router.add_post  ("/api/guild/{guild_id}/vc-settings",                          set_vc_settings)

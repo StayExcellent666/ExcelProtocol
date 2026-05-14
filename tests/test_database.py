@@ -934,3 +934,157 @@ class TestServerLeaderboard:
         # Longest: bob wins again (10h single session)
         rows = db.get_global_leaderboard(sort_by='longest')
         assert rows[0]["streamer_name"] == "bob"
+
+
+class TestGetStreamEvents:
+    """Tests for the dev-only event log query (db.get_stream_events)."""
+
+    def _insert(self, db, streamer, went_live, ended_at=None):
+        conn = db.get_connection()
+        if ended_at:
+            conn.execute(
+                "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+                "VALUES (?, date(?), ?, ?)",
+                (streamer.lower(), went_live, went_live, ended_at)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+                "VALUES (?, date(?), ?, NULL)",
+                (streamer.lower(), went_live, went_live)
+            )
+        conn.commit()
+        conn.close()
+
+    def test_returns_recent_rows_with_hours_and_status(self, db):
+        from datetime import datetime as _dt, timedelta as _td
+        now = _dt.now(timezone.utc)
+        # Closed stream 3 hours long
+        s1 = (now - _td(hours=5)).strftime('%Y-%m-%d %H:%M:%S')
+        e1 = (now - _td(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert(db, "alice", s1, e1)
+        # Currently live (within 48h)
+        s2 = (now - _td(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert(db, "alice", s2)
+
+        rows = db.get_stream_events()
+        assert len(rows) == 2
+        # Newest first
+        assert rows[0]['went_live_at'] == s2
+        assert rows[0]['status'] == 'live'
+        assert rows[0]['hours'] is None
+        assert rows[1]['status'] == 'closed'
+        assert 2.9 <= rows[1]['hours'] <= 3.1
+
+    def test_orphan_status_for_old_nulls(self, db):
+        from datetime import datetime as _dt, timedelta as _td
+        # >48h old NULL row → orphan
+        s1 = (_dt.now(timezone.utc) - _td(hours=60)).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert(db, "alice", s1)
+        rows = db.get_stream_events()
+        assert len(rows) == 1
+        assert rows[0]['status'] == 'orphan'
+
+    def test_filter_by_streamer_substring(self, db):
+        from datetime import datetime as _dt
+        now = _dt.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert(db, "alice", now)
+        self._insert(db, "bob", now)
+        self._insert(db, "alicewonderland", now)
+
+        rows = db.get_stream_events(streamer="alice")
+        names = {r['streamer_name'] for r in rows}
+        assert names == {"alice", "alicewonderland"}
+        assert "bob" not in names
+
+    def test_filter_by_streamer_is_case_insensitive(self, db):
+        from datetime import datetime as _dt
+        now = _dt.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert(db, "alice", now)
+        rows = db.get_stream_events(streamer="ALICE")
+        assert len(rows) == 1
+
+    def test_limit_caps_results(self, db):
+        from datetime import datetime as _dt, timedelta as _td
+        for i in range(10):
+            t = (_dt.now(timezone.utc) - _td(hours=i)).strftime('%Y-%m-%d %H:%M:%S')
+            self._insert(db, f"alice{i}", t)
+        rows = db.get_stream_events(limit=5)
+        assert len(rows) == 5
+
+    def test_month_filter(self, db):
+        # Insert rows for two different months
+        self._insert(db, "alice", "2026-04-15 10:00:00", "2026-04-15 12:00:00")
+        from datetime import datetime as _dt
+        now_str = _dt.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert(db, "alice", now_str)
+
+        # Filter by April only
+        rows = db.get_stream_events(month="2026-04")
+        assert len(rows) == 1
+        assert "2026-04" in rows[0]['went_live_at']
+
+    def test_default_scope_is_current_month(self, db):
+        from datetime import datetime as _dt
+        # Insert one from way in the past (different month)
+        self._insert(db, "alice", "2026-01-15 10:00:00", "2026-01-15 12:00:00")
+        # And one in current month
+        now_str = _dt.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        self._insert(db, "alice", now_str)
+        rows = db.get_stream_events()  # no month arg
+        # Should only see the current-month one
+        assert len(rows) == 1
+        assert "2026-01" not in rows[0]['went_live_at']
+
+
+class TestCleanupStreamEventsRetention:
+    """cleanup_stream_events now keeps current + previous month (rolling 2-month window)."""
+
+    def _insert(self, db, streamer, went_live):
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at) "
+            "VALUES (?, date(?), ?)",
+            (streamer.lower(), went_live, went_live)
+        )
+        conn.execute(
+            "INSERT INTO stream_events (guild_id, streamer_name, went_live_at) "
+            "VALUES (?, ?, ?)",
+            (100, streamer.lower(), went_live)
+        )
+        conn.commit()
+        conn.close()
+
+    def test_keeps_current_and_previous_month_deletes_older(self, db):
+        from datetime import datetime as _dt, timedelta as _td
+        now = _dt.now(timezone.utc)
+        # Current month: keep
+        self._insert(db, "alice", now.strftime('%Y-%m-%d %H:%M:%S'))
+        # Previous month-ish: keep (~35 days ago is reliably "last month")
+        prev = now - _td(days=35)
+        # If prev wraps before the 1st of this month, it's last month. Force first day of last month
+        # Use 'now -1 month' equivalent computed in python
+        if now.month == 1:
+            prev = now.replace(year=now.year - 1, month=12, day=15)
+        else:
+            prev = now.replace(month=now.month - 1, day=15)
+        self._insert(db, "bob", prev.strftime('%Y-%m-%d %H:%M:%S'))
+        # Way older — 6 months ago: delete
+        old_month = now.month - 6
+        old_year = now.year
+        while old_month < 1:
+            old_month += 12
+            old_year -= 1
+        ancient = now.replace(year=old_year, month=old_month, day=15)
+        self._insert(db, "carol", ancient.strftime('%Y-%m-%d %H:%M:%S'))
+
+        db.cleanup_stream_events()
+
+        conn = db.get_connection()
+        names = {r[0] for r in conn.execute(
+            "SELECT streamer_name FROM global_stream_events"
+        ).fetchall()}
+        conn.close()
+        assert "alice" in names, "Current-month row must be kept"
+        assert "bob" in names, "Previous-month row must be kept"
+        assert "carol" not in names, "6-month-old row must be deleted"

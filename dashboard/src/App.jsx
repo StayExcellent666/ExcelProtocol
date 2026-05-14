@@ -2894,6 +2894,145 @@ function GlobalStatsTab() {
   );
 }
 
+// ── Dev: Stream Events Viewer (sub-component of DB Tools) ─────────────────────
+function StreamEventsViewer() {
+  const [streamer, setStreamer] = useState("");
+  const [month, setMonth] = useState(""); // empty = current month
+  const [limit, setLimit] = useState(100);
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  // Build month options: current and previous
+  const monthOptions = (() => {
+    const now = new Date();
+    const cur = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prev = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, "0")}`;
+    return [
+      { value: "", label: `Current (${cur})` },
+      { value: prev, label: `Previous (${prev})` },
+    ];
+  })();
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (streamer.trim()) params.set("streamer", streamer.trim());
+      if (month) params.set("month", month);
+      params.set("limit", String(limit));
+      const data = await apiFetch(`/api/dev/stream-events?${params}`);
+      setEvents(data.events || []);
+      if (data.error) setError(data.error);
+    } catch (e) {
+      setError(e.message || String(e));
+      setEvents([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [streamer, month, limit]);
+
+  useEffect(() => { load(); }, []);  // initial load only; manual reload via button
+
+  const formatLocal = (utcStr) => {
+    if (!utcStr) return "—";
+    // SQLite naive UTC timestamp: 'YYYY-MM-DD HH:MM:SS'. Make it explicit UTC.
+    const isoUtc = utcStr.replace(" ", "T") + "Z";
+    try {
+      const d = new Date(isoUtc);
+      if (Number.isNaN(d.getTime())) return utcStr;
+      return d.toLocaleString(undefined, {
+        year: "numeric", month: "short", day: "2-digit",
+        hour: "2-digit", minute: "2-digit",
+      });
+    } catch {
+      return utcStr;
+    }
+  };
+
+  const statusColor = (s) => {
+    if (s === "live") return "var(--green)";
+    if (s === "orphan") return "var(--yellow)";
+    return "var(--text3)";
+  };
+
+  return (
+    <div style={{ ...C.card, padding:"14px 18px" }}>
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", marginBottom:12 }}>
+        <CyanInput
+          type="text"
+          placeholder="Streamer name (substring)"
+          value={streamer}
+          onChange={(e) => setStreamer(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") load(); }}
+          style={{ flex:"1 1 200px", minWidth:160 }}
+        />
+        <select
+          value={month}
+          onChange={(e) => setMonth(e.target.value)}
+          style={{ background:"var(--bg2)", color:"var(--text)", border:"1px solid var(--border)", borderRadius:6, padding:"6px 8px", fontSize:12, fontFamily:"'JetBrains Mono',monospace" }}
+        >
+          {monthOptions.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        <select
+          value={limit}
+          onChange={(e) => setLimit(parseInt(e.target.value, 10) || 100)}
+          style={{ background:"var(--bg2)", color:"var(--text)", border:"1px solid var(--border)", borderRadius:6, padding:"6px 8px", fontSize:12, fontFamily:"'JetBrains Mono',monospace" }}
+        >
+          <option value={50}>50 rows</option>
+          <option value={100}>100 rows</option>
+          <option value={200}>200 rows</option>
+          <option value={500}>500 rows</option>
+        </select>
+        <button onClick={load} disabled={loading} style={{ ...C.btnSecondary, fontSize:12, opacity: loading ? 0.5 : 1 }}>
+          {loading ? "Loading…" : "Search"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ fontSize:12, color:"var(--red)", fontFamily:"'JetBrains Mono',monospace", marginBottom:8 }}>
+          Error: {error}
+        </div>
+      )}
+
+      <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:6 }}>
+        {events.length === 0 && !loading ? "No events found." : `${events.length} event${events.length === 1 ? "" : "s"}`}
+      </div>
+
+      {events.length > 0 && (
+        <div style={{ borderTop:"1px solid var(--border)", maxHeight:440, overflowY:"auto" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1.5fr 1.6fr 1.6fr 0.7fr 0.7fr", gap:8, fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", padding:"8px 0", borderBottom:"1px solid var(--border)", textTransform:"uppercase" }}>
+            <div>Streamer</div>
+            <div>Went Live</div>
+            <div>Ended At</div>
+            <div style={{ textAlign:"right" }}>Hours</div>
+            <div style={{ textAlign:"right" }}>Status</div>
+          </div>
+          {events.map(ev => (
+            <div key={ev.id} style={{ display:"grid", gridTemplateColumns:"1.5fr 1.6fr 1.6fr 0.7fr 0.7fr", gap:8, fontSize:11, padding:"6px 0", borderBottom:"1px solid var(--border)", alignItems:"center", fontFamily:"'JetBrains Mono',monospace" }}>
+              <a href={`https://twitch.tv/${ev.streamer_name}`} target="_blank" rel="noreferrer" style={{ color:"var(--text)", textDecoration:"none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                {ev.streamer_name}
+              </a>
+              <div style={{ color:"var(--text2)" }}>{formatLocal(ev.went_live_at)}</div>
+              <div style={{ color: ev.ended_at ? "var(--text2)" : "var(--text3)" }}>{formatLocal(ev.ended_at)}</div>
+              <div style={{ textAlign:"right", color: ev.hours === null ? "var(--text3)" : (ev.hours > 12 ? "var(--yellow)" : "var(--cyan)") }}>
+                {ev.hours === null ? "—" : `${ev.hours}h`}
+              </div>
+              <div style={{ textAlign:"right", color: statusColor(ev.status), textTransform:"uppercase", fontSize:10 }}>
+                {ev.status}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Dev: DB Tools Tab ─────────────────────────────────────────────────────────
 function DbToolsTab() {
   const [status, setStatus] = useState(null);
@@ -3089,6 +3228,15 @@ function DbToolsTab() {
             {running["reset_hours"] ? "Running…" : "Reset Hours"}
           </button>
         </div>
+
+        {/* ── Stream Events log section ─────────────────────────────────── */}
+        <div style={{ marginTop:20, marginBottom:8, fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:14, color:"var(--text)", textShadow:"0 0 14px rgba(0,245,212,0.3), 0 0 28px rgba(0,245,212,0.1)" }}>
+          📋 Stream Events Log
+        </div>
+        <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:8 }}>
+          Raw events from global_stream_events. Current + previous month retained. Times shown in your local timezone.
+        </div>
+        <StreamEventsViewer />
 
         {status?.bad_streamer_names?.length > 0 && (
           <div style={{ ...C.card, marginTop:4 }}>

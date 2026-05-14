@@ -1932,22 +1932,94 @@ class Database:
         conn.close()
         return n
 
-    def cleanup_stream_events(self):
-        """Delete all stream events from previous months"""
+    def get_stream_events(self, streamer: str = None, month: str = None, limit: int = 100) -> list:
+        """Return recent global_stream_events for the dev dashboard event-log view.
+
+        Args:
+            streamer: optional case-insensitive substring filter on streamer_name
+            month: optional 'YYYY-MM' to scope to that month; defaults to current
+            limit: max rows to return (default 100)
+
+        Returns rows ordered newest-first as dicts with:
+            id, streamer_name, went_live_at, ended_at, hours, status
+            (status is 'live' if ended_at IS NULL and started <48h ago,
+             'orphan' if NULL and older, 'closed' otherwise)
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
+
+        conditions = []
+        params = []
+
+        if month:
+            conditions.append("strftime('%Y-%m', went_live_at) = ?")
+            params.append(month)
+        else:
+            conditions.append("strftime('%Y-%m', went_live_at) = strftime('%Y-%m', 'now')")
+
+        if streamer:
+            conditions.append("LOWER(streamer_name) LIKE ?")
+            params.append(f"%{streamer.lower()}%")
+
+        where = " AND ".join(conditions)
+        sql = f'''
+            SELECT id, streamer_name, went_live_at, ended_at,
+                   CASE WHEN ended_at IS NOT NULL
+                        THEN ROUND((julianday(ended_at) - julianday(went_live_at)) * 24, 2)
+                        ELSE NULL END AS hours,
+                   CASE WHEN ended_at IS NOT NULL THEN 'closed'
+                        WHEN went_live_at > datetime('now', '-48 hours') THEN 'live'
+                        ELSE 'orphan' END AS status
+            FROM global_stream_events
+            WHERE {where}
+            ORDER BY went_live_at DESC
+            LIMIT ?
+        '''
+        params.append(int(limit))
+        cursor.execute(sql, params)
+        rows = [
+            {
+                'id': r[0],
+                'streamer_name': r[1],
+                'went_live_at': r[2],
+                'ended_at': r[3],
+                'hours': r[4],
+                'status': r[5],
+            }
+            for r in cursor.fetchall()
+        ]
+        conn.close()
+        return rows
+
+    def cleanup_stream_events(self):
+        """Delete stream events older than 2 months.
+
+        Rolling 2-month retention: keeps the current month AND the previous
+        month. This lets the dev-only Stream Events dashboard view scope to
+        "last month" for after-the-fact issue verification.
+
+        On June 1: April rows get deleted, May + June stay.
+        On July 1: May rows get deleted, June + July stay.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        # Compute the cutoff: any row whose month is BEFORE the previous month
+        # gets deleted. `date('now', '-1 month')` gives the same day last month;
+        # taking strftime('%Y-%m') of that yields the previous month.
         cursor.execute('''
             DELETE FROM stream_events
-            WHERE strftime('%Y-%m', went_live_at) != strftime('%Y-%m', 'now')
+            WHERE strftime('%Y-%m', went_live_at) < strftime('%Y-%m', date('now', '-1 month'))
         ''')
+        n_per_server = cursor.rowcount
         cursor.execute('''
             DELETE FROM global_stream_events
-            WHERE strftime('%Y-%m', went_live_at) != strftime('%Y-%m', 'now')
+            WHERE strftime('%Y-%m', went_live_at) < strftime('%Y-%m', date('now', '-1 month'))
         ''')
+        n_global = cursor.rowcount
         conn.commit()
         conn.close()
-        logger.info("Cleaned up old stream events")
-        return 0
+        logger.info(f"Cleaned up old stream events: {n_global} global + {n_per_server} per-server (kept last 2 months)")
+        return n_global + n_per_server
 
     # ------------------------------------------------------------------
     # Twitch channel linking
