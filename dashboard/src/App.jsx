@@ -3005,7 +3005,7 @@ function StreamEventsViewer() {
 
       {events.length > 0 && (
         <div style={{ borderTop:"1px solid var(--border)", maxHeight:440, overflowY:"auto" }}>
-          <div style={{ display:"grid", gridTemplateColumns:"1.4fr 1.5fr 1.5fr 0.6fr 0.7fr", gap:14, fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", padding:"8px 4px", borderBottom:"1px solid var(--border)", textTransform:"uppercase", alignItems:"center" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1.4fr 1.5fr 1.5fr 0.6fr 0.7fr", gap:14, fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", padding:"8px 12px 8px 4px", borderBottom:"1px solid var(--border)", textTransform:"uppercase", alignItems:"center" }}>
             <div>Streamer</div>
             <div>Went Live</div>
             <div>Ended At</div>
@@ -3013,7 +3013,7 @@ function StreamEventsViewer() {
             <div style={{ textAlign:"right" }}>Status</div>
           </div>
           {events.map(ev => (
-            <div key={ev.id} style={{ display:"grid", gridTemplateColumns:"1.4fr 1.5fr 1.5fr 0.6fr 0.7fr", gap:14, fontSize:11, padding:"6px 4px", borderBottom:"1px solid var(--border)", alignItems:"center", fontFamily:"'JetBrains Mono',monospace" }}>
+            <div key={ev.id} style={{ display:"grid", gridTemplateColumns:"1.4fr 1.5fr 1.5fr 0.6fr 0.7fr", gap:14, fontSize:11, padding:"6px 12px 6px 4px", borderBottom:"1px solid var(--border)", alignItems:"center", fontFamily:"'JetBrains Mono',monospace" }}>
               <a href={`https://twitch.tv/${ev.streamer_name}`} target="_blank" rel="noreferrer" style={{ color:"var(--text)", textDecoration:"none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", minWidth:0 }}>
                 {ev.streamer_name}
               </a>
