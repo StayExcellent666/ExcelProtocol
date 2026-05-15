@@ -376,6 +376,38 @@ class TestStreamEvents:
         assert rows[1][1] is not None, "Session 2 should be closed"
         assert rows[2][1] is None, "Session 3 should still be open"
 
+    def test_global_event_logged_once_per_online_not_per_server(self, db):
+        """Round 18 regression: when a streamer is monitored in multiple
+        servers, send_notification is called once per server and writes one
+        per-server stream_events row each time. But the global event should
+        only be inserted ONCE per stream.online, not 7 times.
+
+        ibrayen had 7 servers monitoring him → 7 duplicate global rows.
+        With log_global_stream_event called separately, only one global row
+        per online event is created.
+        """
+        from datetime import datetime as _dt
+        now = _dt.now(timezone.utc)
+
+        # Simulate the new flow: one global insert + N per-server inserts
+        db.log_global_stream_event("alice", started_at=now)
+        for guild_id in [100, 200, 300, 400]:
+            db.log_per_server_stream_event(guild_id, "alice", started_at=now)
+
+        conn = db.get_connection()
+        global_count = conn.execute(
+            "SELECT COUNT(*) FROM global_stream_events WHERE streamer_name='alice'"
+        ).fetchone()[0]
+        per_server_count = conn.execute(
+            "SELECT COUNT(*) FROM stream_events WHERE streamer_name='alice'"
+        ).fetchone()[0]
+        conn.close()
+
+        assert global_count == 1, \
+            f"Expected 1 global row regardless of server count, got {global_count}"
+        assert per_server_count == 4, \
+            f"Expected 4 per-server rows (one per guild), got {per_server_count}"
+
     def test_mark_stream_ended_does_not_clobber_historical_global_row(self, db):
         """Regression test for the Round 5 bug.
 

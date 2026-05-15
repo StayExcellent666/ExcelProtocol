@@ -1572,37 +1572,63 @@ class Database:
     # ------------------------------------------------------------------
 
     def log_stream_event(self, guild_id: int, streamer_name: str, started_at=None):
-        """Log a stream going live. One row per session in both tables.
+        """Log a stream going live (backward-compatible wrapper).
 
-        Each `stream.online` event from Twitch creates exactly one row in
-        each of `stream_events` (per guild) and `global_stream_events`
-        (cross-guild). Multi-session days produce multiple rows. The
-        leaderboard SQL deduplicates by date when counting "days streamed."
+        Inserts into BOTH per-server and global tables. Use this when a
+        single call should write both. For the typical EventSub flow,
+        prefer the split methods below:
+          - log_global_stream_event: call ONCE per stream.online from
+            handle_stream_online
+          - log_per_server_stream_event: call PER GUILD from
+            send_notification
+        Calling this method per-server (the legacy behavior) produces
+        duplicate global rows. The split methods exist to avoid that.
+        """
+        self.log_per_server_stream_event(guild_id, streamer_name, started_at)
+        self.log_global_stream_event(streamer_name, started_at)
+
+    def log_per_server_stream_event(self, guild_id: int, streamer_name: str, started_at=None):
+        """Insert one row into the per-server stream_events table.
+
+        Called from send_notification once PER GUILD that gets a notification.
         """
         conn = self.get_connection()
         cursor = conn.cursor()
-
         if started_at is not None:
-            # Store as ISO 8601 UTC (no tz suffix — SQLite uses naive timestamps)
             ts = started_at.strftime('%Y-%m-%d %H:%M:%S') if hasattr(started_at, 'strftime') else str(started_at)
             cursor.execute(
                 "INSERT INTO stream_events (guild_id, streamer_name, went_live_at) VALUES (?, ?, ?)",
                 (guild_id, streamer_name.lower(), ts)
             )
-            cursor.execute('''
-                INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at)
-                VALUES (?, date(?), ?)
-            ''', (streamer_name.lower(), ts, ts))
         else:
             cursor.execute(
                 "INSERT INTO stream_events (guild_id, streamer_name) VALUES (?, ?)",
                 (guild_id, streamer_name.lower())
             )
+        conn.commit()
+        conn.close()
+
+    def log_global_stream_event(self, streamer_name: str, started_at=None):
+        """Insert one row into the global_stream_events table.
+
+        Called ONCE per stream.online event from handle_stream_online —
+        NOT per guild. Multi-session days correctly produce multiple rows;
+        but each EventSub online event should only produce ONE global row
+        regardless of how many guilds monitor the streamer.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        if started_at is not None:
+            ts = started_at.strftime('%Y-%m-%d %H:%M:%S') if hasattr(started_at, 'strftime') else str(started_at)
+            cursor.execute('''
+                INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at)
+                VALUES (?, date(?), ?)
+            ''', (streamer_name.lower(), ts, ts))
+        else:
             cursor.execute('''
                 INSERT INTO global_stream_events (streamer_name, stream_date)
                 VALUES (?, date('now'))
             ''', (streamer_name.lower(),))
-
         conn.commit()
         conn.close()
 

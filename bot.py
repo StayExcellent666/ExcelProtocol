@@ -925,11 +925,20 @@ class TwitchNotifierBot(discord.Client):
             # Cache the stream start time so check_milestones() can compute
             # uptime locally without polling Twitch every 5 minutes.
             started_at_str = stream.get('started_at')
+            parsed_started_at = None
             if started_at_str:
                 try:
-                    self._stream_starts[name_lower] = parse_twitch_iso(started_at_str)
+                    parsed_started_at = parse_twitch_iso(started_at_str)
+                    self._stream_starts[name_lower] = parsed_started_at
                 except Exception as e:
                     logger.warning(f"Could not parse started_at for {name_lower}: {e}")
+
+            # Log ONE global stream event for this stream.online — not one
+            # per server (send_notification handles per-server logging).
+            try:
+                self.db.log_global_stream_event(name_lower, started_at=parsed_started_at)
+            except Exception as e:
+                logger.error(f"Failed to log global_stream_event for {name_lower}: {e}")
 
             # Wait for thumbnail
             logger.info(f"Waiting 15s for {user_login} thumbnail...")
@@ -1377,7 +1386,7 @@ class TwitchNotifierBot(discord.Client):
                 started_at = parse_twitch_iso(stream['started_at']) if stream.get('started_at') else None
             except Exception:
                 started_at = None
-            self.db.log_stream_event(server_data['guild_id'], stream['user_login'], started_at=started_at)
+            self.db.log_per_server_stream_event(server_data['guild_id'], stream['user_login'], started_at=started_at)
 
             # Log notification for history
             self.db.log_notification(server_data['guild_id'], stream['user_login'], effective_channel_id, 'sent')
