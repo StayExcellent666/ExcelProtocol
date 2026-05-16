@@ -49,7 +49,7 @@ RUN apt-get purge -y gcc && \
     apt-get clean
 
 # Copy only necessary Python files
-COPY utils.py bot.py database.py twitch_api.py config.py twitch_bot.py twitch_chat_cog.py reaction_roles.py setchannel_cog.py birthday_cog.py dashboard_server.py ./
+COPY utils.py bot.py database.py twitch_api.py config.py twitch_bot.py twitch_chat_cog.py reaction_roles.py setchannel_cog.py birthday_cog.py dashboard_server.py server_setup.py ./
 
 # Copy the freshly-built React dashboard from stage 1.
 # (No more committing dist/ to git — it's built fresh on every deploy.)
