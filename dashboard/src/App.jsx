@@ -3149,11 +3149,11 @@ function SetupWizardTab({ guildId, isDev }) {
       {/* Step indicator */}
       <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:24 }}>
         {["Template", "Roles", "Modules", "Review", "Apply"].map((lbl, i) => (
-          <React.Fragment key={lbl}>
+          <div key={lbl} style={{ display:"flex", alignItems:"center", gap:12 }}>
             {stepDot(i)}
             <div style={{ fontSize:12, color: step === i ? "var(--cyan)" : "var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>{lbl}</div>
             {i < 4 && <div style={{ flex:"0 0 24px", height:1, background:"var(--border)" }} />}
-          </React.Fragment>
+          </div>
         ))}
       </div>
 
@@ -3663,7 +3663,6 @@ export default function App() {
   const guild = guilds.find(g=>g.id===activeGuild)||guilds[0]||{ id:"", name:"..." };
   const topTabs = [
     { id:"settings",    icon:"⚙️", label:"Server Settings" },
-    { id:"setupwizard", icon:"🪄", label:"Set Up Server"   },
     { id:"statstab",    icon:"📊", label:"Server Stats"     },
     { id:"streamers",   icon:"📺", label:"Streams"          },
     { id:"roles",       icon:"🎭", label:"Reaction Roles"   },
@@ -3675,6 +3674,7 @@ export default function App() {
   const bottomTabs = [
     { id:"commands",    icon:"⚡", label:"Commands"         },
     { id:"safety",      icon:"🛡️", label:"Safety"           },
+    { id:"setupwizard", icon:"🪄", label:"Set Up Server"   },
     { id:"notiflog",    icon:"📋", label:"Notif Log"        },
     { id:"suggestions", icon:"💡", label:"Contact"          },
   ];
