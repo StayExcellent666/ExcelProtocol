@@ -3965,7 +3965,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
     app.router.add_post ("/api/dev/db-tools",       db_tools_action)
     app.router.add_get  ("/api/dev/stream-events",  dev_stream_events)
-    app.router.add_get  ("/api/guild/{guild_id}/setup/preview", setup_preview)
+    app.router.add_post ("/api/guild/{guild_id}/setup/preview", setup_preview)
     app.router.add_post ("/api/guild/{guild_id}/setup/apply",   setup_apply)
     app.router.add_get  ("/api/guild/{guild_id}/setup/status/{setup_id}", setup_status)
     app.router.add_get   ("/api/guild/{guild_id}/stat-channels",            get_stat_channels)
