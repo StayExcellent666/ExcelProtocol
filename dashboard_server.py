@@ -2838,6 +2838,146 @@ async def dev_stream_events(request):
     })
 
 
+# ── Server Setup Wizard ───────────────────────────────────────────────────────
+def _is_setup_caller_authorized(request) -> tuple:
+    """Return (ok, error_message). Setup is restricted to guild owner OR dev.
+
+    Returns guild as the second tuple element if ok, None if not.
+    """
+    session = request["session"]
+    is_dev = session.get("dev", False)
+    if is_dev:
+        # Dev can run setup for any guild
+        return True, None
+    if not _bot_ref:
+        return False, "Bot not available"
+    try:
+        guild_id = int(request.match_info.get("guild_id", "0"))
+    except ValueError:
+        return False, "Invalid guild id"
+    guild = _bot_ref.get_guild(guild_id)
+    if not guild:
+        return False, "Bot is not in that guild"
+    user_id = session.get("user_id")
+    if user_id and int(user_id) == guild.owner_id:
+        return True, None
+    return False, "Only the server owner can run the setup wizard"
+
+
+async def setup_preview(request):
+    """Dry-run preview. Returns the plan + count summary without applying."""
+    ok, err = _is_setup_caller_authorized(request)
+    if not ok:
+        raise web.HTTPForbidden(reason=err)
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+
+    guild_id = int(request.match_info["guild_id"])
+    try:
+        config = await request.json()
+    except Exception:
+        config = {}
+
+    import server_setup
+    plan = server_setup.build_plan(config or {})
+    counts = server_setup.count_plan_items(plan)
+
+    # Check what would be reused vs created
+    guild = _bot_ref.get_guild(guild_id)
+    existing_roles = set()
+    existing_categories = set()
+    existing_channels = set()
+    if guild:
+        existing_roles = {r.name for r in guild.roles}
+        for c in guild.channels:
+            if hasattr(c, "category_id") and c.category_id is None and hasattr(c, "channels"):
+                existing_categories.add(c.name)
+            else:
+                existing_channels.add(c.name)
+        # Also explicitly enumerate categories
+        for c in guild.categories:
+            existing_categories.add(c.name)
+
+    plan_summary = {
+        "template_id": plan["template_id"],
+        "template_label": plan["template_label"],
+        "verification_enabled": plan["verification_enabled"],
+        "vip_enabled": plan["vip_enabled"],
+        "auto_post_rules": plan["auto_post_rules"],
+        "role_names": plan["role_names"],
+        "categories": plan["categories"],
+        "counts": counts,
+        "would_reuse": {
+            "roles": [n for n in plan["role_names"].values() if n in existing_roles],
+            "categories": [c["name"] for c in plan["categories"] if c["name"] in existing_categories],
+        },
+    }
+
+    # Surface missing permissions before they hit Apply
+    missing_perms = []
+    if guild and guild.me:
+        gp = guild.me.guild_permissions
+        if not gp.manage_channels: missing_perms.append("Manage Channels")
+        if not gp.manage_roles: missing_perms.append("Manage Roles")
+        if not gp.view_channel: missing_perms.append("View Channels")
+        if not gp.send_messages: missing_perms.append("Send Messages")
+        if not gp.read_message_history: missing_perms.append("Read Message History")
+    plan_summary["missing_permissions"] = missing_perms
+
+    return web.json_response(plan_summary)
+
+
+async def setup_apply(request):
+    """Kick off the setup. Returns a setup_id that the dashboard polls
+    /setup/status/:id with for live progress."""
+    ok, err = _is_setup_caller_authorized(request)
+    if not ok:
+        raise web.HTTPForbidden(reason=err)
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+
+    guild_id = int(request.match_info["guild_id"])
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    config = body.get("config", {})
+    dry_run = bool(body.get("dry_run", False))
+
+    import uuid
+    setup_id = uuid.uuid4().hex
+
+    # Initialize status BEFORE scheduling the task — guarantees the dashboard
+    # can poll immediately without a 404
+    _bot_ref._setup_status[setup_id] = {
+        "guild_id": guild_id,
+        "dry_run": dry_run,
+        "status": "pending",
+        "steps": [],
+        "summary": {"created": 0, "reused": 0, "failed": 0},
+        "started_at": None,
+        "finished_at": None,
+        "error": None,
+    }
+    asyncio.create_task(_bot_ref.run_server_setup(guild_id, config, setup_id, dry_run=dry_run))
+    return web.json_response({"setup_id": setup_id})
+
+
+async def setup_status(request):
+    """Poll endpoint for live setup progress."""
+    ok, err = _is_setup_caller_authorized(request)
+    if not ok:
+        raise web.HTTPForbidden(reason=err)
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+
+    setup_id = request.match_info["setup_id"]
+    status = _bot_ref._setup_status.get(setup_id)
+    if not status:
+        return web.json_response({"error": "Setup id not found or expired"}, status=404)
+    return web.json_response(status)
+
+
 # ── Dev: DB Tools ─────────────────────────────────────────────────────────────
 async def db_tools_status(request):
     """Dev-only: show orphaned records and fixable issues."""
@@ -3825,6 +3965,9 @@ def create_dashboard_app(bot=None):
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
     app.router.add_post ("/api/dev/db-tools",       db_tools_action)
     app.router.add_get  ("/api/dev/stream-events",  dev_stream_events)
+    app.router.add_get  ("/api/guild/{guild_id}/setup/preview", setup_preview)
+    app.router.add_post ("/api/guild/{guild_id}/setup/apply",   setup_apply)
+    app.router.add_get  ("/api/guild/{guild_id}/setup/status/{setup_id}", setup_status)
     app.router.add_get   ("/api/guild/{guild_id}/stat-channels",            get_stat_channels)
     app.router.add_get   ("/api/guild/{guild_id}/vc-settings",                          get_vc_settings)
     app.router.add_post  ("/api/guild/{guild_id}/vc-settings",                          set_vc_settings)

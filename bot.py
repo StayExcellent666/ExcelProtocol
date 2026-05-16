@@ -17,6 +17,7 @@ from twitch_api import TwitchAPI
 from utils import utcnow, sanitise_streamer_name, parse_twitch_iso, MILESTONE_DEFS, compute_hours_live, should_fire_milestone, is_already_offline_processed, classify_reconcile_action
 from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID, LOG_CHANNEL_ID
 from config import TWITCH_BOT_USERNAME, TWITCH_BOT_TOKEN
+import server_setup
 
 # Compiled once at module load — used by on_member_join's safety filter
 _SUSPICIOUS_USERNAME_RE = re.compile(r'^[a-z]+_[a-z]+_\d{3,}$')
@@ -65,6 +66,14 @@ class TwitchNotifierBot(discord.Client):
         # incidents are visible (SBmel had 4 instead of 2, double-firing every
         # online/offline). Reset to 0 each sync.
         self._last_pruned_subscriptions: int = 0
+
+        # In-memory progress store for the Set Up Server wizard. Keyed by
+        # setup_id (uuid string); value is a dict with `status` ('pending' |
+        # 'running' | 'done' | 'error'), `steps` (list of {label, status,
+        # detail}), `started_at`, `finished_at`, `summary`. The dashboard
+        # polls /api/setup/status/:id to render live progress.
+        # Entries auto-expire after 1 hour.
+        self._setup_status: dict = {}
 
         # Track bot start time for uptime calculation
         self.start_time = utcnow()
@@ -256,6 +265,23 @@ class TwitchNotifierBot(discord.Client):
                 logger.info(f"Restored {len(active_vcs)} VC control view(s)")
         except Exception as e:
             logger.error(f"Failed to restore VC control views: {e}")
+
+        # Restore persistent verification button views for guilds that have
+        # completed the Set Up Server wizard with verification enabled.
+        try:
+            setups = self.db.get_all_server_setups()
+            restored = 0
+            for s in setups:
+                if not s.get('verification_enabled'):
+                    continue
+                member_role_id = (s.get('role_ids') or {}).get('member')
+                if member_role_id:
+                    self.add_view(VerifyView(int(member_role_id)))
+                    restored += 1
+            if restored:
+                logger.info(f"Restored {restored} verification button view(s)")
+        except Exception as e:
+            logger.error(f"Failed to restore verification views: {e}")
 
         # Start milestone check loop (separate from EventSub)
         if not self.check_milestones.is_running():
@@ -472,6 +498,355 @@ class TwitchNotifierBot(discord.Client):
             )
         else:
             logger.info(f"Reconciliation complete — all {counts['no_action']} streamers already in correct state")
+
+    # ── Set Up Server wizard orchestrator ─────────────────────────────────
+    async def run_server_setup(self, guild_id: int, config: dict, setup_id: str,
+                                dry_run: bool = False) -> None:
+        """Apply a server template plan to the given guild.
+
+        Walks server_setup.build_plan(config) in stages, creating Discord
+        resources (roles, categories, channels) and reporting progress to
+        self._setup_status[setup_id] so the dashboard can poll for it.
+
+        Idempotency: if a resource with the same name already exists, it's
+        reused instead of duplicated. Never deletes or modifies existing
+        resources unless the user explicitly opts in (not exposed yet).
+
+        Args:
+            guild_id: target guild
+            config: wizard config dict (template/toggles/role_names/color)
+            setup_id: opaque id used as key in self._setup_status
+            dry_run: if True, validate permissions and report what WOULD be
+                     created without actually creating anything.
+        """
+        from datetime import datetime as _dt, timezone as _tz
+        plan = server_setup.build_plan(config)
+        guild = self.get_guild(guild_id)
+
+        status = self._setup_status.setdefault(setup_id, {
+            "guild_id": guild_id,
+            "dry_run": dry_run,
+            "status": "running",
+            "steps": [],
+            "summary": {"created": 0, "reused": 0, "failed": 0},
+            "started_at": _dt.now(_tz.utc).isoformat(),
+            "finished_at": None,
+            "error": None,
+        })
+
+        def add_step(label: str, st: str = "running", detail: str = ""):
+            status["steps"].append({"label": label, "status": st, "detail": detail})
+            return len(status["steps"]) - 1
+
+        def update_step(idx: int, st: str, detail: str = ""):
+            if 0 <= idx < len(status["steps"]):
+                status["steps"][idx]["status"] = st
+                if detail:
+                    status["steps"][idx]["detail"] = detail
+
+        def finalize(st: str, err: str = None):
+            status["status"] = st
+            status["finished_at"] = _dt.now(_tz.utc).isoformat()
+            if err:
+                status["error"] = err
+
+        # ── Pre-flight checks ────────────────────────────────────────────
+        if not guild:
+            finalize("error", f"Guild {guild_id} not found or bot not in it")
+            return
+
+        bot_member = guild.me
+        if not bot_member:
+            finalize("error", "Bot is not a member of this guild")
+            return
+
+        # Required permissions: Manage Channels, Manage Roles, View Channels,
+        # Send Messages, Read Message History
+        gp = bot_member.guild_permissions
+        missing = []
+        if not gp.manage_channels: missing.append("Manage Channels")
+        if not gp.manage_roles: missing.append("Manage Roles")
+        if not gp.view_channel: missing.append("View Channels")
+        if not gp.send_messages: missing.append("Send Messages")
+        if not gp.read_message_history: missing.append("Read Message History")
+        if missing:
+            finalize("error", f"Missing required permissions: {', '.join(missing)}")
+            return
+
+        # ── Roles ────────────────────────────────────────────────────────
+        # Created in hierarchy order (highest first). Each will sit just
+        # below the bot's own role. If a role with the same name exists,
+        # reuse it.
+        role_results: dict = {}  # key -> discord.Role
+        bot_top_role = bot_member.top_role
+        target_position = max(bot_top_role.position - 1, 1)
+
+        for key in server_setup.ROLE_HIERARCHY:
+            name = plan["role_names"][key]
+            step_idx = add_step(f"Role: {name}", "running")
+            existing = discord.utils.find(lambda r: r.name == name, guild.roles)
+            if existing:
+                role_results[key] = existing
+                update_step(step_idx, "done", "reused existing")
+                status["summary"]["reused"] += 1
+            else:
+                if dry_run:
+                    update_step(step_idx, "done", "would create")
+                    status["summary"]["created"] += 1
+                    continue
+                try:
+                    new_role = await guild.create_role(
+                        name=name,
+                        reason=f"Set Up Server wizard ({plan['template_id']})",
+                    )
+                    # Position just below the bot's role
+                    try:
+                        await new_role.edit(position=target_position)
+                    except Exception as _e:
+                        logger.debug(f"Could not reposition role {name}: {_e}")
+                    role_results[key] = new_role
+                    update_step(step_idx, "done", "created")
+                    status["summary"]["created"] += 1
+                except discord.Forbidden:
+                    update_step(step_idx, "error", "missing permission")
+                    status["summary"]["failed"] += 1
+                except Exception as e:
+                    update_step(step_idx, "error", str(e)[:100])
+                    status["summary"]["failed"] += 1
+
+        # ── Categories ───────────────────────────────────────────────────
+        category_results: dict = {}  # name -> discord.CategoryChannel
+        for cat_spec in plan["categories"]:
+            cat_name = cat_spec["name"]
+            step_idx = add_step(f"Category: {cat_name}", "running")
+            existing = discord.utils.find(
+                lambda c: c.name == cat_name and isinstance(c, discord.CategoryChannel),
+                guild.channels,
+            )
+            if existing:
+                category_results[cat_name] = existing
+                update_step(step_idx, "done", "reused existing")
+                status["summary"]["reused"] += 1
+                continue
+            if dry_run:
+                update_step(step_idx, "done", "would create")
+                status["summary"]["created"] += 1
+                continue
+            try:
+                new_cat = await guild.create_category(
+                    cat_name,
+                    reason="Set Up Server wizard",
+                )
+                category_results[cat_name] = new_cat
+                update_step(step_idx, "done", "created")
+                status["summary"]["created"] += 1
+            except discord.Forbidden:
+                update_step(step_idx, "error", "missing permission")
+                status["summary"]["failed"] += 1
+            except Exception as e:
+                update_step(step_idx, "error", str(e)[:100])
+                status["summary"]["failed"] += 1
+
+        # ── Channels ─────────────────────────────────────────────────────
+        # Track channel results so we can apply overwrites + post rules.
+        channel_results: dict = {}  # name -> channel
+        rules_channel = None  # tracked for the rules post + verify button
+
+        for cat_spec in plan["categories"]:
+            cat_name = cat_spec["name"]
+            parent = category_results.get(cat_name)
+            for ch_name, ch_type in cat_spec["channels"]:
+                step_idx = add_step(f"Channel: {ch_name}", "running")
+                # Match by name AND type within the category if it exists
+                def _match(c):
+                    if c.name != ch_name:
+                        return False
+                    if parent and c.category_id != (parent.id if parent else None):
+                        return False
+                    if ch_type == "text":
+                        return isinstance(c, discord.TextChannel)
+                    return isinstance(c, discord.VoiceChannel)
+
+                existing = discord.utils.find(_match, guild.channels)
+                if existing:
+                    channel_results[ch_name] = existing
+                    if "rules" in ch_name.lower():
+                        rules_channel = existing
+                    update_step(step_idx, "done", "reused existing")
+                    status["summary"]["reused"] += 1
+                    continue
+                if dry_run:
+                    if "rules" in ch_name.lower():
+                        rules_channel = "(would create)"
+                    update_step(step_idx, "done", "would create")
+                    status["summary"]["created"] += 1
+                    continue
+                try:
+                    if ch_type == "text":
+                        new_ch = await guild.create_text_channel(
+                            ch_name, category=parent,
+                            reason="Set Up Server wizard",
+                        )
+                    else:
+                        new_ch = await guild.create_voice_channel(
+                            ch_name, category=parent,
+                            reason="Set Up Server wizard",
+                        )
+                    channel_results[ch_name] = new_ch
+                    if "rules" in ch_name.lower() and ch_type == "text":
+                        rules_channel = new_ch
+                    update_step(step_idx, "done", "created")
+                    status["summary"]["created"] += 1
+                except discord.Forbidden:
+                    update_step(step_idx, "error", "missing permission")
+                    status["summary"]["failed"] += 1
+                except Exception as e:
+                    update_step(step_idx, "error", str(e)[:100])
+                    status["summary"]["failed"] += 1
+
+        # ── Permission overwrites ────────────────────────────────────────
+        # Only applied to NEWLY-created channels by default. If a channel was
+        # reused (already existed), we leave its perms untouched to avoid
+        # breaking existing setups.
+        if not dry_run:
+            await self._apply_setup_permissions(
+                guild, plan, role_results, category_results, channel_results,
+                status, add_step, update_step,
+            )
+
+        # ── Rules post + Verify button ───────────────────────────────────
+        if plan["auto_post_rules"] or plan["verification_enabled"]:
+            step_idx = add_step("Post rules / verify button", "running")
+            if not rules_channel or isinstance(rules_channel, str):
+                update_step(step_idx, "skipped" if dry_run else "error",
+                           "rules channel not available" if not dry_run else "would post")
+            else:
+                if dry_run:
+                    update_step(step_idx, "done", "would post")
+                else:
+                    try:
+                        rules_msg = (
+                            server_setup.VERIFY_PROMPT_HEADER + "\n\n" +
+                            server_setup.DEFAULT_RULES_TEXT
+                        ) if plan["verification_enabled"] else server_setup.DEFAULT_RULES_TEXT
+
+                        view = None
+                        if plan["verification_enabled"]:
+                            member_role = role_results.get("member")
+                            if member_role:
+                                view = VerifyView(member_role.id)
+                                # Register as persistent so it survives restarts
+                                self.add_view(view)
+
+                        await rules_channel.send(rules_msg, view=view)
+                        update_step(step_idx, "done", "posted")
+                        status["summary"]["created"] += 1
+                    except discord.Forbidden:
+                        update_step(step_idx, "error", "missing permission")
+                        status["summary"]["failed"] += 1
+                    except Exception as e:
+                        update_step(step_idx, "error", str(e)[:100])
+                        status["summary"]["failed"] += 1
+
+        # ── Persist metadata ─────────────────────────────────────────────
+        if not dry_run:
+            try:
+                meta = {
+                    "template_id": plan["template_id"],
+                    "verification_enabled": plan["verification_enabled"],
+                    "vip_enabled": plan["vip_enabled"],
+                    "auto_post_rules": plan["auto_post_rules"],
+                    "role_ids": {k: r.id for k, r in role_results.items()},
+                    "category_ids": {k: c.id for k, c in category_results.items()},
+                    "rules_channel_id": rules_channel.id if rules_channel and not isinstance(rules_channel, str) else None,
+                }
+                self.db.save_server_setup(guild_id, meta)
+            except Exception as e:
+                logger.error(f"Failed to save server_setup metadata: {e}")
+
+        # Also save the color preference if set
+        color = config.get("color")
+        if color is not None and not dry_run:
+            try:
+                self.db.set_embed_color(guild_id, int(color))
+            except Exception as e:
+                logger.debug(f"Failed to save embed color: {e}")
+
+        finalize("done")
+
+    async def _apply_setup_permissions(self, guild, plan, role_results,
+                                        category_results, channel_results,
+                                        status, add_step, update_step):
+        """Apply permission overwrites based on the plan.
+
+        Verification mode: hide all channels from @everyone EXCEPT
+        welcome + rules. Member role gets view access on the hidden ones.
+
+        VIP: vip-chat / VIP VC only visible to vip, mod, admin, bot roles.
+        """
+        everyone = guild.default_role
+        member = role_results.get("member")
+        vip = role_results.get("vip")
+        moderator = role_results.get("moderator")
+        admin = role_results.get("admin")
+        bot_role = role_results.get("bot")
+
+        # ── Verification: hide most things from @everyone ────────────────
+        if plan["verification_enabled"] and member:
+            for cat_spec in plan["categories"]:
+                for ch_name, ch_type in cat_spec["channels"]:
+                    channel = channel_results.get(ch_name)
+                    if not channel:
+                        continue
+                    # Welcome and rules stay open to @everyone
+                    is_welcome_or_rules = (
+                        "welcome" in ch_name.lower() or "rules" in ch_name.lower()
+                    )
+                    if is_welcome_or_rules:
+                        continue
+                    step_idx = add_step(f"Hide {ch_name} from @everyone", "running")
+                    try:
+                        await channel.set_permissions(
+                            everyone, view_channel=False,
+                            reason="Set Up Server: verification",
+                        )
+                        await channel.set_permissions(
+                            member, view_channel=True,
+                            reason="Set Up Server: verified member access",
+                        )
+                        update_step(step_idx, "done")
+                    except discord.Forbidden:
+                        update_step(step_idx, "error", "missing permission")
+                        status["summary"]["failed"] += 1
+                    except Exception as e:
+                        update_step(step_idx, "error", str(e)[:100])
+                        status["summary"]["failed"] += 1
+
+        # ── VIP: lock VIP channels to vip/mod/admin/bot only ─────────────
+        if plan["vip_enabled"]:
+            vip_channel_names = set()
+            for cat_spec in plan["categories"]:
+                # Identify the VIP category (name contains "VIP")
+                if "VIP" in cat_spec["name"]:
+                    for ch_name, _ in cat_spec["channels"]:
+                        vip_channel_names.add(ch_name)
+            for ch_name in vip_channel_names:
+                channel = channel_results.get(ch_name)
+                if not channel:
+                    continue
+                step_idx = add_step(f"Lock {ch_name} to VIP+", "running")
+                try:
+                    await channel.set_permissions(everyone, view_channel=False)
+                    for role in (vip, moderator, admin, bot_role):
+                        if role:
+                            await channel.set_permissions(role, view_channel=True)
+                    update_step(step_idx, "done")
+                except discord.Forbidden:
+                    update_step(step_idx, "error", "missing permission")
+                    status["summary"]["failed"] += 1
+                except Exception as e:
+                    update_step(step_idx, "error", str(e)[:100])
+                    status["summary"]["failed"] += 1
 
     async def close(self):
         """Called when bot is shutting down cleanly."""
@@ -2085,6 +2460,67 @@ class VCLimitModal(discord.ui.Modal, title="Set User Limit"):
             await interaction.response.send_message(f"✅ Limit set to **{label}**", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ Failed: {e}", ephemeral=True)
+
+
+class VerifyView(discord.ui.View):
+    """Persistent verification button. Clicking it grants the member role
+    configured during setup. The role_id is encoded into the button's
+    `custom_id` so the view can survive bot restarts without needing
+    the original role lookup — we add_view(VerifyView(role_id)) for each
+    saved setup on startup.
+
+    The custom_id format is `setup_verify:{role_id}` so multiple guilds
+    can have their own verify buttons without colliding.
+    """
+
+    def __init__(self, role_id: int):
+        super().__init__(timeout=None)
+        self.role_id = role_id
+        # Set the button's custom_id dynamically so each guild's button
+        # is uniquely identifiable when discord.py routes the interaction.
+        btn = discord.ui.Button(
+            style=discord.ButtonStyle.success,
+            label="Verify",
+            emoji="✅",
+            custom_id=f"setup_verify:{role_id}",
+        )
+        btn.callback = self._verify_callback
+        self.add_item(btn)
+
+    async def _verify_callback(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "This button only works in a server.", ephemeral=True
+            )
+            return
+        role = interaction.guild.get_role(self.role_id)
+        if not role:
+            await interaction.response.send_message(
+                "Verification role no longer exists. Contact a server admin.",
+                ephemeral=True,
+            )
+            return
+        if role in interaction.user.roles:
+            await interaction.response.send_message(
+                f"You're already verified.", ephemeral=True
+            )
+            return
+        try:
+            await interaction.user.add_roles(role, reason="Self-verification")
+            await interaction.response.send_message(
+                f"✅ Verified! You now have access to the server.",
+                ephemeral=True,
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "I don't have permission to assign that role. The bot's role "
+                "must be ABOVE the member role in Server Settings → Roles.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"Verification failed: {e}", ephemeral=True
+            )
 
 
 class VCControlView(discord.ui.View):

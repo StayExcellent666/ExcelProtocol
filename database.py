@@ -279,6 +279,19 @@ class Database:
                 value TEXT
             )
         ''')
+
+        # Server template setup metadata. Stores what the Set Up Server wizard
+        # created/configured per guild so re-runs are idempotent and the
+        # persistent verify button view can be restored on bot startup.
+        # `data_json` holds the full metadata dict (role_ids, channel_ids,
+        # template choice, toggles) serialized as JSON for forward compat.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS server_setup (
+                guild_id   INTEGER PRIMARY KEY,
+                data_json  TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         cursor.execute("SELECT value FROM meta WHERE key = 'global_events_structural_v3'")
         if cursor.fetchone() is None:
             try:
@@ -1245,6 +1258,65 @@ class Database:
         
         return row[0] if row else None
     
+    def save_server_setup(self, guild_id: int, data: dict) -> None:
+        """Save Set Up Server wizard metadata for a guild.
+
+        `data` is a dict serialized to JSON. Stores template_id, toggles,
+        role_ids, category_ids, rules_channel_id. Used to (a) make re-runs
+        idempotent (reuse existing role/channel IDs instead of looking up
+        by name again) and (b) restore persistent VerifyView buttons on
+        bot startup.
+
+        Overwrites existing row for the guild (upsert).
+        """
+        import json
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO server_setup (guild_id, data_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                data_json = excluded.data_json,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (guild_id, json.dumps(data)))
+        conn.commit()
+        conn.close()
+
+    def get_server_setup(self, guild_id: int) -> dict:
+        """Return saved server setup metadata for a guild, or None if never set up."""
+        import json
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT data_json FROM server_setup WHERE guild_id = ?", (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0])
+        except json.JSONDecodeError:
+            logger.warning(f"Corrupt server_setup row for guild {guild_id}")
+            return None
+
+    def get_all_server_setups(self) -> list:
+        """Return list of saved setups. Used at startup to restore persistent
+        verification button views. Each dict includes guild_id."""
+        import json
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT guild_id, data_json FROM server_setup")
+        rows = cursor.fetchall()
+        conn.close()
+        out = []
+        for guild_id, data_json in rows:
+            try:
+                d = json.loads(data_json) if data_json else {}
+                d['guild_id'] = guild_id
+                out.append(d)
+            except json.JSONDecodeError:
+                continue
+        return out
+
     def set_embed_color(self, guild_id: int, color: int):
         """Set the embed color for a server (as hex integer)"""
         conn = self.get_connection()

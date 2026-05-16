@@ -3033,6 +3033,376 @@ function StreamEventsViewer() {
   );
 }
 
+// ── Set Up Server Wizard ──────────────────────────────────────────────────────
+function SetupWizardTab({ guildId, isDev }) {
+  const TEMPLATES = [
+    { id: "aesthetic",  label: "Aesthetic",  desc: "Curated channels with emoji prefixes for a polished, vibe-y feel." },
+    { id: "simplistic", label: "Simplistic", desc: "Bare minimum: welcome, rules, general, live notifications, and one voice channel." },
+    { id: "cluttered",  label: "Cluttered",  desc: "Everything-and-the-kitchen-sink: lots of channels organized by topic." },
+  ];
+  const ROLE_FIELDS = [
+    { key: "member",    label: "Member role" },
+    { key: "vip",       label: "VIP role" },
+    { key: "moderator", label: "Moderator role" },
+    { key: "admin",     label: "Admin role" },
+    { key: "bot",       label: "Bot role" },
+  ];
+
+  const [step, setStep] = useState(0);
+  const [config, setConfig] = useState({
+    template: "simplistic",
+    enable_verification: false,
+    enable_vip: false,
+    auto_post_rules: true,
+    role_names: {},
+    color: 0x00F5D4,
+  });
+  const [preview, setPreview] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState(null);
+  const [setupId, setSetupId] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [applyError, setApplyError] = useState(null);
+
+  // Poll status when we have a setup_id in flight
+  useEffect(() => {
+    if (!setupId) return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const data = await apiFetch(`/api/guild/${guildId}/setup/status/${setupId}`);
+        if (!active) return;
+        setStatus(data);
+        if (data.status === "done" || data.status === "error") return;
+        setTimeout(poll, 500);
+      } catch (e) {
+        if (!active) return;
+        setApplyError(e.message || String(e));
+      }
+    };
+    poll();
+    return () => { active = false; };
+  }, [setupId, guildId]);
+
+  const fetchPreview = useCallback(async () => {
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const data = await apiFetch(`/api/guild/${guildId}/setup/preview`, {
+        method: "POST",
+        body: JSON.stringify(config),
+      });
+      setPreview(data);
+    } catch (e) {
+      setPreviewError(e.message || String(e));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [guildId, config]);
+
+  const startApply = async (dry) => {
+    setApplyError(null);
+    setStatus(null);
+    setSetupId(null);
+    try {
+      const data = await apiFetch(`/api/guild/${guildId}/setup/apply`, {
+        method: "POST",
+        body: JSON.stringify({ config, dry_run: dry }),
+      });
+      setSetupId(data.setup_id);
+    } catch (e) {
+      setApplyError(e.message || String(e));
+    }
+  };
+
+  // Auto-fetch preview when we hit the review step
+  useEffect(() => {
+    if (step === 3 && !preview) fetchPreview();
+  }, [step, preview, fetchPreview]);
+
+  // Helpers
+  const stepDot = (i) => (
+    <div style={{
+      width:8, height:8, borderRadius:"50%",
+      background: step === i ? "var(--cyan)" : (step > i ? "var(--green)" : "var(--text3)"),
+      transition: "background 0.2s",
+    }} />
+  );
+
+  const NavButtons = ({ canNext = true, nextLabel = "Next →" }) => (
+    <div style={{ display:"flex", justifyContent:"space-between", marginTop:20 }}>
+      <button onClick={() => setStep(s => Math.max(0, s - 1))} disabled={step === 0}
+        style={{ ...C.btnSecondary, fontSize:13, opacity: step === 0 ? 0.4 : 1 }}>
+        ← Back
+      </button>
+      <button onClick={() => setStep(s => s + 1)} disabled={!canNext}
+        style={{ ...C.btnPrimary, fontSize:13, opacity: canNext ? 1 : 0.4 }}>
+        {nextLabel}
+      </button>
+    </div>
+  );
+
+  return (
+    <div>
+      <PageHeader title="Set Up Server" subtitle="Walk through a guided template setup for this server" />
+
+      {/* Step indicator */}
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:24 }}>
+        {["Template", "Roles", "Modules", "Review", "Apply"].map((lbl, i) => (
+          <React.Fragment key={lbl}>
+            {stepDot(i)}
+            <div style={{ fontSize:12, color: step === i ? "var(--cyan)" : "var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>{lbl}</div>
+            {i < 4 && <div style={{ flex:"0 0 24px", height:1, background:"var(--border)" }} />}
+          </React.Fragment>
+        ))}
+      </div>
+
+      <div style={C.card}>
+        {step === 0 && (
+          <div>
+            <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:16, fontWeight:800, marginBottom:6 }}>Pick a template</div>
+            <div style={{ fontSize:12, color:"var(--text3)", marginBottom:18 }}>Each one creates a different number of channels. You can change toggles in the next steps.</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              {TEMPLATES.map(t => (
+                <button key={t.id}
+                  onClick={() => setConfig(c => ({ ...c, template: t.id }))}
+                  style={{
+                    background: config.template === t.id ? "rgba(0,245,212,0.08)" : "var(--bg2)",
+                    border: `1px solid ${config.template === t.id ? "var(--cyan)" : "var(--border)"}`,
+                    borderRadius:8,
+                    padding:"14px 16px",
+                    cursor:"pointer",
+                    textAlign:"left",
+                    color:"var(--text)",
+                  }}>
+                  <div style={{ fontWeight:700, fontSize:14, fontFamily:"'Outfit',sans-serif", marginBottom:4 }}>
+                    {config.template === t.id && "✓ "}{t.label}
+                  </div>
+                  <div style={{ fontSize:12, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>{t.desc}</div>
+                </button>
+              ))}
+            </div>
+            <NavButtons />
+          </div>
+        )}
+
+        {step === 1 && (
+          <div>
+            <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:16, fontWeight:800, marginBottom:6 }}>Role names</div>
+            <div style={{ fontSize:12, color:"var(--text3)", marginBottom:18 }}>Leave blank to use the default ALL-CAPS names. These roles will be created if they don't already exist.</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+              {ROLE_FIELDS.map(f => (
+                <div key={f.key} style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <div style={{ width:120, fontSize:13, color:"var(--text2)", fontFamily:"'Outfit',sans-serif" }}>{f.label}</div>
+                  <CyanInput
+                    type="text"
+                    placeholder={f.key.toUpperCase()}
+                    value={config.role_names[f.key] || ""}
+                    onChange={(e) => setConfig(c => ({ ...c, role_names: { ...c.role_names, [f.key]: e.target.value } }))}
+                    style={{ flex:1 }}
+                  />
+                </div>
+              ))}
+            </div>
+            <NavButtons />
+          </div>
+        )}
+
+        {step === 2 && (
+          <div>
+            <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:16, fontWeight:800, marginBottom:6 }}>Modules & options</div>
+            <div style={{ fontSize:12, color:"var(--text3)", marginBottom:18 }}>Pick which optional features to enable.</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+              <ToggleRow
+                label="Enable Verification"
+                desc="Hide all channels except welcome and rules from new joiners. They click a Verify button to gain access."
+                value={config.enable_verification}
+                onChange={(v) => setConfig(c => ({ ...c, enable_verification: v }))}
+              />
+              <ToggleRow
+                label="VIP module"
+                desc="Adds a VIP category with vip-chat and VIP VC, locked to VIP role and staff."
+                value={config.enable_vip}
+                onChange={(v) => setConfig(c => ({ ...c, enable_vip: v }))}
+              />
+              <ToggleRow
+                label="Auto-post rules"
+                desc="Bot posts a generic rules message in the rules channel."
+                value={config.auto_post_rules}
+                onChange={(v) => setConfig(c => ({ ...c, auto_post_rules: v }))}
+              />
+              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                <div style={{ width:140, fontSize:13, color:"var(--text2)", fontFamily:"'Outfit',sans-serif" }}>Theme color</div>
+                <input type="color"
+                  value={"#" + (config.color || 0).toString(16).padStart(6, "0")}
+                  onChange={(e) => setConfig(c => ({ ...c, color: parseInt(e.target.value.replace("#", ""), 16) }))}
+                  style={{ width:60, height:32, border:"1px solid var(--border)", borderRadius:6, background:"var(--bg2)", cursor:"pointer" }} />
+                <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>Applied to bot embed messages</div>
+              </div>
+            </div>
+            <NavButtons />
+          </div>
+        )}
+
+        {step === 3 && (
+          <div>
+            <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:16, fontWeight:800, marginBottom:6 }}>Review</div>
+            <div style={{ fontSize:12, color:"var(--text3)", marginBottom:18 }}>Here's what will be created. Existing roles/channels with matching names will be reused.</div>
+
+            {previewLoading && <div style={{ color:"var(--cyan)" }}>Loading preview…</div>}
+            {previewError && <div style={{ color:"var(--red)", marginBottom:12 }}>Preview error: {previewError}</div>}
+
+            {preview && (
+              <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+                {preview.missing_permissions?.length > 0 && (
+                  <div style={{ background:"rgba(255,107,53,0.08)", border:"1px solid var(--yellow)", borderRadius:8, padding:12 }}>
+                    <div style={{ color:"var(--yellow)", fontWeight:700, fontSize:13, marginBottom:6 }}>⚠️ Missing bot permissions</div>
+                    <div style={{ fontSize:12, fontFamily:"'JetBrains Mono',monospace", color:"var(--text2)" }}>
+                      The bot needs: {preview.missing_permissions.join(", ")}. Grant these in Server Settings → Roles before applying.
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:10 }}>
+                  <Stat label="Roles" value={preview.counts?.roles} />
+                  <Stat label="Categories" value={preview.counts?.categories} />
+                  <Stat label="Text channels" value={preview.counts?.text_channels} />
+                  <Stat label="Voice channels" value={preview.counts?.voice_channels} />
+                </div>
+
+                {preview.would_reuse?.roles?.length > 0 && (
+                  <div style={{ fontSize:12, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                    Will reuse existing roles: {preview.would_reuse.roles.join(", ")}
+                  </div>
+                )}
+                {preview.would_reuse?.categories?.length > 0 && (
+                  <div style={{ fontSize:12, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                    Will reuse existing categories: {preview.would_reuse.categories.join(", ")}
+                  </div>
+                )}
+
+                <div style={{ borderTop:"1px solid var(--border)", paddingTop:10 }}>
+                  <div style={{ fontSize:13, fontWeight:600, marginBottom:8 }}>Structure</div>
+                  {preview.categories?.map(cat => (
+                    <div key={cat.name} style={{ marginBottom:8, fontSize:12, fontFamily:"'JetBrains Mono',monospace" }}>
+                      <div style={{ color:"var(--cyan)", marginBottom:2 }}>{cat.name}</div>
+                      {cat.channels.map(([name, type]) => (
+                        <div key={name} style={{ color:"var(--text3)", marginLeft:12 }}>
+                          {type === "voice" ? "🔊" : "#"} {name}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <NavButtons canNext={!!preview && !previewError} nextLabel="Apply →" />
+          </div>
+        )}
+
+        {step === 4 && (
+          <div>
+            <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:16, fontWeight:800, marginBottom:6 }}>Apply</div>
+            <div style={{ fontSize:12, color:"var(--text3)", marginBottom:18 }}>Run a dry-run first to validate, then apply for real.</div>
+
+            <div style={{ display:"flex", gap:10, marginBottom:18 }}>
+              <button onClick={() => startApply(true)} disabled={status?.status === "running"}
+                style={{ ...C.btnSecondary, fontSize:13 }}>Dry run</button>
+              <button onClick={() => startApply(false)} disabled={status?.status === "running"}
+                style={{ ...C.btnPrimary, fontSize:13 }}>Apply for real</button>
+            </div>
+
+            {applyError && <div style={{ color:"var(--red)", marginBottom:12 }}>Error: {applyError}</div>}
+
+            {status && (
+              <div>
+                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:12 }}>
+                  <div style={{
+                    fontSize:13, fontWeight:700,
+                    color: status.status === "done" ? "var(--green)" :
+                           status.status === "error" ? "var(--red)" :
+                           status.status === "running" ? "var(--cyan)" : "var(--text3)",
+                  }}>
+                    {status.status?.toUpperCase()}{status.dry_run ? " (DRY RUN)" : ""}
+                  </div>
+                  {status.summary && (
+                    <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                      created: {status.summary.created} · reused: {status.summary.reused} · failed: {status.summary.failed}
+                    </div>
+                  )}
+                </div>
+
+                {status.error && <div style={{ color:"var(--red)", marginBottom:12, fontFamily:"'JetBrains Mono',monospace", fontSize:12 }}>{status.error}</div>}
+
+                <div style={{ maxHeight:340, overflowY:"auto", border:"1px solid var(--border)", borderRadius:8, padding:"8px 12px", fontFamily:"'JetBrains Mono',monospace", fontSize:11 }}>
+                  {status.steps?.map((s, i) => (
+                    <div key={i} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"3px 0", borderBottom: i === status.steps.length - 1 ? "none" : "1px solid var(--border)" }}>
+                      <span style={{ color:"var(--text2)" }}>{s.label}</span>
+                      <span style={{
+                        color: s.status === "done" ? "var(--green)" :
+                               s.status === "error" ? "var(--red)" :
+                               s.status === "running" ? "var(--cyan)" : "var(--text3)",
+                      }}>
+                        {s.status}{s.detail ? ` · ${s.detail}` : ""}
+                      </span>
+                    </div>
+                  ))}
+                  {(!status.steps || status.steps.length === 0) && (
+                    <div style={{ color:"var(--text3)", padding:"6px 0" }}>Waiting for bot…</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display:"flex", justifyContent:"space-between", marginTop:20 }}>
+              <button onClick={() => setStep(s => Math.max(0, s - 1))}
+                style={{ ...C.btnSecondary, fontSize:13 }}>← Back</button>
+              <div />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ToggleRow({ label, desc, value, onChange }) {
+  return (
+    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, padding:"8px 0" }}>
+      <div style={{ flex:1 }}>
+        <div style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", fontWeight:600 }}>{label}</div>
+        <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>{desc}</div>
+      </div>
+      <button onClick={() => onChange(!value)}
+        style={{
+          width:46, height:24, borderRadius:12,
+          background: value ? "var(--cyan)" : "var(--bg3)",
+          border: "1px solid var(--border)",
+          position:"relative", cursor:"pointer",
+          transition:"background 0.2s",
+        }}>
+        <div style={{
+          position:"absolute", top:2,
+          left: value ? 24 : 2,
+          width:18, height:18, borderRadius:"50%",
+          background: "white",
+          transition:"left 0.2s",
+        }} />
+      </button>
+    </div>
+  );
+}
+
+function Stat({ label, value }) {
+  return (
+    <div style={{ ...C.card, padding:"10px 12px", textAlign:"center" }}>
+      <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", textTransform:"uppercase" }}>{label}</div>
+      <div style={{ fontSize:18, color:"var(--cyan)", fontFamily:"'Orbitron',sans-serif", fontWeight:800, marginTop:4 }}>{value ?? "—"}</div>
+    </div>
+  );
+}
+
 // ── Dev: DB Tools Tab ─────────────────────────────────────────────────────────
 function DbToolsTab() {
   const [status, setStatus] = useState(null);
@@ -3293,6 +3663,7 @@ export default function App() {
   const guild = guilds.find(g=>g.id===activeGuild)||guilds[0]||{ id:"", name:"..." };
   const topTabs = [
     { id:"settings",    icon:"⚙️", label:"Server Settings" },
+    { id:"setupwizard", icon:"🪄", label:"Set Up Server"   },
     { id:"statstab",    icon:"📊", label:"Server Stats"     },
     { id:"streamers",   icon:"📺", label:"Streams"          },
     { id:"roles",       icon:"🎭", label:"Reaction Roles"   },
@@ -3422,6 +3793,7 @@ export default function App() {
           {!activeGuild ? <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div> : (
             <>
               {activeTab==="settings"    && <ServerSettingsTab guildId={activeGuild} />}
+              {activeTab==="setupwizard" && <SetupWizardTab    guildId={activeGuild} isDev={effectivelyDev} />}
               {activeTab==="statstab"    && <ServerStatsTab    guildId={activeGuild} />}
               {activeTab==="streamers"   && <StreamersTab guildId={activeGuild} isDev={effectivelyDev} />}
               {activeTab==="roles"       && <ReactionRolesTab guildId={activeGuild} />}
