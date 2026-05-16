@@ -60,6 +60,12 @@ class TwitchNotifierBot(discord.Client):
         # the dashboard observability widget.
         self._recent_orphan_closures: list = []
 
+        # Count of duplicate EventSub subscriptions deleted on the last sync.
+        # Surfaced in the Bot Started log message so duplicate-subscription
+        # incidents are visible (SBmel had 4 instead of 2, double-firing every
+        # online/offline). Reset to 0 each sync.
+        self._last_pruned_subscriptions: int = 0
+
         # Track bot start time for uptime calculation
         self.start_time = utcnow()
         
@@ -361,6 +367,14 @@ class TwitchNotifierBot(discord.Client):
                 f"absorbed {rc.get('absorb',0)} · cleaned up {rc.get('cleanup',0)}"
             )
 
+        # Duplicate-subscription prune summary — only show if dupes were found
+        pruned_line = ""
+        if self._last_pruned_subscriptions > 0:
+            pruned_line = (
+                f"\n**Pruned:** {self._last_pruned_subscriptions} "
+                f"duplicate EventSub subscription(s)"
+            )
+
         message_lines = [
             f"ExcelProtocol is online.",
             f"**Servers:** {guild_count}",
@@ -373,7 +387,7 @@ class TwitchNotifierBot(discord.Client):
 
         await self.log_to_channel(
             "🤖", "Bot Started",
-            "\n".join(message_lines) + reconcile_line,
+            "\n".join(message_lines) + reconcile_line + pruned_line,
             color=0x00CC66
         )
 
@@ -755,6 +769,57 @@ class TwitchNotifierBot(discord.Client):
 
         # Get existing subscriptions so we don't double-register
         existing = await self.twitch.get_subscriptions()
+
+        # ── Prune duplicate subscriptions ───────────────────────────────────
+        # Twitch can end up with multiple subs for the same (user_id, type)
+        # if two sync calls ever raced before the `_eventsub_syncing` lock
+        # existed. The set-based lookup below masks the duplicates (it dedups
+        # via `(type, uid)`) so sync stops creating MORE, but it never deletes
+        # the existing extras. Result: every webhook event for that user gets
+        # delivered N times with N different msg_ids → bypasses dedup → N
+        # notifications and N global_stream_events rows.
+        #
+        # SBmel had 2x online + 2x offline subs. This pass finds any
+        # (user_id, type) that has more than one sub, keeps the oldest, and
+        # deletes the rest. Idempotent — re-running is safe.
+        subs_by_key: dict = {}
+        for sub in existing:
+            if sub.get("type") not in ("stream.online", "stream.offline"):
+                continue
+            uid = sub.get("condition", {}).get("broadcaster_user_id", "")
+            if not uid:
+                continue
+            subs_by_key.setdefault((sub["type"], uid), []).append(sub)
+
+        pruned_count = 0
+        pruned_examples = []
+        for key, subs in subs_by_key.items():
+            if len(subs) <= 1:
+                continue
+            # Sort oldest-first so we keep the original
+            subs.sort(key=lambda s: s.get("created_at", ""))
+            keep = subs[0]
+            for dupe in subs[1:]:
+                try:
+                    ok = await self.twitch.delete_subscription(dupe["id"])
+                    if ok:
+                        pruned_count += 1
+                        if len(pruned_examples) < 5:
+                            pruned_examples.append(f"{key[0]} for {key[1]}")
+                    else:
+                        logger.warning(f"Failed to delete duplicate EventSub sub {dupe['id']}")
+                except Exception as e:
+                    logger.error(f"Error deleting duplicate sub {dupe.get('id')}: {e}")
+
+        if pruned_count > 0:
+            logger.warning(
+                f"Pruned {pruned_count} duplicate EventSub subscription(s). "
+                f"Examples: {pruned_examples}"
+            )
+            # Re-fetch the now-canonical subscription list
+            existing = await self.twitch.get_subscriptions()
+        self._last_pruned_subscriptions = pruned_count
+
         existing_keys = set()
         for sub in existing:
             if sub.get("type") in ("stream.online", "stream.offline"):
