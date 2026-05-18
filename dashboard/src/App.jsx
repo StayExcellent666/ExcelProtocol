@@ -1069,6 +1069,169 @@ function ServerStatsTab({ guildId }) {
   );
 }
 
+function SafetyTab({ guildId }) {
+  const [settings, setSettings] = useState(null);
+  const [kicks, setKicks]       = useState([]);
+  const [roles, setRoles]       = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [saving, setSaving]     = useState(false);
+  const [form, setForm] = useState({
+    enabled: false, min_account_age_days: 7, check_username_pattern: true,
+    check_no_avatar: true, action: "kick", bypass_role_id: "", dm_on_kick: true,
+  });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [s, k, rl] = await Promise.all([
+        apiFetch(`/api/guild/${guildId}/safety-settings`),
+        apiFetch(`/api/guild/${guildId}/safety-kicks`),
+        apiFetch(`/api/guild/${guildId}/roles`),
+      ]);
+      setSettings(s);
+      setKicks(k);
+      setRoles(rl || []);
+      setForm({
+        enabled: s.enabled || false,
+        min_account_age_days: s.min_account_age_days ?? 7,
+        check_username_pattern: s.check_username_pattern ?? true,
+        check_no_avatar: s.check_no_avatar ?? true,
+        action: s.action || "kick",
+        bypass_role_id: s.bypass_role_id || "",
+        dm_on_kick: s.dm_on_kick ?? true,
+      });
+    } catch(e) { console.error(e); }
+    setLoading(false);
+  }, [guildId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await apiFetch(`/api/guild/${guildId}/safety-settings`, {
+        method: "POST",
+        body: JSON.stringify({
+          ...form,
+          bypass_role_id: form.bypass_role_id || null,
+        }),
+      });
+      await load();
+    } catch(e) { alert("Failed: " + e.message); }
+    setSaving(false);
+  };
+
+  const Toggle = ({ value, onChange }) => (
+    <button onClick={() => onChange(!value)}
+      style={{ width:44, height:24, borderRadius:12, border:"none", cursor:"pointer",
+        background: value ? "var(--cyan)" : "var(--border2)", position:"relative",
+        transition:"background 0.2s", flexShrink:0,
+        boxShadow: value ? "0 0 10px rgba(0,245,212,0.4)" : "none" }}>
+      <div style={{ position:"absolute", top:3, left: value ? 22 : 3, width:18, height:18,
+        borderRadius:"50%", background:"#fff", transition:"left 0.2s" }} />
+    </button>
+  );
+
+  if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
+
+  return (
+    <div>
+      <PageHeader title="Safety" subtitle="Protect your server from bot accounts and DM spammers" />
+
+      {/* ── New Account Filter ── */}
+      <div style={{ ...C.card, marginBottom:16 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:18 }}>
+          {sectionHead("New Account Filter", "Auto-kick or ban suspicious new members")}
+          <Toggle value={form.enabled} onChange={v => setForm(p => ({ ...p, enabled: v }))} />
+        </div>
+
+        <div style={{ display:"flex", flexDirection:"column", gap:14, opacity: form.enabled ? 1 : 0.5, pointerEvents: form.enabled ? "auto" : "none" }}>
+
+          <Field label="Minimum Account Age (days)">
+            <CyanInput type="number" min={1} max={365} value={form.min_account_age_days}
+              onChange={e => setForm(p => ({ ...p, min_account_age_days: parseInt(e.target.value) || 7 }))} />
+            <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"'JetBrains Mono',monospace" }}>
+              Accounts newer than this will be flagged
+            </div>
+          </Field>
+
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid var(--border)" }}>
+            <div>
+              <div style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", fontWeight:500 }}>Flag suspicious username patterns</div>
+              <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>e.g. playful_hare_06276</div>
+            </div>
+            <Toggle value={form.check_username_pattern} onChange={v => setForm(p => ({ ...p, check_username_pattern: v }))} />
+          </div>
+
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid var(--border)" }}>
+            <div>
+              <div style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", fontWeight:500 }}>Flag accounts with no profile picture</div>
+              <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>Default Discord avatar</div>
+            </div>
+            <Toggle value={form.check_no_avatar} onChange={v => setForm(p => ({ ...p, check_no_avatar: v }))} />
+          </div>
+
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid var(--border)" }}>
+            <div>
+              <div style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", fontWeight:500 }}>DM user on kick/ban</div>
+              <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>Tell them why and how to rejoin</div>
+            </div>
+            <Toggle value={form.dm_on_kick} onChange={v => setForm(p => ({ ...p, dm_on_kick: v }))} />
+          </div>
+
+          <Field label="Action">
+            <CyanSelect value={form.action} onChange={e => setForm(p => ({ ...p, action: e.target.value }))}>
+              <option value="kick">Kick (can rejoin later)</option>
+              <option value="ban">Ban (permanent)</option>
+            </CyanSelect>
+          </Field>
+
+          <Field label="Bypass Role (optional)">
+            <CyanSelect value={form.bypass_role_id} onChange={e => setForm(p => ({ ...p, bypass_role_id: e.target.value }))}>
+              <option value="">None</option>
+              {roles.map(r => <option key={r.id} value={r.id}>@{r.name}</option>)}
+            </CyanSelect>
+          </Field>
+        </div>
+
+        <div style={{ marginTop:18, display:"flex", justifyContent:"flex-end" }}>
+          <button onClick={save} disabled={saving} style={{ ...C.btnPrimary, opacity: saving ? 0.6 : 1 }}>
+            {saving ? "Saving..." : "Save Settings"}
+          </button>
+        </div>
+      </div>
+
+      {/* ── Kick Log ── */}
+      <div style={{ ...C.card }}>
+        {sectionHead("Action Log", `Last 7 days — ${kicks.length} action${kicks.length !== 1 ? "s" : ""}`)}
+        {kicks.length === 0 ? (
+          <div style={{ textAlign:"center", padding:"32px 0", color:"var(--text3)" }}>
+            <div style={{ fontSize:28, marginBottom:8 }}>✅</div>
+            <div style={{ fontSize:13, fontFamily:"'Outfit',sans-serif" }}>No kicks or bans recorded yet</div>
+          </div>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            {kicks.map((k, i) => (
+              <div key={i} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:8, background:"rgba(8,11,15,0.6)", border:"1px solid var(--border)" }}>
+                <div style={{ fontSize:18 }}>{k.action === "ban" ? "🔨" : "👢"}</div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:13, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>{k.username}</div>
+                  <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{k.reason}</div>
+                </div>
+                <div style={{ textAlign:"right", flexShrink:0 }}>
+                  <div style={{ fontSize:11, color: k.action === "ban" ? "var(--red)" : "var(--yellow)", fontFamily:"'JetBrains Mono',monospace", fontWeight:600 }}>{k.action.toUpperCase()}</div>
+                  <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>{timeAgo(k.kicked_at)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 // ── Notif Log Tab ─────────────────────────────────────────────────────────────
 function NotifLogTab({ guildId }) {
   const [log, setLog] = useState([]);
