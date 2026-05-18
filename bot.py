@@ -582,6 +582,18 @@ class TwitchNotifierBot(discord.Client):
         bot_top_role = bot_member.top_role
         target_position = max(bot_top_role.position - 1, 1)
 
+        # Compute the bot's effective guild permissions. Discord requires
+        # the granter (this bot) to HAVE a permission in order to grant it
+        # to another role. Any flag we request that the bot lacks will
+        # cause Discord to reject the whole create_role with 403 Forbidden.
+        # So we filter the wizard's intended perm list against this set,
+        # creating each role with as much as the bot can actually grant
+        # and recording the dropped flags for the post-run note.
+        bot_perms = bot_member.guild_permissions
+        # Track which flags were dropped per role so the post-run summary
+        # can tell the owner exactly what to manually toggle.
+        dropped_perms_by_role: dict = {}
+
         for key in server_setup.ROLE_HIERARCHY:
             name = plan["role_names"][key]
             step_idx = add_step(f"Role: {name}", "running")
@@ -590,45 +602,67 @@ class TwitchNotifierBot(discord.Client):
                 role_results[key] = existing
                 update_step(step_idx, "done", "reused existing (perms unchanged)")
                 status["summary"]["reused"] += 1
-            else:
-                if dry_run:
-                    n_perms = len(server_setup.ROLE_PERMISSIONS.get(key, []))
-                    update_step(step_idx, "done", f"would create ({n_perms} perm flags)")
-                    status["summary"]["created"] += 1
-                    continue
-                try:
-                    # Build the permission set for this role from server_setup
-                    # config. The bot's own role must be HIGHER than the role
-                    # being created or Discord rejects high-perm creates. We
-                    # check that admin's `administrator` flag will work by
-                    # confirming the bot itself has administrator OR the role
-                    # being created isn't asking for perms higher than the
-                    # bot has. discord.py raises Forbidden if it would.
-                    perms = server_setup.build_permissions(key)
-                    new_role = await guild.create_role(
-                        name=name,
-                        permissions=perms,
-                        reason=f"Set Up Server wizard ({plan['template_id']})",
-                    )
-                    # Position just below the bot's role
+                continue
+
+            requested = server_setup.ROLE_PERMISSIONS.get(key, [])
+            # Filter to flags the bot itself has. Missing voice perms etc
+            # just get silently dropped; surfaced in dropped_perms_by_role.
+            grantable = []
+            dropped = []
+            for flag in requested:
+                if getattr(bot_perms, flag, False):
+                    grantable.append(flag)
+                else:
+                    dropped.append(flag)
+            if dropped:
+                dropped_perms_by_role[key] = {
+                    "role_name": name,
+                    "dropped": dropped,
+                }
+
+            if dry_run:
+                detail = f"would create ({len(grantable)} grantable"
+                if dropped:
+                    detail += f", {len(dropped)} dropped"
+                detail += " flags)"
+                update_step(step_idx, "done", detail)
+                status["summary"]["created"] += 1
+                continue
+
+            try:
+                # Build Permissions object from just the grantable flags
+                perms = discord.Permissions()
+                for flag in grantable:
                     try:
-                        await new_role.edit(position=target_position)
-                    except Exception as _e:
-                        logger.debug(f"Could not reposition role {name}: {_e}")
-                    role_results[key] = new_role
-                    n_perms = len(server_setup.ROLE_PERMISSIONS.get(key, []))
-                    update_step(step_idx, "done", f"created with {n_perms} perm flags")
-                    status["summary"]["created"] += 1
-                except discord.Forbidden as e:
-                    # Most likely: bot's role is below the position it's
-                    # trying to manage, OR missing Manage Roles. The pre-flight
-                    # check covers Manage Roles, so this is usually hierarchy.
-                    detail = "missing permission (bot role may be too low in hierarchy)"
-                    update_step(step_idx, "error", detail)
-                    status["summary"]["failed"] += 1
-                except Exception as e:
-                    update_step(step_idx, "error", str(e)[:100])
-                    status["summary"]["failed"] += 1
+                        setattr(perms, flag, True)
+                    except (AttributeError, TypeError):
+                        pass
+
+                new_role = await guild.create_role(
+                    name=name,
+                    permissions=perms,
+                    reason=f"Set Up Server wizard ({plan['template_id']})",
+                )
+                # Position just below the bot's role
+                try:
+                    await new_role.edit(position=target_position)
+                except Exception as _e:
+                    logger.debug(f"Could not reposition role {name}: {_e}")
+                role_results[key] = new_role
+                detail = f"created with {len(grantable)} perm flags"
+                if dropped:
+                    detail += f" ({len(dropped)} dropped — bot lacks them)"
+                update_step(step_idx, "done", detail)
+                status["summary"]["created"] += 1
+            except discord.Forbidden:
+                # We already filtered perms to grantable ones, so a Forbidden
+                # here is almost certainly hierarchy (bot role position).
+                detail = "forbidden (bot role hierarchy too low?)"
+                update_step(step_idx, "error", detail)
+                status["summary"]["failed"] += 1
+            except Exception as e:
+                update_step(step_idx, "error", str(e)[:100])
+                status["summary"]["failed"] += 1
 
         # ── Categories ───────────────────────────────────────────────────
         category_results: dict = {}  # name -> discord.CategoryChannel
@@ -793,19 +827,37 @@ class TwitchNotifierBot(discord.Client):
         # to do AFTER the wizard finishes. The dashboard renders these in
         # the Apply step's success banner.
         notes = []
+
+        # Admin role administrator note (always applies when admin was created)
         admin_role = role_results.get("admin")
         admin_name = plan["role_names"].get("admin", "ADMIN")
         if admin_role and not dry_run:
-            # The wizard never grants `administrator` (see server_setup.py
-            # for rationale). The admin role has every other management
-            # perm explicitly. Remind the owner to flip Administrator on
-            # if they want full unrestricted access.
             notes.append(
-                f"⚠️ The `{admin_name}` role was created WITHOUT the "
-                f"`Administrator` flag (the bot can't grant it). Manually "
-                f"enable Administrator on this role in Server Settings → "
-                f"Roles → {admin_name} if you want full admin access."
+                f"⚠️ Enable the `Administrator` permission on the `{admin_name}` "
+                f"role manually: Server Settings → Roles → {admin_name} → toggle "
+                f"`Administrator` on. The bot can't grant this flag because it "
+                f"doesn't have it itself."
             )
+
+        # Per-role dropped-perms breakdown
+        if dropped_perms_by_role and not dry_run:
+            lines = ["📋 Some role permissions couldn't be granted (the bot's "
+                     "own role doesn't have them). Manually enable these in "
+                     "Server Settings → Roles:"]
+            # Use ROLE_HIERARCHY order for stable display
+            for key in server_setup.ROLE_HIERARCHY:
+                info = dropped_perms_by_role.get(key)
+                if not info:
+                    continue
+                role_name = info["role_name"]
+                dropped_list = info["dropped"]
+                # Pretty-format flag names (manage_messages → Manage Messages)
+                pretty = ", ".join(
+                    f.replace("_", " ").title() for f in dropped_list
+                )
+                lines.append(f"• `{role_name}`: {pretty}")
+            notes.append("\n".join(lines))
+
         if plan["verification_enabled"]:
             notes.append(
                 "🔒 Verification is enabled. New members will only see "
@@ -821,10 +873,26 @@ class TwitchNotifierBot(discord.Client):
                                         status, add_step, update_step):
         """Apply permission overwrites based on the plan.
 
-        Verification mode: hide all channels from @everyone EXCEPT
-        welcome + rules. Member role gets view access on the hidden ones.
+        Always (regardless of verification toggle):
+          - welcome and rules channels are LOCKED read-only for @everyone:
+            view + read history allowed, but send_messages and add_reactions
+            denied. Staff (mod/admin) and the bot keep write access so
+            they can update rules / post the verify button.
 
-        VIP: vip-chat / VIP VC only visible to vip, mod, admin, bot roles.
+        Verification ON (only when the toggle is enabled):
+          - Every wizard-created channel (except welcome + rules) gets
+            an @everyone overwrite denying view_channel
+          - The member role gets an explicit view_channel allow on those
+            same channels, so verified members see them normally
+
+        Verification OFF:
+          - Non-welcome-non-rules channels are left at their natural
+            permissions (every role with view_channel can see them).
+            Members of the server can talk and react normally.
+
+        VIP module (regardless of verification):
+          - vip-chat and VIP VC: @everyone view denied, vip/mod/admin/bot
+            allowed.
         """
         everyone = guild.default_role
         member = role_results.get("member")
@@ -833,30 +901,28 @@ class TwitchNotifierBot(discord.Client):
         admin = role_results.get("admin")
         bot_role = role_results.get("bot")
 
-        # ── Lock rules channel read-only ──────────────────────────────────
-        # Rules should be read-only for everyone except staff. We deny
-        # send_messages + add_reactions at @everyone level so it cascades
-        # to every role including Member/VIP. Staff roles get explicit
-        # ALLOWs to override the deny.
-        #
-        # Applied regardless of the verification toggle — rules being
-        # writable defeats the purpose of having rules.
-        #
-        # Welcome channels are intentionally NOT locked — welcomes often
-        # involve a "say hi!" interaction where new members post.
-        rules_channels = []
+        # Helper: detect welcome/rules text channels in the plan
+        def _is_welcome_or_rules(ch_name: str) -> bool:
+            n = ch_name.lower()
+            return "welcome" in n or "rules" in n
+
+        # ── Lock welcome + rules channels read-only ───────────────────────
+        # Both should be readable but not writable by ordinary members.
+        # Applied regardless of verification toggle — letting members spam
+        # rules/welcome defeats the purpose of having those channels.
+        readonly_channels = []
         for cat_spec in plan["categories"]:
             for ch_name, ch_type in cat_spec["channels"]:
                 if ch_type != "text":
                     continue
-                if "rules" not in ch_name.lower():
+                if not _is_welcome_or_rules(ch_name):
                     continue
                 ch = channel_results.get(ch_name)
                 if ch:
-                    rules_channels.append((ch_name, ch))
+                    readonly_channels.append((ch_name, ch))
 
-        for ch_name, channel in rules_channels:
-            step_idx = add_step(f"Lock {ch_name} (read-only for non-staff)", "running")
+        for ch_name, channel in readonly_channels:
+            step_idx = add_step(f"Lock {ch_name} (read-only for members)", "running")
             try:
                 # @everyone: can view + read history but not send or react
                 await channel.set_permissions(
@@ -868,7 +934,7 @@ class TwitchNotifierBot(discord.Client):
                     create_public_threads=False,
                     create_private_threads=False,
                     send_messages_in_threads=False,
-                    reason="Set Up Server: rules read-only",
+                    reason="Set Up Server: welcome/rules read-only",
                 )
                 # Mods and admins can still post (e.g. to update rules)
                 for staff_role in (moderator, admin):
@@ -878,7 +944,7 @@ class TwitchNotifierBot(discord.Client):
                             send_messages=True,
                             add_reactions=True,
                             manage_messages=True,
-                            reason="Set Up Server: staff can manage rules",
+                            reason="Set Up Server: staff can manage welcome/rules",
                         )
                 # Bot needs to post the rules + verify button
                 if bot_role:
@@ -896,24 +962,27 @@ class TwitchNotifierBot(discord.Client):
                 update_step(step_idx, "error", str(e)[:100])
                 status["summary"]["failed"] += 1
 
-        # ── Verification: hide most things from @everyone ────────────────
+        # ── Verification: per-channel hide from @everyone ─────────────────
+        # Only when the user enabled verification. For each wizard-created
+        # channel that ISN'T welcome/rules, deny @everyone view_channel and
+        # explicit-allow the member role. Existing channels untouched
+        # because channel_results points to created/reused entries — but
+        # since reused entries are pre-existing channels the user already
+        # confirmed they want modified (via the established-server confirm),
+        # it's consistent to overwrite them too.
         if plan["verification_enabled"] and member:
             for cat_spec in plan["categories"]:
                 for ch_name, ch_type in cat_spec["channels"]:
                     channel = channel_results.get(ch_name)
                     if not channel:
                         continue
-                    # Welcome and rules stay open to @everyone
-                    is_welcome_or_rules = (
-                        "welcome" in ch_name.lower() or "rules" in ch_name.lower()
-                    )
-                    if is_welcome_or_rules:
-                        continue
-                    step_idx = add_step(f"Hide {ch_name} from @everyone", "running")
+                    if _is_welcome_or_rules(ch_name):
+                        continue  # already handled above
+                    step_idx = add_step(f"Verification: hide {ch_name} from @everyone", "running")
                     try:
                         await channel.set_permissions(
                             everyone, view_channel=False,
-                            reason="Set Up Server: verification",
+                            reason="Set Up Server: verification gate",
                         )
                         await channel.set_permissions(
                             member, view_channel=True,

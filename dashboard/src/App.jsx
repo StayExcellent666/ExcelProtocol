@@ -3023,7 +3023,7 @@ function SetupWizardTab({ guildId, isDev }) {
                   <br />
                   • Create new roles/channels alongside existing ones
                   <br />
-                  • Lock the rules channel read-only for non-staff
+                  • Lock welcome and rules channels read-only (members can read but not write/react)
                   <br />
                   • Modify @everyone view permissions on community channels if verification is on
                   <br />
@@ -3211,7 +3211,7 @@ function SetupWizardTab({ guildId, isDev }) {
                   <br />
                   • Create new roles/channels alongside existing ones
                   <br />
-                  • Lock the rules channel read-only for non-staff (deny send + reactions for @everyone)
+                  • Lock welcome and rules channels read-only (members can read but not write/react)
                   <br />
                   • Modify @everyone view permissions on community channels if verification is on
                   <br />
@@ -3288,7 +3288,7 @@ function SetupWizardTab({ guildId, isDev }) {
                       Notes
                     </div>
                     {status.notes.map((note, i) => (
-                      <div key={i} style={{ fontSize:12, color:"var(--text2)", marginBottom:6, lineHeight:1.5, fontFamily:"'JetBrains Mono',monospace" }}>
+                      <div key={i} style={{ fontSize:12, color:"var(--text2)", marginBottom:6, lineHeight:1.5, fontFamily:"'JetBrains Mono',monospace", whiteSpace:"pre-wrap" }}>
                         {note}
                       </div>
                     ))}
