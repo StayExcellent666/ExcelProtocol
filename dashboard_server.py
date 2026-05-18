@@ -2905,6 +2905,10 @@ async def setup_preview(request):
         "vip_enabled": plan["vip_enabled"],
         "auto_post_rules": plan["auto_post_rules"],
         "role_names": plan["role_names"],
+        "role_permissions": {
+            k: server_setup.ROLE_PERMISSIONS.get(k, [])
+            for k in plan["role_names"].keys()
+        },
         "categories": plan["categories"],
         "counts": counts,
         "would_reuse": {
@@ -2912,6 +2916,37 @@ async def setup_preview(request):
             "categories": [c["name"] for c in plan["categories"] if c["name"] in existing_categories],
         },
     }
+
+    # ── Established-server detection ──────────────────────────────────────
+    # If the guild already has substantial content, the wizard requires an
+    # explicit confirmation in the frontend before Apply will run. The
+    # heuristic counts existing channels, non-managed roles, and members.
+    # Threshold: any one of (channels >5, custom_roles >3, members >10).
+    # Tuned to NOT trip on a fresh, just-created server but DO trip on any
+    # real, lived-in community.
+    is_established = False
+    establishment_signals = {}
+    if guild:
+        # Channels (text + voice + categories all count)
+        n_channels = len(guild.channels)
+        establishment_signals["channels"] = n_channels
+
+        # Custom roles: exclude @everyone and bot-managed integration roles
+        # (Twitch sub roles, bot roles auto-created when a bot joins, etc).
+        # `role.managed` flags those.
+        custom_roles = [r for r in guild.roles
+                        if r.name != "@everyone" and not r.managed]
+        establishment_signals["custom_roles"] = len(custom_roles)
+
+        # Members
+        n_members = guild.member_count or len(guild.members)
+        establishment_signals["members"] = n_members
+
+        if server_setup.is_server_established(n_channels, len(custom_roles), n_members):
+            is_established = True
+
+    plan_summary["is_established"] = is_established
+    plan_summary["establishment_signals"] = establishment_signals
 
     # Surface missing permissions before they hit Apply
     missing_perms = []
@@ -2943,6 +2978,37 @@ async def setup_apply(request):
         body = {}
     config = body.get("config", {})
     dry_run = bool(body.get("dry_run", False))
+    confirm_established = bool(body.get("confirm_established", False))
+
+    # Server-side enforcement: if the guild trips the establishment heuristic
+    # AND this is NOT a dry run, the request must include confirm_established.
+    # Dry runs are always allowed (they don't modify anything). This way an
+    # uncareful API client or stale frontend can't skip the confirmation.
+    if not dry_run:
+        guild = _bot_ref.get_guild(guild_id)
+        if guild:
+            custom_roles = [r for r in guild.roles
+                            if r.name != "@everyone" and not r.managed]
+            n_channels = len(guild.channels)
+            n_members = guild.member_count or len(guild.members)
+            import server_setup as _ss
+            is_established = _ss.is_server_established(
+                n_channels, len(custom_roles), n_members
+            )
+            if is_established and not confirm_established:
+                return web.json_response({
+                    "error": "established_server_requires_confirmation",
+                    "message": (
+                        "This server has existing content. Apply requires "
+                        "explicit confirmation via the confirm_established "
+                        "flag to prevent accidental modification."
+                    ),
+                    "signals": {
+                        "channels": n_channels,
+                        "custom_roles": len(custom_roles),
+                        "members": n_members,
+                    },
+                }, status=409)
 
     import uuid
     setup_id = uuid.uuid4().hex
@@ -2958,6 +3024,7 @@ async def setup_apply(request):
         "started_at": None,
         "finished_at": None,
         "error": None,
+        "notes": [],
     }
     asyncio.create_task(_bot_ref.run_server_setup(guild_id, config, setup_id, dry_run=dry_run))
     return web.json_response({"setup_id": setup_id})

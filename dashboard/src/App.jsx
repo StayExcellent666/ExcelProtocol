@@ -3063,6 +3063,7 @@ function SetupWizardTab({ guildId, isDev }) {
   const [setupId, setSetupId] = useState(null);
   const [status, setStatus] = useState(null);
   const [applyError, setApplyError] = useState(null);
+  const [confirmEstablished, setConfirmEstablished] = useState(false);
 
   // Poll status when we have a setup_id in flight
   useEffect(() => {
@@ -3107,7 +3108,11 @@ function SetupWizardTab({ guildId, isDev }) {
     try {
       const data = await apiFetch(`/api/guild/${guildId}/setup/apply`, {
         method: "POST",
-        body: JSON.stringify({ config, dry_run: dry }),
+        body: JSON.stringify({
+          config,
+          dry_run: dry,
+          confirm_established: confirmEstablished,
+        }),
       });
       setSetupId(data.setup_id);
     } catch (e) {
@@ -3281,6 +3286,32 @@ function SetupWizardTab({ guildId, isDev }) {
                   </div>
                 )}
 
+                {preview.role_permissions && (
+                  <div style={{ borderTop:"1px solid var(--border)", paddingTop:10 }}>
+                    <div style={{ fontSize:13, fontWeight:600, marginBottom:6 }}>Role permissions</div>
+                    <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:8 }}>
+                      Default permissions applied to NEWLY created roles. Existing reused roles keep their current permissions.
+                    </div>
+                    {Object.entries(preview.role_permissions).map(([key, flags]) => {
+                      const name = preview.role_names?.[key] || key.toUpperCase();
+                      const hasAdmin = flags.includes("administrator");
+                      return (
+                        <div key={key} style={{ marginBottom:8, fontSize:11, fontFamily:"'JetBrains Mono',monospace" }}>
+                          <div style={{ color: hasAdmin ? "var(--yellow)" : "var(--cyan)", marginBottom:2 }}>
+                            {name}{hasAdmin ? " ⚠️" : ""} <span style={{ color:"var(--text3)" }}>({flags.length} flag{flags.length === 1 ? "" : "s"})</span>
+                          </div>
+                          <div style={{ color:"var(--text3)", marginLeft:12, lineHeight:1.5 }}>
+                            {flags.length === 0 ? "none" : flags.join(", ")}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:6, padding:"8px 10px", background:"rgba(0,245,212,0.04)", border:"1px solid var(--border)", borderRadius:6 }}>
+                      Admin role is created with every management permission EXCEPT the <b>Administrator</b> flag (the bot itself doesn't have it, so it can't grant it). After the wizard runs, you can manually toggle Administrator on in Server Settings → Roles if you want full unrestricted access.
+                    </div>
+                  </div>
+                )}
+
                 <div style={{ borderTop:"1px solid var(--border)", paddingTop:10 }}>
                   <div style={{ fontSize:13, fontWeight:600, marginBottom:8 }}>Structure</div>
                   {preview.categories?.map(cat => (
@@ -3306,11 +3337,55 @@ function SetupWizardTab({ guildId, isDev }) {
             <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:16, fontWeight:800, marginBottom:6 }}>Apply</div>
             <div style={{ fontSize:12, color:"var(--text3)", marginBottom:18 }}>Run a dry-run first to validate, then apply for real.</div>
 
+            {preview?.is_established && (
+              <div style={{
+                background:"rgba(255,107,53,0.08)",
+                border:"1px solid var(--yellow)",
+                borderRadius:8,
+                padding:14,
+                marginBottom:16,
+              }}>
+                <div style={{ color:"var(--yellow)", fontWeight:700, fontSize:13, marginBottom:8 }}>
+                  ⚠️ This server has existing content
+                </div>
+                <div style={{ fontSize:12, color:"var(--text2)", fontFamily:"'JetBrains Mono',monospace", lineHeight:1.6, marginBottom:10 }}>
+                  Detected: {preview.establishment_signals?.channels} channels,
+                  {" "}{preview.establishment_signals?.custom_roles} custom roles,
+                  {" "}{preview.establishment_signals?.members} members.
+                  <br />
+                  The wizard will NEVER delete existing content, but it WILL:
+                  <br />
+                  • Create new roles/channels alongside existing ones
+                  <br />
+                  • Lock the rules channel read-only for non-staff (deny send + reactions for @everyone)
+                  <br />
+                  • Modify @everyone view permissions on community channels if verification is on
+                  <br />
+                  • Post a rules message in the rules channel
+                  <br /><br />
+                  Confirm below to proceed.
+                </div>
+                <label style={{ display:"flex", alignItems:"center", gap:10, cursor:"pointer", fontSize:13, color:"var(--text)" }}>
+                  <input type="checkbox"
+                    checked={confirmEstablished}
+                    onChange={(e) => setConfirmEstablished(e.target.checked)}
+                    style={{ width:18, height:18, cursor:"pointer" }} />
+                  I understand and want to apply the template to this established server
+                </label>
+              </div>
+            )}
+
             <div style={{ display:"flex", gap:10, marginBottom:18 }}>
               <button onClick={() => startApply(true)} disabled={status?.status === "running"}
                 style={{ ...C.btnSecondary, fontSize:13 }}>Dry run</button>
-              <button onClick={() => startApply(false)} disabled={status?.status === "running"}
-                style={{ ...C.btnPrimary, fontSize:13 }}>Apply for real</button>
+              <button onClick={() => startApply(false)}
+                disabled={status?.status === "running" || (preview?.is_established && !confirmEstablished)}
+                style={{
+                  ...C.btnPrimary, fontSize:13,
+                  opacity: (status?.status === "running" || (preview?.is_established && !confirmEstablished)) ? 0.4 : 1,
+                }}>
+                Apply for real
+              </button>
             </div>
 
             {applyError && <div style={{ color:"var(--red)", marginBottom:12 }}>Error: {applyError}</div>}
@@ -3352,6 +3427,19 @@ function SetupWizardTab({ guildId, isDev }) {
                     <div style={{ color:"var(--text3)", padding:"6px 0" }}>Waiting for bot…</div>
                   )}
                 </div>
+
+                {status.notes?.length > 0 && (
+                  <div style={{ marginTop:14, padding:"12px 14px", background:"rgba(0,245,212,0.04)", border:"1px solid var(--border)", borderRadius:8 }}>
+                    <div style={{ fontSize:12, fontWeight:700, color:"var(--cyan)", marginBottom:8, fontFamily:"'Outfit',sans-serif" }}>
+                      Notes
+                    </div>
+                    {status.notes.map((note, i) => (
+                      <div key={i} style={{ fontSize:12, color:"var(--text2)", marginBottom:6, lineHeight:1.5, fontFamily:"'JetBrains Mono',monospace" }}>
+                        {note}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 

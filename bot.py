@@ -532,6 +532,7 @@ class TwitchNotifierBot(discord.Client):
             "started_at": _dt.now(_tz.utc).isoformat(),
             "finished_at": None,
             "error": None,
+            "notes": [],
         })
 
         def add_step(label: str, st: str = "running", detail: str = ""):
@@ -587,16 +588,26 @@ class TwitchNotifierBot(discord.Client):
             existing = discord.utils.find(lambda r: r.name == name, guild.roles)
             if existing:
                 role_results[key] = existing
-                update_step(step_idx, "done", "reused existing")
+                update_step(step_idx, "done", "reused existing (perms unchanged)")
                 status["summary"]["reused"] += 1
             else:
                 if dry_run:
-                    update_step(step_idx, "done", "would create")
+                    n_perms = len(server_setup.ROLE_PERMISSIONS.get(key, []))
+                    update_step(step_idx, "done", f"would create ({n_perms} perm flags)")
                     status["summary"]["created"] += 1
                     continue
                 try:
+                    # Build the permission set for this role from server_setup
+                    # config. The bot's own role must be HIGHER than the role
+                    # being created or Discord rejects high-perm creates. We
+                    # check that admin's `administrator` flag will work by
+                    # confirming the bot itself has administrator OR the role
+                    # being created isn't asking for perms higher than the
+                    # bot has. discord.py raises Forbidden if it would.
+                    perms = server_setup.build_permissions(key)
                     new_role = await guild.create_role(
                         name=name,
+                        permissions=perms,
                         reason=f"Set Up Server wizard ({plan['template_id']})",
                     )
                     # Position just below the bot's role
@@ -605,10 +616,15 @@ class TwitchNotifierBot(discord.Client):
                     except Exception as _e:
                         logger.debug(f"Could not reposition role {name}: {_e}")
                     role_results[key] = new_role
-                    update_step(step_idx, "done", "created")
+                    n_perms = len(server_setup.ROLE_PERMISSIONS.get(key, []))
+                    update_step(step_idx, "done", f"created with {n_perms} perm flags")
                     status["summary"]["created"] += 1
-                except discord.Forbidden:
-                    update_step(step_idx, "error", "missing permission")
+                except discord.Forbidden as e:
+                    # Most likely: bot's role is below the position it's
+                    # trying to manage, OR missing Manage Roles. The pre-flight
+                    # check covers Manage Roles, so this is usually hierarchy.
+                    detail = "missing permission (bot role may be too low in hierarchy)"
+                    update_step(step_idx, "error", detail)
                     status["summary"]["failed"] += 1
                 except Exception as e:
                     update_step(step_idx, "error", str(e)[:100])
@@ -772,6 +788,32 @@ class TwitchNotifierBot(discord.Client):
             except Exception as e:
                 logger.debug(f"Failed to save embed color: {e}")
 
+        # ── Post-run notes ────────────────────────────────────────────────
+        # Surface manual-action reminders so the server owner knows what
+        # to do AFTER the wizard finishes. The dashboard renders these in
+        # the Apply step's success banner.
+        notes = []
+        admin_role = role_results.get("admin")
+        admin_name = plan["role_names"].get("admin", "ADMIN")
+        if admin_role and not dry_run:
+            # The wizard never grants `administrator` (see server_setup.py
+            # for rationale). The admin role has every other management
+            # perm explicitly. Remind the owner to flip Administrator on
+            # if they want full unrestricted access.
+            notes.append(
+                f"⚠️ The `{admin_name}` role was created WITHOUT the "
+                f"`Administrator` flag (the bot can't grant it). Manually "
+                f"enable Administrator on this role in Server Settings → "
+                f"Roles → {admin_name} if you want full admin access."
+            )
+        if plan["verification_enabled"]:
+            notes.append(
+                "🔒 Verification is enabled. New members will only see "
+                "welcome + rules until they click the Verify button under "
+                "the rules message."
+            )
+        status["notes"] = notes
+
         finalize("done")
 
     async def _apply_setup_permissions(self, guild, plan, role_results,
@@ -790,6 +832,69 @@ class TwitchNotifierBot(discord.Client):
         moderator = role_results.get("moderator")
         admin = role_results.get("admin")
         bot_role = role_results.get("bot")
+
+        # ── Lock rules channel read-only ──────────────────────────────────
+        # Rules should be read-only for everyone except staff. We deny
+        # send_messages + add_reactions at @everyone level so it cascades
+        # to every role including Member/VIP. Staff roles get explicit
+        # ALLOWs to override the deny.
+        #
+        # Applied regardless of the verification toggle — rules being
+        # writable defeats the purpose of having rules.
+        #
+        # Welcome channels are intentionally NOT locked — welcomes often
+        # involve a "say hi!" interaction where new members post.
+        rules_channels = []
+        for cat_spec in plan["categories"]:
+            for ch_name, ch_type in cat_spec["channels"]:
+                if ch_type != "text":
+                    continue
+                if "rules" not in ch_name.lower():
+                    continue
+                ch = channel_results.get(ch_name)
+                if ch:
+                    rules_channels.append((ch_name, ch))
+
+        for ch_name, channel in rules_channels:
+            step_idx = add_step(f"Lock {ch_name} (read-only for non-staff)", "running")
+            try:
+                # @everyone: can view + read history but not send or react
+                await channel.set_permissions(
+                    everyone,
+                    view_channel=True,
+                    read_message_history=True,
+                    send_messages=False,
+                    add_reactions=False,
+                    create_public_threads=False,
+                    create_private_threads=False,
+                    send_messages_in_threads=False,
+                    reason="Set Up Server: rules read-only",
+                )
+                # Mods and admins can still post (e.g. to update rules)
+                for staff_role in (moderator, admin):
+                    if staff_role:
+                        await channel.set_permissions(
+                            staff_role,
+                            send_messages=True,
+                            add_reactions=True,
+                            manage_messages=True,
+                            reason="Set Up Server: staff can manage rules",
+                        )
+                # Bot needs to post the rules + verify button
+                if bot_role:
+                    await channel.set_permissions(
+                        bot_role,
+                        send_messages=True,
+                        embed_links=True,
+                        reason="Set Up Server: bot posts rules + verify button",
+                    )
+                update_step(step_idx, "done")
+            except discord.Forbidden:
+                update_step(step_idx, "error", "missing permission")
+                status["summary"]["failed"] += 1
+            except Exception as e:
+                update_step(step_idx, "error", str(e)[:100])
+                status["summary"]["failed"] += 1
 
         # ── Verification: hide most things from @everyone ────────────────
         if plan["verification_enabled"] and member:

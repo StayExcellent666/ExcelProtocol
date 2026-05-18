@@ -139,3 +139,106 @@ class TestCountPlanItems:
         assert with_vip["categories"] == plain["categories"] + 1
         assert with_vip["text_channels"] == plain["text_channels"] + 1  # vip-chat
         assert with_vip["voice_channels"] == plain["voice_channels"] + 1  # VIP VC
+
+
+class TestRolePermissions:
+    """The wizard creates roles with sensible default permissions per role."""
+
+    def test_admin_has_full_management_perms_but_not_administrator(self):
+        """Admin gets every non-admin management perm explicitly. The wizard
+        avoids the `administrator` flag because the bot itself doesn't have
+        it; users grant Administrator manually via Discord settings after
+        the wizard runs (the post-run note prompts them to do so)."""
+        flags = server_setup.ROLE_PERMISSIONS["admin"]
+        assert "administrator" not in flags, \
+            "Wizard must not grant `administrator` (bot lacks it)"
+        # Every meaningful management perm
+        for needed in ["manage_channels", "manage_roles", "manage_guild",
+                       "kick_members", "ban_members", "view_audit_log"]:
+            assert needed in flags, f"admin should have {needed}"
+
+    def test_moderator_has_kick_ban_manage_messages(self):
+        flags = server_setup.ROLE_PERMISSIONS["moderator"]
+        assert "kick_members" in flags
+        assert "ban_members" in flags
+        assert "manage_messages" in flags
+        # Mod should NOT have administrator
+        assert "administrator" not in flags
+
+    def test_member_has_view_channels_and_send_messages(self):
+        flags = server_setup.ROLE_PERMISSIONS["member"]
+        assert "view_channel" in flags
+        assert "send_messages" in flags
+        # Member should NOT have kick/ban/admin
+        assert "kick_members" not in flags
+        assert "ban_members" not in flags
+        assert "administrator" not in flags
+
+    def test_vip_has_extras_over_member(self):
+        member = set(server_setup.ROLE_PERMISSIONS["member"])
+        vip = set(server_setup.ROLE_PERMISSIONS["vip"])
+        # VIP is a superset (or equal) of member basics
+        for basic in ["view_channel", "send_messages", "read_message_history"]:
+            assert basic in vip
+        # VIP has at least one extra
+        assert vip != member
+
+    def test_bot_has_manage_roles_for_bot_management(self):
+        flags = server_setup.ROLE_PERMISSIONS["bot"]
+        # Community bots commonly need these
+        assert "manage_roles" in flags
+        assert "manage_channels" in flags
+        # But not admin (defense in depth — most bots don't need it)
+        assert "administrator" not in flags
+
+    def test_build_permissions_returns_discord_permissions(self):
+        import discord
+        perms = server_setup.build_permissions("moderator")
+        assert isinstance(perms, discord.Permissions)
+        assert perms.kick_members is True
+        assert perms.ban_members is True
+        assert perms.administrator is False
+
+    def test_build_permissions_admin_does_not_set_administrator(self):
+        """Admin role uses enumerated perms, never `administrator`."""
+        perms = server_setup.build_permissions("admin")
+        assert perms.administrator is False
+        # But should have the management bits
+        assert perms.manage_channels is True
+        assert perms.manage_roles is True
+        assert perms.kick_members is True
+        assert perms.ban_members is True
+
+    def test_build_permissions_unknown_key_returns_empty(self):
+        import discord
+        perms = server_setup.build_permissions("unknown_role")
+        # No flags set — equivalent to Permissions.none()
+        assert isinstance(perms, discord.Permissions)
+        assert perms.value == 0
+
+
+class TestIsServerEstablished:
+    """The heuristic that gates the confirmation prompt in the wizard."""
+
+    def test_fresh_server_not_established(self):
+        # New Discord server: typically 3-4 default channels, 0 custom roles, 1 member (bot owner)
+        assert not server_setup.is_server_established(4, 0, 1)
+
+    def test_small_test_server_not_established(self):
+        # A test/playground server: a few channels, no custom roles, few members
+        assert not server_setup.is_server_established(5, 3, 10)
+
+    def test_real_community_established_by_channels(self):
+        assert server_setup.is_server_established(20, 0, 1)
+
+    def test_real_community_established_by_roles(self):
+        assert server_setup.is_server_established(3, 5, 2)
+
+    def test_real_community_established_by_members(self):
+        assert server_setup.is_server_established(3, 0, 50)
+
+    def test_one_threshold_trip_is_enough(self):
+        # Established if ANY signal crosses, not all
+        assert server_setup.is_server_established(100, 0, 0)
+        assert server_setup.is_server_established(0, 100, 0)
+        assert server_setup.is_server_established(0, 0, 100)
