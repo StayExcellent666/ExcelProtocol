@@ -1069,203 +1069,6 @@ function ServerStatsTab({ guildId }) {
   );
 }
 
-// ── Commands Tab ──────────────────────────────────────────────────────────────
-function CommandsTab() {
-  const [commands, setCommands] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const catColors = { Streaming:"var(--cyan)", Moderation:"var(--yellow)", Twitch:"#a970ff", Fun:"var(--green)" };
-  useEffect(()=>{ apiFetch("/api/commands").then(setCommands).catch(console.error).finally(()=>setLoading(false)); },[]);
-  const categories = [...new Set(commands.map(c=>c.category))];
-  return (
-    <div>
-      <PageHeader title="Slash Commands" subtitle={`${commands.length} commands available`} />
-      {loading ? <div style={{ display:"flex", justifyContent:"center", padding:40 }}><Spinner /></div> : categories.map(cat=>(
-        <div key={cat} style={{ marginBottom:22 }}>
-          <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
-            <span style={{ fontSize:10, color:catColors[cat]||"var(--text3)", textTransform:"uppercase", letterSpacing:1.2, fontWeight:700, fontFamily:"'JetBrains Mono',monospace" }}>{cat}</span>
-            <div style={{ flex:1, height:1, background:"var(--border)" }} />
-          </div>
-          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-            {commands.filter(c=>c.category===cat).map(cmd=>(
-              <div key={cmd.name} style={{ ...C.card, padding:"12px 16px", display:"flex", alignItems:"center", gap:14 }}>
-                <code style={{ background:"var(--bg)", border:"1px solid var(--border2)", padding:"3px 10px", borderRadius:5, fontSize:12, color:"var(--cyan)", fontFamily:"'JetBrains Mono',monospace", flexShrink:0 }}>/{cmd.name}</code>
-                <div style={{ flex:1 }}>
-                  <div style={{ fontSize:14, color:"var(--text)", marginBottom:2, fontFamily:"'Outfit',sans-serif" }}>{cmd.description}</div>
-                  <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>{cmd.usage}</div>
-                </div>
-                <Badge text={cat} color={catColors[cat]||"var(--text3)"} />
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Safety Tab ────────────────────────────────────────────────────────────────
-function SafetyTab({ guildId }) {
-  const [settings, setSettings] = useState(null);
-  const [kicks, setKicks]       = useState([]);
-  const [roles, setRoles]       = useState([]);
-  const [loading, setLoading]   = useState(true);
-  const [saving, setSaving]     = useState(false);
-  const [form, setForm] = useState({
-    enabled: false, min_account_age_days: 7, check_username_pattern: true,
-    check_no_avatar: true, action: "kick", bypass_role_id: "", dm_on_kick: true,
-  });
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [s, k, rl] = await Promise.all([
-        apiFetch(`/api/guild/${guildId}/safety-settings`),
-        apiFetch(`/api/guild/${guildId}/safety-kicks`),
-        apiFetch(`/api/guild/${guildId}/roles`),
-      ]);
-      setSettings(s);
-      setKicks(k);
-      setRoles(rl || []);
-      setForm({
-        enabled: s.enabled || false,
-        min_account_age_days: s.min_account_age_days ?? 7,
-        check_username_pattern: s.check_username_pattern ?? true,
-        check_no_avatar: s.check_no_avatar ?? true,
-        action: s.action || "kick",
-        bypass_role_id: s.bypass_role_id || "",
-        dm_on_kick: s.dm_on_kick ?? true,
-      });
-    } catch(e) { console.error(e); }
-    setLoading(false);
-  }, [guildId]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      await apiFetch(`/api/guild/${guildId}/safety-settings`, {
-        method: "POST",
-        body: JSON.stringify({
-          ...form,
-          bypass_role_id: form.bypass_role_id || null,
-        }),
-      });
-      await load();
-    } catch(e) { alert("Failed: " + e.message); }
-    setSaving(false);
-  };
-
-  const Toggle = ({ value, onChange }) => (
-    <button onClick={() => onChange(!value)}
-      style={{ width:44, height:24, borderRadius:12, border:"none", cursor:"pointer",
-        background: value ? "var(--cyan)" : "var(--border2)", position:"relative",
-        transition:"background 0.2s", flexShrink:0,
-        boxShadow: value ? "0 0 10px rgba(0,245,212,0.4)" : "none" }}>
-      <div style={{ position:"absolute", top:3, left: value ? 22 : 3, width:18, height:18,
-        borderRadius:"50%", background:"#fff", transition:"left 0.2s" }} />
-    </button>
-  );
-
-  if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
-
-  return (
-    <div>
-      <PageHeader title="Safety" subtitle="Protect your server from bot accounts and DM spammers" />
-
-      {/* ── New Account Filter ── */}
-      <div style={{ ...C.card, marginBottom:16 }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:18 }}>
-          {sectionHead("New Account Filter", "Auto-kick or ban suspicious new members")}
-          <Toggle value={form.enabled} onChange={v => setForm(p => ({ ...p, enabled: v }))} />
-        </div>
-
-        <div style={{ display:"flex", flexDirection:"column", gap:14, opacity: form.enabled ? 1 : 0.5, pointerEvents: form.enabled ? "auto" : "none" }}>
-
-          <Field label="Minimum Account Age (days)">
-            <CyanInput type="number" min={1} max={365} value={form.min_account_age_days}
-              onChange={e => setForm(p => ({ ...p, min_account_age_days: parseInt(e.target.value) || 7 }))} />
-            <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"'JetBrains Mono',monospace" }}>
-              Accounts newer than this will be flagged
-            </div>
-          </Field>
-
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid var(--border)" }}>
-            <div>
-              <div style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", fontWeight:500 }}>Flag suspicious username patterns</div>
-              <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>e.g. playful_hare_06276</div>
-            </div>
-            <Toggle value={form.check_username_pattern} onChange={v => setForm(p => ({ ...p, check_username_pattern: v }))} />
-          </div>
-
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid var(--border)" }}>
-            <div>
-              <div style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", fontWeight:500 }}>Flag accounts with no profile picture</div>
-              <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>Default Discord avatar</div>
-            </div>
-            <Toggle value={form.check_no_avatar} onChange={v => setForm(p => ({ ...p, check_no_avatar: v }))} />
-          </div>
-
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid var(--border)" }}>
-            <div>
-              <div style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif", fontWeight:500 }}>DM user on kick/ban</div>
-              <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>Tell them why and how to rejoin</div>
-            </div>
-            <Toggle value={form.dm_on_kick} onChange={v => setForm(p => ({ ...p, dm_on_kick: v }))} />
-          </div>
-
-          <Field label="Action">
-            <CyanSelect value={form.action} onChange={e => setForm(p => ({ ...p, action: e.target.value }))}>
-              <option value="kick">Kick (can rejoin later)</option>
-              <option value="ban">Ban (permanent)</option>
-            </CyanSelect>
-          </Field>
-
-          <Field label="Bypass Role (optional)">
-            <CyanSelect value={form.bypass_role_id} onChange={e => setForm(p => ({ ...p, bypass_role_id: e.target.value }))}>
-              <option value="">None</option>
-              {roles.map(r => <option key={r.id} value={r.id}>@{r.name}</option>)}
-            </CyanSelect>
-          </Field>
-        </div>
-
-        <div style={{ marginTop:18, display:"flex", justifyContent:"flex-end" }}>
-          <button onClick={save} disabled={saving} style={{ ...C.btnPrimary, opacity: saving ? 0.6 : 1 }}>
-            {saving ? "Saving..." : "Save Settings"}
-          </button>
-        </div>
-      </div>
-
-      {/* ── Kick Log ── */}
-      <div style={{ ...C.card }}>
-        {sectionHead("Action Log", `Last 7 days — ${kicks.length} action${kicks.length !== 1 ? "s" : ""}`)}
-        {kicks.length === 0 ? (
-          <div style={{ textAlign:"center", padding:"32px 0", color:"var(--text3)" }}>
-            <div style={{ fontSize:28, marginBottom:8 }}>✅</div>
-            <div style={{ fontSize:13, fontFamily:"'Outfit',sans-serif" }}>No kicks or bans recorded yet</div>
-          </div>
-        ) : (
-          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-            {kicks.map((k, i) => (
-              <div key={i} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:8, background:"rgba(8,11,15,0.6)", border:"1px solid var(--border)" }}>
-                <div style={{ fontSize:18 }}>{k.action === "ban" ? "🔨" : "👢"}</div>
-                <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontSize:13, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>{k.username}</div>
-                  <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{k.reason}</div>
-                </div>
-                <div style={{ textAlign:"right", flexShrink:0 }}>
-                  <div style={{ fontSize:11, color: k.action === "ban" ? "var(--red)" : "var(--yellow)", fontFamily:"'JetBrains Mono',monospace", fontWeight:600 }}>{k.action.toUpperCase()}</div>
-                  <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>{timeAgo(k.kicked_at)}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── Notif Log Tab ─────────────────────────────────────────────────────────────
 function NotifLogTab({ guildId }) {
   const [log, setLog] = useState([]);
@@ -3120,10 +2923,20 @@ function SetupWizardTab({ guildId, isDev }) {
     }
   };
 
-  // Auto-fetch preview when we hit the review step
+  // Auto-fetch preview when we hit the review step. Also fetch eagerly on
+  // initial mount and whenever the template changes, so the Template step
+  // can show the established-server confirmation card and gate the Next
+  // button BEFORE the user proceeds.
   useEffect(() => {
-    if (step === 3 && !preview) fetchPreview();
-  }, [step, preview, fetchPreview]);
+    fetchPreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config.template]);
+
+  // Make sure the review step is up-to-date when entering it
+  useEffect(() => {
+    if (step === 3) fetchPreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
 
   // Helpers
   const stepDot = (i) => (
@@ -3187,7 +3000,48 @@ function SetupWizardTab({ guildId, isDev }) {
                 </button>
               ))}
             </div>
-            <NavButtons />
+
+            {/* Established-server confirmation (only shown if preview says
+                the guild has existing content). Gates the Next button. */}
+            {preview?.is_established && (
+              <div style={{
+                background:"rgba(255,107,53,0.08)",
+                border:"1px solid var(--yellow)",
+                borderRadius:8,
+                padding:14,
+                marginTop:14,
+              }}>
+                <div style={{ color:"var(--yellow)", fontWeight:700, fontSize:13, marginBottom:8 }}>
+                  ⚠️ This server has existing content
+                </div>
+                <div style={{ fontSize:12, color:"var(--text2)", fontFamily:"'JetBrains Mono',monospace", lineHeight:1.6, marginBottom:10 }}>
+                  Detected: {preview.establishment_signals?.channels} channels,
+                  {" "}{preview.establishment_signals?.custom_roles} custom roles,
+                  {" "}{preview.establishment_signals?.members} members.
+                  <br />
+                  The wizard will NEVER delete existing content, but it WILL:
+                  <br />
+                  • Create new roles/channels alongside existing ones
+                  <br />
+                  • Lock the rules channel read-only for non-staff
+                  <br />
+                  • Modify @everyone view permissions on community channels if verification is on
+                  <br />
+                  • Post a rules message in the rules channel
+                  <br /><br />
+                  Confirm below to continue with the wizard.
+                </div>
+                <label style={{ display:"flex", alignItems:"center", gap:10, cursor:"pointer", fontSize:13, color:"var(--text)" }}>
+                  <input type="checkbox"
+                    checked={confirmEstablished}
+                    onChange={(e) => setConfirmEstablished(e.target.checked)}
+                    style={{ width:18, height:18, cursor:"pointer" }} />
+                  I understand and want to apply a template to this established server
+                </label>
+              </div>
+            )}
+
+            <NavButtons canNext={!preview?.is_established || confirmEstablished} />
           </div>
         )}
 
@@ -3759,10 +3613,11 @@ export default function App() {
     { id:"twitch",      icon:"💬", label:"Chat Commands"    },
     { id:"rewards",     icon:"🎁", label:"Channel Rewards"  },
   ];
-  const bottomTabs = [
-    { id:"commands",    icon:"⚡", label:"Commands"         },
-    { id:"safety",      icon:"🛡️", label:"Safety"           },
+  const serverToolsTabs = [
     { id:"setupwizard", icon:"🪄", label:"Set Up Server"   },
+  ];
+  const bottomTabs = [
+    { id:"safety",      icon:"🛡️", label:"Safety"           },
     { id:"notiflog",    icon:"📋", label:"Notif Log"        },
     { id:"suggestions", icon:"💡", label:"Contact"          },
   ];
@@ -3772,7 +3627,7 @@ export default function App() {
     { id:"globalstats", icon:"🌐", label:"Global Stats"     },
     { id:"dbtools",     icon:"🛠️", label:"DB Tools"         },
   ] : [];
-  const tabs = [...topTabs, ...twitchTabs, ...bottomTabs];
+  const tabs = [...topTabs, ...twitchTabs, ...serverToolsTabs, ...bottomTabs];
 
   return (
     <div style={{ height:"100vh", width:"100vw", background:"var(--bg)", color:"var(--text)", fontFamily:"'Outfit',sans-serif", display:"flex", flexDirection:"column", overflow:"hidden", position:"relative" }}>
@@ -3862,6 +3717,7 @@ export default function App() {
           {topTabs.map(t=><NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={()=>setActiveTab(t.id)} count={null} />)}
           <NavGroup icon="🟣" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
           {bottomTabs.map(t=><NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={()=>setActiveTab(t.id)} count={null} />)}
+          <NavGroup icon="🧰" label="Server Tools" activeTab={activeTab} tabs={serverToolsTabs} onSelect={setActiveTab} />
           {devTabs.length > 0 && (
             <>
               <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>Dev Only</div>
@@ -3887,7 +3743,6 @@ export default function App() {
               {activeTab==="roles"       && <ReactionRolesTab guildId={activeGuild} />}
               {activeTab==="twitch"      && <TwitchTab       guildId={activeGuild} isDev={effectivelyDev} />}
               {activeTab==="rewards"     && <ChannelRewardsTab guildId={activeGuild} />}
-              {activeTab==="commands"    && <CommandsTab />}
               {activeTab==="notiflog"    && <NotifLogTab      guildId={activeGuild} />}
               {activeTab==="safety"      && <SafetyTab        guildId={activeGuild} />}
               {activeTab==="suggestions" && <SuggestionsTab guildId={activeGuild} />}
@@ -3928,6 +3783,7 @@ export default function App() {
             {bottomTabs.map(t => (
               <NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={() => { setActiveTab(t.id); setNavDrawerOpen(false); }} />
             ))}
+            <NavGroup icon="🧰" label="Server Tools" activeTab={activeTab} tabs={serverToolsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>
             </div>
