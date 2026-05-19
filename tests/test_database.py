@@ -1120,3 +1120,113 @@ class TestCleanupStreamEventsRetention:
         assert "alice" in names, "Current-month row must be kept"
         assert "bob" in names, "Previous-month row must be kept"
         assert "carol" not in names, "6-month-old row must be deleted"
+
+
+class TestLeaderboardBlacklist:
+    """Tests for the dev-only blacklist that excludes streamers from
+    hours/longest leaderboards but keeps them in consistency (stream count)."""
+
+    def test_add_and_get(self, db):
+        added = db.add_to_leaderboard_blacklist("alice", reason="rerun content")
+        assert added is True
+        bl = db.get_leaderboard_blacklist()
+        assert len(bl) == 1
+        assert bl[0]["streamer_name"] == "alice"
+        assert bl[0]["reason"] == "rerun content"
+
+    def test_add_is_case_insensitive(self, db):
+        db.add_to_leaderboard_blacklist("Alice")
+        assert db.is_leaderboard_blacklisted("alice")
+        assert db.is_leaderboard_blacklisted("ALICE")
+
+    def test_add_existing_updates_reason(self, db):
+        db.add_to_leaderboard_blacklist("alice", reason="old reason")
+        # Second add with new reason
+        added = db.add_to_leaderboard_blacklist("alice", reason="new reason")
+        assert added is False  # was already present
+        bl = db.get_leaderboard_blacklist()
+        assert len(bl) == 1
+        assert bl[0]["reason"] == "new reason"
+
+    def test_add_empty_returns_false(self, db):
+        assert db.add_to_leaderboard_blacklist("") is False
+        assert db.add_to_leaderboard_blacklist("   ") is False
+        assert db.get_leaderboard_blacklist() == []
+
+    def test_remove(self, db):
+        db.add_to_leaderboard_blacklist("alice")
+        removed = db.remove_from_leaderboard_blacklist("alice")
+        assert removed is True
+        assert not db.is_leaderboard_blacklisted("alice")
+
+    def test_remove_nonexistent(self, db):
+        removed = db.remove_from_leaderboard_blacklist("nobody")
+        assert removed is False
+
+    def test_blacklist_excludes_from_hours_sort(self, db):
+        """Streamers on the blacklist should NOT appear in the hours sort."""
+        from datetime import datetime as _dt, timezone, timedelta as _td
+        now = _dt.now(timezone.utc)
+        # Two streamers: alice (10h), bob (5h)
+        for name, hours in [("alice", 10), ("bob", 5)]:
+            start = (now - _td(hours=hours+1)).strftime('%Y-%m-%d %H:%M:%S')
+            end = (now - _td(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+            conn = db.get_connection()
+            conn.execute(
+                "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+                "VALUES (?, date(?), ?, ?)",
+                (name, start, start, end)
+            )
+            conn.commit()
+            conn.close()
+
+        # Without blacklist: alice is #1
+        rows = db.get_global_leaderboard(sort_by='hours')
+        assert rows[0]["streamer_name"] == "alice"
+
+        # Blacklist alice → only bob shows in hours
+        db.add_to_leaderboard_blacklist("alice", reason="test")
+        rows = db.get_global_leaderboard(sort_by='hours')
+        names = [r["streamer_name"] for r in rows]
+        assert "alice" not in names
+        assert "bob" in names
+
+    def test_blacklist_does_NOT_exclude_from_consistency(self, db):
+        """Blacklisted streamers still appear in the consistency (stream count)
+        leaderboard. The stream count is real; only the duration is gamed."""
+        from datetime import datetime as _dt, timezone
+        now = _dt.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at) "
+            "VALUES (?, date(?), ?)",
+            ("alice", now, now)
+        )
+        conn.commit()
+        conn.close()
+
+        db.add_to_leaderboard_blacklist("alice", reason="test")
+
+        # consistency still shows alice (the stream actually happened)
+        rows = db.get_global_leaderboard(sort_by='consistency')
+        names = [r["streamer_name"] for r in rows]
+        assert "alice" in names
+
+    def test_blacklist_excludes_from_longest(self, db):
+        """Same exclusion logic applies to the 'longest' sort."""
+        from datetime import datetime as _dt, timezone, timedelta as _td
+        now = _dt.now(timezone.utc)
+        start = (now - _td(hours=11)).strftime('%Y-%m-%d %H:%M:%S')
+        end = (now - _td(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO global_stream_events (streamer_name, stream_date, went_live_at, ended_at) "
+            "VALUES (?, date(?), ?, ?)",
+            ("alice", start, start, end)
+        )
+        conn.commit()
+        conn.close()
+        db.add_to_leaderboard_blacklist("alice", reason="test")
+        rows = db.get_global_leaderboard(sort_by='longest')
+        names = [r["streamer_name"] for r in rows]
+        assert "alice" not in names

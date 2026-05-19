@@ -2838,6 +2838,76 @@ async def dev_stream_events(request):
     })
 
 
+# ── Dev: Leaderboard blacklist ────────────────────────────────────────────────
+async def dev_get_blacklist(request):
+    """Dev-only: return current leaderboard blacklist."""
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Dev access required")
+    if not _bot_ref:
+        return web.json_response({"blacklist": [], "error": "Bot not available"})
+    try:
+        rows = _bot_ref.db.get_leaderboard_blacklist()
+    except Exception as e:
+        logger.error(f"dev_get_blacklist failed: {e}", exc_info=True)
+        return web.json_response({"blacklist": [], "error": str(e)})
+    return web.json_response({"blacklist": rows})
+
+
+async def dev_add_blacklist(request):
+    """Dev-only: add a streamer to the leaderboard blacklist.
+    Body: { streamer_name: str, reason: optional str }."""
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Dev access required")
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    streamer = (body.get("streamer_name") or "").strip()
+    reason = body.get("reason") or None
+    if not streamer:
+        return web.json_response({"error": "streamer_name is required"}, status=400)
+    try:
+        added = _bot_ref.db.add_to_leaderboard_blacklist(streamer, reason=reason)
+    except Exception as e:
+        logger.error(f"dev_add_blacklist failed: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({
+        "ok": True,
+        "added": added,
+        "message": (
+            f"Added {streamer} to blacklist" if added
+            else f"{streamer} was already on the blacklist (reason updated)"
+        ),
+    })
+
+
+async def dev_remove_blacklist(request):
+    """Dev-only: remove a streamer from the leaderboard blacklist."""
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Dev access required")
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+    streamer = request.match_info.get("streamer_name", "")
+    try:
+        from urllib.parse import unquote
+        streamer = unquote(streamer)
+    except Exception:
+        pass
+    if not streamer:
+        return web.json_response({"error": "streamer_name is required"}, status=400)
+    try:
+        removed = _bot_ref.db.remove_from_leaderboard_blacklist(streamer)
+    except Exception as e:
+        logger.error(f"dev_remove_blacklist failed: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"ok": True, "removed": removed})
+
+
 # ── Server Setup Wizard ───────────────────────────────────────────────────────
 def _is_setup_caller_authorized(request) -> tuple:
     """Return (ok, error_message). Setup is restricted to guild owner OR dev.
@@ -4031,7 +4101,10 @@ def create_dashboard_app(bot=None):
     app.router.add_get  ("/api/dev/global-stats",   get_global_stats)
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
     app.router.add_post ("/api/dev/db-tools",       db_tools_action)
-    app.router.add_get  ("/api/dev/stream-events",  dev_stream_events)
+    app.router.add_get   ("/api/dev/stream-events",        dev_stream_events)
+    app.router.add_get   ("/api/dev/leaderboard-blacklist", dev_get_blacklist)
+    app.router.add_post  ("/api/dev/leaderboard-blacklist", dev_add_blacklist)
+    app.router.add_delete("/api/dev/leaderboard-blacklist/{streamer_name}", dev_remove_blacklist)
     app.router.add_post ("/api/guild/{guild_id}/setup/preview", setup_preview)
     app.router.add_post ("/api/guild/{guild_id}/setup/apply",   setup_apply)
     app.router.add_get  ("/api/guild/{guild_id}/setup/status/{setup_id}", setup_status)

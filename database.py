@@ -292,6 +292,19 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Leaderboard blacklist — streamers excluded from hours/longest
+        # leaderboards because they leave rerun content live (so Twitch
+        # reports them live but actual content time is much shorter).
+        # They still appear in the 'consistency' (stream count) leaderboard
+        # because they did go live; just the duration is misleading.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS leaderboard_blacklist (
+                streamer_name TEXT PRIMARY KEY,
+                reason        TEXT,
+                added_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         cursor.execute("SELECT value FROM meta WHERE key = 'global_events_structural_v3'")
         if cursor.fetchone() is None:
             try:
@@ -1317,6 +1330,74 @@ class Database:
                 continue
         return out
 
+    # ── Leaderboard blacklist ─────────────────────────────────────────────
+    def add_to_leaderboard_blacklist(self, streamer_name: str, reason: str = None) -> bool:
+        """Add a streamer to the blacklist. Returns True if new, False if
+        already present. Case-insensitive (stored lowercase)."""
+        name = (streamer_name or "").strip().lower()
+        if not name:
+            return False
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM leaderboard_blacklist WHERE streamer_name = ?", (name,))
+        already = cursor.fetchone() is not None
+        if already:
+            # Upsert reason if it differs
+            cursor.execute(
+                "UPDATE leaderboard_blacklist SET reason = ? WHERE streamer_name = ?",
+                (reason, name),
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO leaderboard_blacklist (streamer_name, reason) VALUES (?, ?)",
+                (name, reason),
+            )
+        conn.commit()
+        conn.close()
+        return not already
+
+    def remove_from_leaderboard_blacklist(self, streamer_name: str) -> bool:
+        """Remove a streamer from the blacklist. Returns True if removed,
+        False if wasn't there."""
+        name = (streamer_name or "").strip().lower()
+        if not name:
+            return False
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM leaderboard_blacklist WHERE streamer_name = ?", (name,))
+        removed = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return removed
+
+    def get_leaderboard_blacklist(self) -> list:
+        """Return all blacklisted streamers, newest-first.
+
+        Returns list of dicts: streamer_name, reason, added_at.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT streamer_name, reason, added_at FROM leaderboard_blacklist ORDER BY added_at DESC"
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [
+            {"streamer_name": r[0], "reason": r[1], "added_at": r[2]}
+            for r in rows
+        ]
+
+    def is_leaderboard_blacklisted(self, streamer_name: str) -> bool:
+        name = (streamer_name or "").strip().lower()
+        if not name:
+            return False
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM leaderboard_blacklist WHERE streamer_name = ?", (name,))
+        result = cursor.fetchone() is not None
+        conn.close()
+        return result
+
     def set_embed_color(self, guild_id: int, color: int):
         """Set the embed color for a server (as hex integer)"""
         conn = self.get_connection()
@@ -1920,6 +2001,18 @@ class Database:
             'longest':     'HAVING longest_hours > 0',
         }
 
+        # Leaderboard blacklist: streamers excluded from hours/longest sorts
+        # but still counted in 'consistency' (stream count is real; only the
+        # duration metrics get gamed by streamers leaving rerun content live).
+        # 'consistency' keeps them in so the leaderboard still reflects who
+        # actually went live this month.
+        blacklist_filter = ''
+        if sort_by in ('hours', 'longest'):
+            blacklist_filter = (
+                "AND g.streamer_name NOT IN ("
+                "SELECT streamer_name FROM leaderboard_blacklist)"
+            )
+
         conn = self.get_connection()
         cursor = conn.cursor()
         sql = f'''
@@ -1942,6 +2035,7 @@ class Database:
                    ), 0) AS longest_hours
             FROM global_stream_events g
             WHERE strftime('%Y-%m', g.went_live_at) = strftime('%Y-%m', 'now')
+            {blacklist_filter}
             GROUP BY g.streamer_name
             {having_clause[sort_by]}
             {order_clauses[sort_by]}

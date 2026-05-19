@@ -3508,6 +3508,118 @@ function Stat({ label, value }) {
   );
 }
 
+// ── Dev: Leaderboard Blacklist (sub-component of DB Tools) ────────────────────
+function LeaderboardBlacklist() {
+  const [list, setList] = useState([]);
+  const [streamerInput, setStreamerInput] = useState("");
+  const [reasonInput, setReasonInput] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiFetch("/api/dev/leaderboard-blacklist");
+      setList(data.blacklist || []);
+      if (data.error) setError(data.error);
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const add = async () => {
+    const name = streamerInput.trim();
+    if (!name) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await apiFetch("/api/dev/leaderboard-blacklist", {
+        method: "POST",
+        body: JSON.stringify({ streamer_name: name, reason: reasonInput.trim() || null }),
+      });
+      setStreamerInput("");
+      setReasonInput("");
+      await load();
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const remove = async (name) => {
+    setError(null);
+    try {
+      await apiFetch(`/api/dev/leaderboard-blacklist/${encodeURIComponent(name)}`, { method: "DELETE" });
+      await load();
+    } catch (e) {
+      setError(e.message || String(e));
+    }
+  };
+
+  return (
+    <div style={{ ...C.card, padding:"14px 18px" }}>
+      <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", marginBottom:12 }}>
+        <CyanInput
+          type="text"
+          placeholder="Streamer name"
+          value={streamerInput}
+          onChange={(e) => setStreamerInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+          style={{ flex:"1 1 180px", minWidth:140 }}
+        />
+        <CyanInput
+          type="text"
+          placeholder="Reason (optional)"
+          value={reasonInput}
+          onChange={(e) => setReasonInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+          style={{ flex:"2 1 280px", minWidth:200 }}
+        />
+        <button onClick={add} disabled={submitting || !streamerInput.trim()}
+          style={{ ...C.btnPrimary, fontSize:12, opacity: (submitting || !streamerInput.trim()) ? 0.5 : 1 }}>
+          {submitting ? "Adding…" : "Add"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ fontSize:12, color:"var(--red)", fontFamily:"'JetBrains Mono',monospace", marginBottom:8 }}>
+          Error: {error}
+        </div>
+      )}
+
+      <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:6 }}>
+        {loading ? "Loading…" : (list.length === 0 ? "No streamers blacklisted." : `${list.length} blacklisted`)}
+      </div>
+
+      {list.length > 0 && (
+        <div style={{ borderTop:"1px solid var(--border)", maxHeight:300, overflowY:"auto" }}>
+          {list.map(item => (
+            <div key={item.streamer_name} style={{ display:"grid", gridTemplateColumns:"1fr 2fr auto", gap:14, fontSize:11, padding:"6px 32px 6px 4px", borderBottom:"1px solid var(--border)", alignItems:"center", fontFamily:"'JetBrains Mono',monospace" }}>
+              <a href={`https://twitch.tv/${item.streamer_name}`} target="_blank" rel="noreferrer" style={{ color:"var(--text)", textDecoration:"none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", minWidth:0 }}>
+                {item.streamer_name}
+              </a>
+              <div style={{ color:"var(--text3)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", minWidth:0 }}>
+                {item.reason || <span style={{ color:"var(--text3)", opacity:0.5 }}>—</span>}
+              </div>
+              <button onClick={() => remove(item.streamer_name)}
+                style={{ ...C.btnDanger, fontSize:11, padding:"4px 10px" }}>
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Dev: DB Tools Tab ─────────────────────────────────────────────────────────
 function DbToolsTab() {
   const [status, setStatus] = useState(null);
@@ -3703,6 +3815,15 @@ function DbToolsTab() {
             {running["reset_hours"] ? "Running…" : "Reset Hours"}
           </button>
         </div>
+
+        {/* ── Leaderboard Blacklist section ──────────────────────────────── */}
+        <div style={{ marginTop:20, marginBottom:8, fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:14, color:"var(--text)", textShadow:"0 0 14px rgba(0,245,212,0.3), 0 0 28px rgba(0,245,212,0.1)" }}>
+          📛 Leaderboard Blacklist
+        </div>
+        <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:8 }}>
+          Streamers excluded from hours/longest leaderboards (still shown in stream count). Use for channels with rerun content inflating their live time.
+        </div>
+        <LeaderboardBlacklist />
 
         {/* ── Stream Events log section ─────────────────────────────────── */}
         <div style={{ marginTop:20, marginBottom:8, fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:14, color:"var(--text)", textShadow:"0 0 14px rgba(0,245,212,0.3), 0 0 28px rgba(0,245,212,0.1)" }}>
