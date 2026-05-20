@@ -1474,17 +1474,6 @@ function WelcomeSettings({ guildId, channels }) {
               <option key={c.id} value={c.id}>#{c.name}</option>
             ))}
           </select>
-          <CyanInput
-            type="text"
-            placeholder="Welcome to {server}, {user}!"
-            value={cfg.welcome_message || ""}
-            onChange={(e) => update({ welcome_message: e.target.value })}
-            disabled={!cfg.welcome_enabled}
-            style={{ fontSize:13 }}
-          />
-          <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
-            Custom message override (uses default if blank). Placeholders: <code>{"{user}"}</code> <code>{"{server}"}</code>
-          </div>
         </div>
       </div>
 
@@ -1511,14 +1500,6 @@ function WelcomeSettings({ guildId, channels }) {
               <option key={c.id} value={c.id}>#{c.name}</option>
             ))}
           </select>
-          <CyanInput
-            type="text"
-            placeholder="{user} left {server}."
-            value={cfg.goodbye_message || ""}
-            onChange={(e) => update({ goodbye_message: e.target.value })}
-            disabled={!cfg.goodbye_enabled}
-            style={{ fontSize:13 }}
-          />
           <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
             Kicks and bans are auto-suppressed via Discord audit log (requires View Audit Log).
           </div>

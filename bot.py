@@ -1273,25 +1273,14 @@ class TwitchNotifierBot(discord.Client):
             logger.error(f"Banner generator returned None for {member} ({action})")
             return
 
-        # Build a fallback content line so screen readers / no-image clients
-        # get something readable.
-        if custom_message:
-            content = welcome_banner.substitute_placeholders(
-                custom_message,
-                user=member.display_name or member.name,
-                server=member.guild.name,
-            )
-        else:
-            tmpl = (welcome_banner.DEFAULT_WELCOME if action == 'welcome'
-                    else welcome_banner.DEFAULT_GOODBYE)
-            content = welcome_banner.substitute_placeholders(
-                tmpl, user=member.display_name or member.name, server=member.guild.name,
-            )
-
+        # Banner-only send — the image speaks for itself. We considered a
+        # text fallback for screen readers but the banner already includes
+        # both the welcome/goodbye phrase and the user's display name, and
+        # the duplicate text in the chat above the image looked noisy.
         import io
         file = discord.File(io.BytesIO(png), filename=f"{action}_banner.png")
         try:
-            await channel.send(content=content, file=file)
+            await channel.send(file=file)
         except discord.Forbidden:
             logger.warning(f"Missing permissions to send {action} banner in {channel} ({member.guild.name})")
         except Exception as e:
