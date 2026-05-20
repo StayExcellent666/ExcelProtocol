@@ -2667,12 +2667,15 @@ async def welcome_preview(request):
     custom_msg = cfg.get("welcome_message" if action == "welcome" else "goodbye_message")
 
     # Preview as the calling user themselves; fall back to a placeholder
-    # name if the session has none.
+    # name if the session has none. Construct the Discord CDN URL from the
+    # stored avatar hash + user_id (the session stores the hash, not the URL).
     username = session.get("username") or "Preview User"
     avatar_bytes = None
     try:
-        avatar_url = session.get("avatar_url")
-        if avatar_url:
+        avatar_hash = session.get("avatar")
+        user_id = session.get("user_id")
+        if avatar_hash and user_id:
+            avatar_url = f"https://cdn.discordapp.com/avatars/{user_id}/{avatar_hash}.png?size=256"
             import aiohttp
             async with aiohttp.ClientSession() as cs:
                 async with cs.get(avatar_url, timeout=aiohttp.ClientTimeout(total=5)) as r:
