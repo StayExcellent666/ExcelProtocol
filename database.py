@@ -293,6 +293,23 @@ class Database:
             )
         ''')
 
+        # Welcome / goodbye banner configuration per guild. Stores per-server
+        # toggles, channel ids, and custom messages. Banner image is generated
+        # on-the-fly via welcome_banner.py — nothing image-related is stored
+        # in the DB, only the textual config.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS welcome_settings (
+                guild_id              INTEGER PRIMARY KEY,
+                welcome_enabled       INTEGER DEFAULT 0,
+                goodbye_enabled       INTEGER DEFAULT 0,
+                welcome_channel_id    INTEGER,
+                goodbye_channel_id    INTEGER,
+                welcome_message       TEXT,
+                goodbye_message       TEXT,
+                updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         # Leaderboard blacklist — streamers excluded from hours/longest
         # leaderboards because they leave rerun content live (so Twitch
         # reports them live but actual content time is much shorter).
@@ -1329,6 +1346,76 @@ class Database:
             except json.JSONDecodeError:
                 continue
         return out
+
+    # ── Welcome / Goodbye banner settings ─────────────────────────────────
+    def get_welcome_settings(self, guild_id: int) -> dict:
+        """Return welcome/goodbye config for a guild, or sensible defaults
+        if no row exists. Always returns a dict with the same shape so
+        downstream code doesn't have to None-check."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT welcome_enabled, goodbye_enabled,
+                   welcome_channel_id, goodbye_channel_id,
+                   welcome_message, goodbye_message
+            FROM welcome_settings WHERE guild_id = ?
+        ''', (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return {
+                'welcome_enabled': False,
+                'goodbye_enabled': False,
+                'welcome_channel_id': None,
+                'goodbye_channel_id': None,
+                'welcome_message': None,
+                'goodbye_message': None,
+            }
+        return {
+            'welcome_enabled': bool(row[0]),
+            'goodbye_enabled': bool(row[1]),
+            'welcome_channel_id': row[2],
+            'goodbye_channel_id': row[3],
+            'welcome_message': row[4],
+            'goodbye_message': row[5],
+        }
+
+    def save_welcome_settings(self, guild_id: int, settings: dict) -> None:
+        """Upsert welcome/goodbye settings for a guild.
+
+        Accepted keys (any subset): welcome_enabled, goodbye_enabled,
+        welcome_channel_id, goodbye_channel_id, welcome_message, goodbye_message.
+        Missing keys keep their previous values.
+        """
+        current = self.get_welcome_settings(guild_id)
+        merged = {**current, **(settings or {})}
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO welcome_settings (
+                guild_id, welcome_enabled, goodbye_enabled,
+                welcome_channel_id, goodbye_channel_id,
+                welcome_message, goodbye_message, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                welcome_enabled    = excluded.welcome_enabled,
+                goodbye_enabled    = excluded.goodbye_enabled,
+                welcome_channel_id = excluded.welcome_channel_id,
+                goodbye_channel_id = excluded.goodbye_channel_id,
+                welcome_message    = excluded.welcome_message,
+                goodbye_message    = excluded.goodbye_message,
+                updated_at         = CURRENT_TIMESTAMP
+        ''', (
+            guild_id,
+            int(bool(merged['welcome_enabled'])),
+            int(bool(merged['goodbye_enabled'])),
+            merged['welcome_channel_id'],
+            merged['goodbye_channel_id'],
+            merged['welcome_message'],
+            merged['goodbye_message'],
+        ))
+        conn.commit()
+        conn.close()
 
     # ── Leaderboard blacklist ─────────────────────────────────────────────
     def add_to_leaderboard_blacklist(self, streamer_name: str, reason: str = None) -> bool:

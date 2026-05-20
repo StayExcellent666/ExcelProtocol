@@ -26,11 +26,21 @@ RUN npm run build
 # =============================================================================
 FROM python:3.11-slim-bullseye 
 
-# Install SQLite runtime and build dependencies
+# Install SQLite runtime, image libs, fonts, and build dependencies.
+# - libsqlite3-* : SQLite
+# - libjpeg62-turbo, libpng16-16, libfreetype6 : Pillow runtime deps for
+#                                                JPEG/PNG/text rendering
+# - fonts-dejavu-core : provides /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+#                       used by welcome_banner.py for the banner text overlay
+# - gcc : transient, removed below after pip install
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     libsqlite3-0 \
     libsqlite3-dev \
+    libjpeg62-turbo \
+    libpng16-16 \
+    libfreetype6 \
+    fonts-dejavu-core \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
@@ -49,7 +59,12 @@ RUN apt-get purge -y gcc && \
     apt-get clean
 
 # Copy only necessary Python files
-COPY utils.py bot.py database.py twitch_api.py config.py twitch_bot.py twitch_chat_cog.py reaction_roles.py setchannel_cog.py birthday_cog.py dashboard_server.py server_setup.py ./
+COPY utils.py bot.py database.py twitch_api.py config.py twitch_bot.py twitch_chat_cog.py reaction_roles.py setchannel_cog.py birthday_cog.py dashboard_server.py server_setup.py welcome_banner.py ./
+
+# Banner template + (future) other static assets used by Python code.
+# welcome_banner.py resolves the template path relative to its own
+# location, so this needs to live alongside the Python files at /app/assets/.
+COPY assets ./assets
 
 # Copy the freshly-built React dashboard from stage 1.
 # (No more committing dist/ to git — it's built fresh on every deploy.)

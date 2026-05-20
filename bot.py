@@ -1093,73 +1093,209 @@ class TwitchNotifierBot(discord.Client):
         logger.info(f"Cleaned up all data for guild {guild.id}")
 
     async def on_member_join(self, member: discord.Member):
-        """Run safety filter on new joins."""
+        """Run safety filter on new joins, then post welcome banner if enabled."""
+        # Track that the safety filter is taking an action so the welcome
+        # banner step can be skipped cleanly. Set before any returns.
+        safety_actioned = False
         try:
             settings = self.db.get_safety_settings(member.guild.id)
             if not settings or not settings['enabled'] or member.bot:
-                return
+                pass  # fall through to welcome banner section below
+            else:
+                # Bypass role short-circuit
+                bypass = False
+                if settings['bypass_role_id']:
+                    bypass_role = member.guild.get_role(settings['bypass_role_id'])
+                    if bypass_role and bypass_role in member.roles:
+                        bypass = True
 
-            # Bypass role short-circuit
-            if settings['bypass_role_id']:
-                bypass_role = member.guild.get_role(settings['bypass_role_id'])
-                if bypass_role and bypass_role in member.roles:
-                    return
+                if not bypass:
+                    account_age_days = (utcnow() - member.created_at).days
+                    reasons = []
 
-            account_age_days = (utcnow() - member.created_at).days
-            reasons = []
+                    if account_age_days < settings['min_account_age_days']:
+                        reasons.append(f"account created {account_age_days} day(s) ago (minimum: {settings['min_account_age_days']})")
+                    if settings['check_no_avatar'] and not member.avatar:
+                        reasons.append("no profile picture")
+                    if settings['check_username_pattern']:
+                        if _SUSPICIOUS_USERNAME_RE.match(member.name.lower()):
+                            reasons.append(f"suspicious username pattern ({member.name})")
 
-            if account_age_days < settings['min_account_age_days']:
-                reasons.append(f"account created {account_age_days} day(s) ago (minimum: {settings['min_account_age_days']})")
-            if settings['check_no_avatar'] and not member.avatar:
-                reasons.append("no profile picture")
-            if settings['check_username_pattern']:
-                if _SUSPICIOUS_USERNAME_RE.match(member.name.lower()):
-                    reasons.append(f"suspicious username pattern ({member.name})")
+                    if reasons:
+                        reason_str = ", ".join(reasons)
+                        action = settings['action']
 
-            if not reasons:
-                return
+                        # DM the user before actioning
+                        if settings['dm_on_kick']:
+                            try:
+                                embed = discord.Embed(
+                                    title=f"{'Kicked' if action == 'kick' else 'Banned'} from {member.guild.name}",
+                                    description=(
+                                        f"You were automatically {'kicked' if action == 'kick' else 'banned'} from **{member.guild.name}** "
+                                        f"by ExcelProtocol's safety filter.\n\n"
+                                        f"**Reason:** {reason_str}\n\n"
+                                        f"{'You can rejoin once your account is older or contact a server admin.' if action == 'kick' else 'Please contact a server admin if you believe this was an error.'}"
+                                    ),
+                                    color=0xFF4444
+                                )
+                                await member.send(embed=embed)
+                            except Exception as e:
+                                logger.debug(f"Safety DM failed for {member} (DMs likely disabled): {e}")
 
-            reason_str = ", ".join(reasons)
-            action = settings['action']
+                        try:
+                            if action == 'ban':
+                                await member.ban(reason=f"ExcelProtocol Safety: {reason_str}", delete_message_seconds=86400)
+                            else:
+                                await member.kick(reason=f"ExcelProtocol Safety: {reason_str}")
+                            safety_actioned = True
+                        except discord.Forbidden:
+                            logger.warning(f"Safety: missing permissions to {action} {member} in {member.guild.name}")
+                        except Exception as e:
+                            logger.error(f"Safety: error actioning {member}: {e}")
 
-            # DM the user before actioning
-            if settings['dm_on_kick']:
-                try:
-                    embed = discord.Embed(
-                        title=f"{'Kicked' if action == 'kick' else 'Banned'} from {member.guild.name}",
-                        description=(
-                            f"You were automatically {'kicked' if action == 'kick' else 'banned'} from **{member.guild.name}** "
-                            f"by ExcelProtocol's safety filter.\n\n"
-                            f"**Reason:** {reason_str}\n\n"
-                            f"{'You can rejoin once your account is older or contact a server admin.' if action == 'kick' else 'Please contact a server admin if you believe this was an error.'}"
-                        ),
-                        color=0xFF4444
-                    )
-                    await member.send(embed=embed)
-                except Exception as e:
-                    logger.debug(f"Safety DM failed for {member} (DMs likely disabled): {e}")
-
-            try:
-                if action == 'ban':
-                    await member.ban(reason=f"ExcelProtocol Safety: {reason_str}", delete_message_seconds=86400)
-                else:
-                    await member.kick(reason=f"ExcelProtocol Safety: {reason_str}")
-            except discord.Forbidden:
-                logger.warning(f"Safety: missing permissions to {action} {member} in {member.guild.name}")
-                return
-            except Exception as e:
-                logger.error(f"Safety: error actioning {member}: {e}")
-                return
-
-            self.db.log_safety_kick(member.guild.id, member.id, str(member), reason_str, action)
-            logger.info(f"Safety {action}: {member} in {member.guild.name} — {reason_str}")
-            await self.log_to_channel(
-                "🛡️", f"Safety Filter — {action.capitalize()}",
-                f"**{member}** (`{member.id}`) in **{member.guild.name}**\n**Reason:** {reason_str}",
-                color=0xFF6B35
-            )
+                        if safety_actioned:
+                            self.db.log_safety_kick(member.guild.id, member.id, str(member), reason_str, action)
+                            logger.info(f"Safety {action}: {member} in {member.guild.name} — {reason_str}")
+                            await self.log_to_channel(
+                                "🛡️", f"Safety Filter — {action.capitalize()}",
+                                f"**{member}** (`{member.id}`) in **{member.guild.name}**\n**Reason:** {reason_str}",
+                                color=0xFF6B35
+                            )
         except Exception as e:
             logger.error(f"Error in safety on_member_join for {member}: {e}", exc_info=True)
+
+        # Welcome banner — skip if the user was just removed by safety filter
+        # or is a bot. Best-effort: any error here just logs without disturbing
+        # the join event.
+        if safety_actioned or member.bot:
+            return
+        try:
+            await self._post_welcome_banner(member)
+        except Exception as e:
+            logger.error(f"Welcome banner failed for {member} in {member.guild.name}: {e}", exc_info=True)
+
+    async def on_member_remove(self, member: discord.Member):
+        """Post goodbye banner if enabled and the leave is voluntary (not
+        a recent kick/ban — those are filtered via audit log check)."""
+        if member.bot:
+            return
+        try:
+            await self._post_goodbye_banner(member)
+        except Exception as e:
+            logger.error(f"Goodbye banner failed for {member} in {member.guild.name}: {e}", exc_info=True)
+
+    async def _post_welcome_banner(self, member: discord.Member):
+        """Generate and post the welcome banner if configured for this guild."""
+        cfg = self.db.get_welcome_settings(member.guild.id)
+        if not cfg['welcome_enabled'] or not cfg['welcome_channel_id']:
+            return
+        channel = member.guild.get_channel(cfg['welcome_channel_id'])
+        if not channel:
+            logger.warning(f"Welcome channel {cfg['welcome_channel_id']} not found in {member.guild.name}")
+            return
+        await self._send_member_banner(
+            member, channel,
+            action='welcome',
+            custom_message=cfg['welcome_message'],
+        )
+
+    async def _post_goodbye_banner(self, member: discord.Member):
+        """Generate and post the goodbye banner, but only if the departure
+        wasn't caused by a recent kick or ban (which we detect via audit log)."""
+        cfg = self.db.get_welcome_settings(member.guild.id)
+        if not cfg['goodbye_enabled'] or not cfg['goodbye_channel_id']:
+            return
+
+        # Audit-log lookup: if a BAN or KICK entry exists for this user in
+        # the last 10 seconds, treat the leave as involuntary and suppress.
+        try:
+            if not member.guild.me.guild_permissions.view_audit_log:
+                # Can't check; default to posting (better than silently swallowing)
+                logger.debug(f"Goodbye: no view_audit_log in {member.guild.name}; posting anyway")
+            else:
+                from datetime import timedelta as _td
+                recent_cutoff = utcnow() - _td(seconds=10)
+                async for entry in member.guild.audit_logs(limit=5):
+                    if entry.created_at < recent_cutoff:
+                        break
+                    if entry.target and entry.target.id == member.id:
+                        if entry.action in (
+                            discord.AuditLogAction.ban,
+                            discord.AuditLogAction.kick,
+                        ):
+                            logger.info(
+                                f"Goodbye: suppressing for {member} in {member.guild.name} "
+                                f"({entry.action.name})"
+                            )
+                            return
+        except Exception as e:
+            logger.debug(f"Audit log check failed for goodbye: {e}")
+            # Fall through and post — fail-open so legitimate leaves aren't
+            # swallowed by an audit-log API hiccup.
+
+        channel = member.guild.get_channel(cfg['goodbye_channel_id'])
+        if not channel:
+            logger.warning(f"Goodbye channel {cfg['goodbye_channel_id']} not found in {member.guild.name}")
+            return
+        await self._send_member_banner(
+            member, channel,
+            action='goodbye',
+            custom_message=cfg['goodbye_message'],
+        )
+
+    async def _send_member_banner(self, member: discord.Member, channel,
+                                    action: str, custom_message=None):
+        """Shared rendering + send for welcome and goodbye banners."""
+        import welcome_banner
+        # Server's embed color for the accent (fallback to brand cyan)
+        try:
+            accent = self.db.get_embed_color(member.guild.id) or 0x00F5D4
+        except Exception:
+            accent = 0x00F5D4
+
+        # Pull avatar bytes via discord.py's async helper
+        avatar_bytes = None
+        try:
+            avatar_asset = member.display_avatar.with_size(256)
+            avatar_bytes = await avatar_asset.read()
+        except Exception as e:
+            logger.debug(f"Avatar fetch failed for {member}: {e}")
+
+        png = await welcome_banner.render_welcome_banner(
+            username=member.display_name or member.name,
+            server_name=member.guild.name,
+            avatar_bytes=avatar_bytes,
+            accent_color=accent,
+            action=action,
+            custom_message=custom_message,
+        )
+        if not png:
+            logger.error(f"Banner generator returned None for {member} ({action})")
+            return
+
+        # Build a fallback content line so screen readers / no-image clients
+        # get something readable.
+        if custom_message:
+            content = welcome_banner.substitute_placeholders(
+                custom_message,
+                user=member.display_name or member.name,
+                server=member.guild.name,
+            )
+        else:
+            tmpl = (welcome_banner.DEFAULT_WELCOME if action == 'welcome'
+                    else welcome_banner.DEFAULT_GOODBYE)
+            content = welcome_banner.substitute_placeholders(
+                tmpl, user=member.display_name or member.name, server=member.guild.name,
+            )
+
+        import io
+        file = discord.File(io.BytesIO(png), filename=f"{action}_banner.png")
+        try:
+            await channel.send(content=content, file=file)
+        except discord.Forbidden:
+            logger.warning(f"Missing permissions to send {action} banner in {channel} ({member.guild.name})")
+        except Exception as e:
+            logger.error(f"Failed to send {action} banner: {e}")
 
     async def on_voice_state_update(self, member, before, after):
         """Handle VC creator — create channels on join, delete when empty."""

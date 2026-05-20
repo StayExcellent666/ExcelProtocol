@@ -1344,6 +1344,220 @@ const sectionHead = (title, sub) => (
   </div>
 );
 
+// ── Welcome & Goodbye Banner Settings (sub-section of Server Settings) ────────
+function WelcomeSettings({ guildId, channels }) {
+  const [cfg, setCfg] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewWhich, setPreviewWhich] = useState("welcome");
+
+  // Text channels only — welcome/goodbye banner must be a text channel
+  const textChannels = (channels || []).filter(c => c.type === 0 || c.type === undefined);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiFetch(`/api/guild/${guildId}/welcome-settings`);
+      setCfg(data);
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [guildId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const update = (patch) => setCfg(prev => ({ ...(prev || {}), ...patch }));
+
+  const save = async () => {
+    if (!cfg) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await apiFetch(`/api/guild/${guildId}/welcome-settings`, {
+        method: "POST",
+        body: JSON.stringify(cfg),
+      });
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 1800);
+      // Invalidate preview so next click regenerates with fresh settings
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+        setPreviewUrl(null);
+      }
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const loadPreview = async (which) => {
+    setPreviewLoading(true);
+    setPreviewWhich(which);
+    setError(null);
+    try {
+      // Use raw fetch so we get the binary PNG, not parsed as JSON
+      const resp = await fetch(
+        `/api/guild/${guildId}/welcome-preview?action=${which}`,
+        { credentials: "include" }
+      );
+      if (!resp.ok) {
+        throw new Error(`Preview returned ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      setPreviewUrl(URL.createObjectURL(blob));
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // Clean up blob URLs when component unmounts
+  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
+
+  if (loading) {
+    return (
+      <div style={{ ...C.card, marginTop:16, padding:16 }}>
+        <div style={{ fontSize:13, color:"var(--text3)" }}>Loading welcome settings…</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ ...C.card, marginTop:16, padding:18 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+        <div>
+          <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:15, color:"var(--text)", textShadow:"0 0 10px rgba(0,245,212,0.3)" }}>
+            👋 Welcome & Goodbye Banners
+          </div>
+          <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:3 }}>
+            Auto-post a hue-shifted banner image when users join or leave. Banner color follows this server's embed color.
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ fontSize:12, color:"var(--red)", fontFamily:"'JetBrains Mono',monospace", marginBottom:10 }}>
+          {error}
+        </div>
+      )}
+
+      {/* Welcome row */}
+      <div style={{ paddingTop:12, borderTop:"1px solid var(--border)" }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+          <div style={{ fontSize:13, fontWeight:600, fontFamily:"'Outfit',sans-serif" }}>Welcome banner</div>
+          <button
+            onClick={() => update({ welcome_enabled: !cfg.welcome_enabled })}
+            style={{ width:44, height:24, borderRadius:12, border:"none", cursor:"pointer", background: cfg.welcome_enabled ? "var(--cyan)" : "var(--border2)", position:"relative", transition:"background 0.2s", boxShadow: cfg.welcome_enabled ? "0 0 10px rgba(0,245,212,0.4)" : "none" }}
+          >
+            <div style={{ position:"absolute", top:3, left: cfg.welcome_enabled ? 22 : 3, width:18, height:18, borderRadius:"50%", background:"#fff", transition:"left 0.2s" }} />
+          </button>
+        </div>
+        <div style={{ display:"flex", flexDirection:"column", gap:8, opacity: cfg.welcome_enabled ? 1 : 0.5 }}>
+          <select
+            value={cfg.welcome_channel_id || ""}
+            onChange={(e) => update({ welcome_channel_id: e.target.value || null })}
+            disabled={!cfg.welcome_enabled}
+            style={{ background:"var(--bg2)", color:"var(--text)", border:"1px solid var(--border)", borderRadius:6, padding:"7px 10px", fontSize:13, fontFamily:"'JetBrains Mono',monospace" }}
+          >
+            <option value="">-- Select welcome channel --</option>
+            {textChannels.map(c => (
+              <option key={c.id} value={c.id}>#{c.name}</option>
+            ))}
+          </select>
+          <CyanInput
+            type="text"
+            placeholder="Welcome to {server}, {user}!"
+            value={cfg.welcome_message || ""}
+            onChange={(e) => update({ welcome_message: e.target.value })}
+            disabled={!cfg.welcome_enabled}
+            style={{ fontSize:13 }}
+          />
+          <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+            Custom message override (uses default if blank). Placeholders: <code>{"{user}"}</code> <code>{"{server}"}</code>
+          </div>
+        </div>
+      </div>
+
+      {/* Goodbye row */}
+      <div style={{ paddingTop:14, marginTop:14, borderTop:"1px solid var(--border)" }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+          <div style={{ fontSize:13, fontWeight:600, fontFamily:"'Outfit',sans-serif" }}>Goodbye banner</div>
+          <button
+            onClick={() => update({ goodbye_enabled: !cfg.goodbye_enabled })}
+            style={{ width:44, height:24, borderRadius:12, border:"none", cursor:"pointer", background: cfg.goodbye_enabled ? "var(--cyan)" : "var(--border2)", position:"relative", transition:"background 0.2s", boxShadow: cfg.goodbye_enabled ? "0 0 10px rgba(0,245,212,0.4)" : "none" }}
+          >
+            <div style={{ position:"absolute", top:3, left: cfg.goodbye_enabled ? 22 : 3, width:18, height:18, borderRadius:"50%", background:"#fff", transition:"left 0.2s" }} />
+          </button>
+        </div>
+        <div style={{ display:"flex", flexDirection:"column", gap:8, opacity: cfg.goodbye_enabled ? 1 : 0.5 }}>
+          <select
+            value={cfg.goodbye_channel_id || ""}
+            onChange={(e) => update({ goodbye_channel_id: e.target.value || null })}
+            disabled={!cfg.goodbye_enabled}
+            style={{ background:"var(--bg2)", color:"var(--text)", border:"1px solid var(--border)", borderRadius:6, padding:"7px 10px", fontSize:13, fontFamily:"'JetBrains Mono',monospace" }}
+          >
+            <option value="">-- Select goodbye channel --</option>
+            {textChannels.map(c => (
+              <option key={c.id} value={c.id}>#{c.name}</option>
+            ))}
+          </select>
+          <CyanInput
+            type="text"
+            placeholder="{user} left {server}."
+            value={cfg.goodbye_message || ""}
+            onChange={(e) => update({ goodbye_message: e.target.value })}
+            disabled={!cfg.goodbye_enabled}
+            style={{ fontSize:13 }}
+          />
+          <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+            Kicks and bans are auto-suppressed via Discord audit log (requires View Audit Log).
+          </div>
+        </div>
+      </div>
+
+      {/* Save + Preview */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:18, paddingTop:14, borderTop:"1px solid var(--border)" }}>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={() => loadPreview("welcome")} disabled={previewLoading}
+            style={{ ...C.btnSecondary, fontSize:12, opacity: previewLoading ? 0.5 : 1 }}>
+            {previewLoading && previewWhich === "welcome" ? "Generating…" : "Preview welcome"}
+          </button>
+          <button onClick={() => loadPreview("goodbye")} disabled={previewLoading}
+            style={{ ...C.btnSecondary, fontSize:12, opacity: previewLoading ? 0.5 : 1 }}>
+            {previewLoading && previewWhich === "goodbye" ? "Generating…" : "Preview goodbye"}
+          </button>
+        </div>
+        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+          {savedFlash && <span style={{ fontSize:11, color:"var(--green)", fontFamily:"'JetBrains Mono',monospace" }}>✓ Saved</span>}
+          <button onClick={save} disabled={saving}
+            style={{ ...C.btnPrimary, fontSize:13, opacity: saving ? 0.5 : 1 }}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+
+      {previewUrl && (
+        <div style={{ marginTop:14, borderRadius:8, overflow:"hidden", border:"1px solid var(--border)" }}>
+          <img src={previewUrl} alt={`${previewWhich} preview`} style={{ width:"100%", display:"block" }} />
+          <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", padding:"6px 10px", background:"var(--bg2)" }}>
+            Preview uses your name and avatar. The real banner will use the joining/leaving user's info.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Server Settings Tab ───────────────────────────────────────────────────────
 function ServerSettingsTab({ guildId }) {
   const [settings, setSettings]       = useState(null);
@@ -1987,6 +2201,9 @@ function ServerSettingsTab({ guildId }) {
             </div>
           )}
         </div>
+
+        {/* ── Welcome & Goodbye Banners ──────────────────────────── */}
+        <WelcomeSettings guildId={guildId} channels={channels} />
       </div>
 
       {/* ── Cleanup Modal ── */}

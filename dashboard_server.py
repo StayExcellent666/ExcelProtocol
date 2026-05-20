@@ -2575,6 +2575,132 @@ async def get_safety_kicks(request):
     return web.json_response(kicks)
 
 
+# ── Welcome / Goodbye settings ───────────────────────────────────────────────
+async def get_welcome_settings(request):
+    """Return the guild's welcome/goodbye config."""
+    guild_id = int(request.match_info["guild_id"])
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+    try:
+        cfg = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _bot_ref.db.get_welcome_settings(guild_id)
+        )
+    except Exception as e:
+        logger.error(f"get_welcome_settings failed: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({
+        "welcome_enabled":     bool(cfg.get("welcome_enabled")),
+        "goodbye_enabled":     bool(cfg.get("goodbye_enabled")),
+        "welcome_channel_id":  str(cfg["welcome_channel_id"]) if cfg.get("welcome_channel_id") else None,
+        "goodbye_channel_id":  str(cfg["goodbye_channel_id"]) if cfg.get("goodbye_channel_id") else None,
+        "welcome_message":     cfg.get("welcome_message"),
+        "goodbye_message":     cfg.get("goodbye_message"),
+    })
+
+
+async def set_welcome_settings(request):
+    """Update the guild's welcome/goodbye config. Body keys are all optional."""
+    guild_id = int(request.match_info["guild_id"])
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    def _opt_int(v):
+        if v is None or v == "":
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    payload = {}
+    if "welcome_enabled" in body:
+        payload["welcome_enabled"] = bool(body["welcome_enabled"])
+    if "goodbye_enabled" in body:
+        payload["goodbye_enabled"] = bool(body["goodbye_enabled"])
+    if "welcome_channel_id" in body:
+        payload["welcome_channel_id"] = _opt_int(body["welcome_channel_id"])
+    if "goodbye_channel_id" in body:
+        payload["goodbye_channel_id"] = _opt_int(body["goodbye_channel_id"])
+    if "welcome_message" in body:
+        msg = (body["welcome_message"] or "").strip()
+        payload["welcome_message"] = msg if msg else None
+    if "goodbye_message" in body:
+        msg = (body["goodbye_message"] or "").strip()
+        payload["goodbye_message"] = msg if msg else None
+
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _bot_ref.db.save_welcome_settings(guild_id, payload)
+        )
+    except Exception as e:
+        logger.error(f"set_welcome_settings failed: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"ok": True})
+
+
+async def welcome_preview(request):
+    """Generate a sample welcome or goodbye banner for the requesting user
+    (in their session). Lets owners preview what their banner looks like
+    before saving / enabling.
+
+    Query string: ?action=welcome|goodbye
+
+    Returns the PNG bytes directly with image/png Content-Type.
+    """
+    session = request["session"]
+    guild_id = int(request.match_info["guild_id"])
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot not available")
+    guild = _bot_ref.get_guild(guild_id)
+    if not guild:
+        raise web.HTTPNotFound(reason="Bot not in guild")
+
+    action = request.query.get("action", "welcome")
+    if action not in ("welcome", "goodbye"):
+        action = "welcome"
+
+    cfg = _bot_ref.db.get_welcome_settings(guild_id)
+    custom_msg = cfg.get("welcome_message" if action == "welcome" else "goodbye_message")
+
+    # Preview as the calling user themselves; fall back to a placeholder
+    # name if the session has none.
+    username = session.get("username") or "Preview User"
+    avatar_bytes = None
+    try:
+        avatar_url = session.get("avatar_url")
+        if avatar_url:
+            import aiohttp
+            async with aiohttp.ClientSession() as cs:
+                async with cs.get(avatar_url, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        avatar_bytes = await r.read()
+    except Exception as e:
+        logger.debug(f"Preview avatar fetch failed: {e}")
+
+    try:
+        accent = _bot_ref.db.get_embed_color(guild_id) or 0x00F5D4
+    except Exception:
+        accent = 0x00F5D4
+
+    import welcome_banner
+    png = await welcome_banner.render_welcome_banner(
+        username=username,
+        server_name=guild.name,
+        avatar_bytes=avatar_bytes,
+        accent_color=accent,
+        action=action,
+        custom_message=custom_msg,
+    )
+    if not png:
+        raise web.HTTPInternalServerError(reason="Banner generation failed")
+
+    return web.Response(body=png, content_type="image/png")
+
+
 # ── VC Creator ────────────────────────────────────────────────────────────────
 async def get_vc_settings(request):
     guild_id = request.match_info["guild_id"]
@@ -4116,6 +4242,9 @@ def create_dashboard_app(bot=None):
     app.router.add_get   ("/api/guild/{guild_id}/safety-settings",          get_safety_settings)
     app.router.add_post  ("/api/guild/{guild_id}/safety-settings",          set_safety_settings)
     app.router.add_get   ("/api/guild/{guild_id}/safety-kicks",             get_safety_kicks)
+    app.router.add_get   ("/api/guild/{guild_id}/welcome-settings",         get_welcome_settings)
+    app.router.add_post  ("/api/guild/{guild_id}/welcome-settings",         set_welcome_settings)
+    app.router.add_get   ("/api/guild/{guild_id}/welcome-preview",          welcome_preview)
     app.router.add_post  ("/api/guild/{guild_id}/stat-channels",            set_stat_channel)
     app.router.add_delete("/api/guild/{guild_id}/stat-channels/{channel_id}", delete_stat_channel)
 
