@@ -284,7 +284,7 @@ def _render_sync(
     # Place the avatar at the vertical middle, left-of-center but right of
     # the logo decoration. Avatar diameter scales with banner height.
     avatar_size = int(canvas_h * 0.55)
-    avatar_x = int(canvas_w * 0.18)
+    avatar_x = int(canvas_w * 0.14)
     avatar_y = (canvas_h - avatar_size) // 2
 
     if avatar_bytes:
@@ -319,7 +319,7 @@ def _render_sync(
     main_font = _find_font(FONT_CANDIDATES_BOLD, main_font_size)
     sub_font = _find_font(FONT_CANDIDATES_REGULAR, sub_font_size)
 
-    text_x = avatar_x + avatar_size + int(canvas_h * 0.12)
+    text_x = avatar_x + avatar_size + int(canvas_h * 0.08)
     text_block_top = int(canvas_h * 0.22)
 
     # Truncate very long usernames; even after truncation we may still need
