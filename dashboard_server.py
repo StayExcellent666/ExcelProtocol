@@ -9,27 +9,17 @@ Enriches data with Discord + Twitch API calls.
 
 import os
 import asyncio
-import hmac
-import hashlib
 import json
-import logging
 import secrets
-import urllib.parse
 import aiosqlite
 import aiohttp as http_client
 from datetime import datetime, timedelta, timezone
 
-import discord
 from aiohttp import web
 from aiohttp_cors import setup as cors_setup, ResourceOptions
 from dotenv import load_dotenv
 
-# Project-internal helpers
-from utils import sanitise_streamer_name, utcnow
-
 load_dotenv()
-
-logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DB_PATH               = os.getenv("DB_PATH", "/data/twitch_bot.db")
@@ -52,12 +42,13 @@ _overlay_connections: dict = {}
 async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: str):
     """Push a !play event to all overlay WebSockets for guilds linked to this Twitch channel.
     Returns True if pushed to at least one overlay, False otherwise."""
+    import json as _json
     if not _bot_ref:
         return False
     guilds = _bot_ref.db.get_guilds_for_twitch_channel(twitch_channel)
     if not guilds:
         return False
-    payload = json.dumps({"type": "play", "video_url": video_url, "volume": 1.0, "redeemer": requester})
+    payload = _json.dumps({"type": "play", "video_url": video_url, "volume": 1.0, "redeemer": requester})
     pushed = False
     for g in guilds:
         gid = str(g['guild_id'])
@@ -75,10 +66,11 @@ async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: s
 
 async def push_stop_to_overlay(twitch_channel: str):
     """Push a stop event to all overlay WebSockets for guilds linked to this Twitch channel."""
+    import json as _json
     if not _bot_ref:
         return
     guilds = _bot_ref.db.get_guilds_for_twitch_channel(twitch_channel)
-    payload = json.dumps({"type": "stop"})
+    payload = _json.dumps({"type": "stop"})
     for g in guilds:
         gid = str(g['guild_id'])
         conns = _overlay_connections.get(gid, set())
@@ -93,10 +85,11 @@ async def push_stop_to_overlay(twitch_channel: str):
 
 async def push_skip_to_overlay(twitch_channel: str):
     """Skip the current video — overlay will play the next queued item if any."""
+    import json as _json
     if not _bot_ref:
         return False
     guilds = _bot_ref.db.get_guilds_for_twitch_channel(twitch_channel)
-    payload = json.dumps({"type": "skip"})
+    payload = _json.dumps({"type": "skip"})
     pushed = False
     for g in guilds:
         gid = str(g['guild_id'])
@@ -119,49 +112,20 @@ _eventsub_seen: dict = {}
 _bot_ref = None
 
 # ── DB Helper ─────────────────────────────────────────────────────────────────
-# Single long-lived aiosqlite connection. SQLite in WAL mode handles concurrent
-# reads from one process fine; serialising writes through one connection avoids
-# the "open + PRAGMA + close" overhead that the previous per-call pattern paid
-# on every endpoint hit.
-_db_conn: aiosqlite.Connection | None = None
-_db_lock = asyncio.Lock()
-
-
-async def _get_db_conn() -> aiosqlite.Connection:
-    """Return the shared aiosqlite connection, opening it lazily on first use."""
-    global _db_conn
-    if _db_conn is None:
-        async with _db_lock:
-            if _db_conn is None:  # double-check inside the lock
-                conn = await aiosqlite.connect(DB_PATH, timeout=30)
-                await conn.execute("PRAGMA journal_mode=WAL")
-                await conn.execute("PRAGMA busy_timeout=30000")
-                conn.row_factory = aiosqlite.Row
-                _db_conn = conn
-    return _db_conn
-
-
-async def _close_db_conn():
-    """Close the shared connection on shutdown."""
-    global _db_conn
-    if _db_conn is not None:
-        try:
-            await _db_conn.close()
-        except Exception as e:
-            logger.debug(f"Error closing dashboard DB connection: {e}")
-        _db_conn = None
-
-
 async def db_fetch(query: str, params: tuple = ()):
-    db = await _get_db_conn()
-    async with db.execute(query, params) as cursor:
-        return [dict(r) for r in await cursor.fetchall()]
-
+    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
+        db.row_factory = aiosqlite.Row
+        async with db.execute(query, params) as cursor:
+            return [dict(r) for r in await cursor.fetchall()]
 
 async def db_execute(query: str, params: tuple = ()):
-    db = await _get_db_conn()
-    await db.execute(query, params)
-    await db.commit()
+    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute(query, params)
+        await db.commit()
 
 # ── Shared HTTP Session ───────────────────────────────────────────────────────
 _http_session: http_client.ClientSession | None = None
@@ -197,15 +161,15 @@ async def get_channel_name(channel_id: str) -> str:
         name = data.get("name")
         if name:
             return f"#{name}"
-    except Exception as _e:
-        logger.debug(f"suppressed exception: {_e}")
+    except Exception:
+        pass
     if _bot_ref:
         try:
             ch = _bot_ref.get_channel(int(channel_id))
             if ch and hasattr(ch, "name"):
                 return f"#{ch.name}"
-        except Exception as _e:
-            logger.debug(f"suppressed exception: {_e}")
+        except Exception:
+            pass
     return channel_id
 
 async def get_guild_roles(guild_id: str) -> dict:
@@ -271,20 +235,21 @@ async def get_guild_channels(guild_id: str) -> list:
                 ]
                 if text:
                     return sorted(text, key=lambda c: c["position"])
-    except Exception as _e:
-        logger.debug(f"suppressed exception: {_e}")
+    except Exception:
+        pass
     if _bot_ref:
         try:
+            import discord as _discord
             guild_obj = _bot_ref.get_guild(int(guild_id))
             if guild_obj:
                 text = [
                     {"id": str(c.id), "name": c.name, "position": c.position, "parent_id": str(c.category_id or "")}
                     for c in guild_obj.channels
-                    if isinstance(c, discord.TextChannel)
+                    if isinstance(c, _discord.TextChannel)
                 ]
                 return sorted(text, key=lambda c: c["position"])
-        except Exception as _e:
-            logger.debug(f"suppressed exception: {_e}")
+        except Exception:
+            pass
     return []
 
 async def get_guild_voice_channels(guild_id: str) -> list:
@@ -303,20 +268,21 @@ async def get_guild_voice_channels(guild_id: str) -> list:
                 ]
                 if voice:
                     return sorted(voice, key=lambda c: c["position"])
-    except Exception as _e:
-        logger.debug(f"suppressed exception: {_e}")
+    except Exception:
+        pass
     if _bot_ref:
         try:
+            import discord as _discord
             guild_obj = _bot_ref.get_guild(int(guild_id))
             if guild_obj:
                 voice = [
                     {"id": str(c.id), "name": c.name, "position": c.position}
                     for c in guild_obj.channels
-                    if isinstance(c, discord.VoiceChannel)
+                    if isinstance(c, _discord.VoiceChannel)
                 ]
                 return sorted(voice, key=lambda c: c["position"])
-        except Exception as _e:
-            logger.debug(f"suppressed exception: {_e}")
+        except Exception:
+            pass
     return []
 
 # ── Twitch API Helper ─────────────────────────────────────────────────────────
@@ -324,7 +290,7 @@ _twitch_token: dict = {"token": None, "expires_at": None}
 _twitch_cache: dict = {}
 
 async def get_twitch_token() -> str:
-    now = utcnow()
+    now = datetime.utcnow()
     if _twitch_token["token"] and _twitch_token["expires_at"] and now < _twitch_token["expires_at"] - timedelta(seconds=60):
         return _twitch_token["token"]
     session = get_http_session()
@@ -364,8 +330,8 @@ async def get_twitch_users(usernames: list) -> dict:
                         "description":       u.get("description", ""),
                         "broadcaster_type":  u.get("broadcaster_type", ""),
                     }
-        except Exception as _e:
-            logger.debug(f"suppressed exception: {_e}")
+        except Exception:
+            pass
     return {u: _twitch_cache.get(u.lower(), {}) for u in usernames}
 
 # ── Session Store ─────────────────────────────────────────────────────────────
@@ -463,6 +429,9 @@ async def reload_rr_views(request=None):
     except Exception as e:
         logger.error(f"Failed to reload reaction role views: {e}")
 
+import logging
+logger = logging.getLogger(__name__)
+
 # ── OAuth2 ────────────────────────────────────────────────────────────────────
 # In-memory state store for CSRF protection — {state: True}
 _oauth_states: dict = {}
@@ -470,24 +439,14 @@ _oauth_states: dict = {}
 # Twitch OAuth state store — {state: {guild_id, session_token, expires_at}}
 _twitch_oauth_states: dict = {}
 
-def _prune_oauth_states(states: dict, ttl_seconds: int = 600, now: float | None = None):
-    """Remove OAuth state entries older than ttl_seconds. Mutates `states` in place.
-
-    Pure helper extracted for testability — called from auth_login.
-    """
-    if now is None:
-        now = datetime.now(timezone.utc).timestamp()
-    cutoff = now - ttl_seconds
-    stale = [k for k, v in list(states.items()) if v < cutoff]
-    for k in stale:
-        del states[k]
-    return len(stale)
-
-
 async def auth_login(request):
     state = secrets.token_hex(16)
     _oauth_states[state] = datetime.now(timezone.utc).timestamp()
-    _prune_oauth_states(_oauth_states)
+    # Clean up states older than 10 minutes
+    cutoff = datetime.now(timezone.utc).timestamp() - 600
+    stale = [k for k, v in list(_oauth_states.items()) if v < cutoff]
+    for k in stale:
+        del _oauth_states[k]
     url = (
         f"https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
@@ -684,8 +643,8 @@ async def get_guild_summary(request):
                         member = next((m for m in guild_obj.members if m.id == uid), None)
                     if member:
                         discord_display_name = member.display_name
-            except Exception as _e:
-                logger.debug(f"suppressed exception: {_e}")
+            except Exception:
+                pass
         streamers.append({
             **s,
             "display_name":          tw.get("display_name", s["twitch_username"]),
@@ -747,8 +706,8 @@ async def get_streamers(request):
             if guild_obj:
                 for m in guild_obj.members:
                     member_names[str(m.id)] = m.display_name
-        except Exception as _e:
-            logger.debug(f"suppressed exception: {_e}")
+        except Exception:
+            pass
 
     result = []
     for r in rows:
@@ -765,7 +724,8 @@ async def get_streamers(request):
             "channel_name":          ch_name,
             "discord_display_name":  discord_display_name,
         })
-    limit = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id))) if _bot_ref else 75
+    import asyncio as _asyncio
+    limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id))) if _bot_ref else 75
     count = len(result)
     return web.json_response({"streamers": result, "count": count, "limit": limit})
 
@@ -776,7 +736,13 @@ async def add_streamer(request):
     channel_id   = body.get("channel_id")
 
     # Strip URLs, @ signs, and trailing slashes so users can paste full Twitch URLs
-    twitch_username = sanitise_streamer_name(raw_username)
+    twitch_username = raw_username.lower()
+    for prefix in ("https://www.twitch.tv/", "http://www.twitch.tv/",
+                   "https://twitch.tv/", "http://twitch.tv/", "twitch.tv/"):
+        if twitch_username.startswith(prefix):
+            twitch_username = twitch_username[len(prefix):]
+            break
+    twitch_username = twitch_username.lstrip("@").split("/")[0].split("?")[0].strip()
 
     if not twitch_username or not channel_id:
         raise web.HTTPBadRequest(reason="twitch_username and channel_id are required")
@@ -792,8 +758,9 @@ async def add_streamer(request):
     # Check streamer limit — dev sessions are exempt
     session = request.get("session", {})
     if not session.get("dev") and _bot_ref:
-        limit = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id)))
-        count = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_count(int(guild_id)))
+        import asyncio as _asyncio
+        limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_limit(int(guild_id)))
+        count = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_streamer_count(int(guild_id)))
         if count >= limit:
             raise web.HTTPForbidden(reason=f"Streamer limit reached ({count}/{limit}). Contact the bot owner to increase your limit.")
 
@@ -819,12 +786,17 @@ async def add_streamer(request):
 
 async def delete_streamer(request):
     guild_id = request.match_info["guild_id"]
-    raw_username = request.match_info["username"]
+    username = request.match_info["username"]
     # Sanitise in case a URL was stored — strip prefix so the DB lookup matches
-    username = sanitise_streamer_name(raw_username)
+    for prefix in ("https://www.twitch.tv/", "http://www.twitch.tv/",
+                   "https://twitch.tv/", "http://twitch.tv/", "twitch.tv/"):
+        if username.lower().startswith(prefix):
+            username = username[len(prefix):]
+            break
+    username = username.lstrip("@").split("?")[0].strip()
     await db_execute(
         "DELETE FROM monitored_streamers WHERE guild_id = ? AND streamer_name = ?",
-        (guild_id, username),
+        (guild_id, username.lower()),
     )
     if _bot_ref:
         await _bot_ref.log_to_channel(
@@ -1006,6 +978,7 @@ async def create_reaction_role(request):
     if _bot_ref is None:
         raise web.HTTPInternalServerError(reason="Bot not available — try again in a moment")
 
+    import json as _json
     import reaction_roles as rr_module
 
     # Convert role_id strings to ints as reaction_roles.py expects
@@ -1023,6 +996,7 @@ async def create_reaction_role(request):
 
     embed_color = _bot_ref.db.get_embed_color(int(guild_id))
 
+    import discord
     embed = discord.Embed(title=title, description=body_text, color=embed_color)
 
     # Build a temporary view to post (message_id=0), then re-edit with correct ID
@@ -1068,14 +1042,20 @@ async def create_reaction_role(request):
 # ── Edit Streamer ─────────────────────────────────────────────────────────────
 async def edit_streamer(request):
     guild_id = request.match_info["guild_id"]
-    username = sanitise_streamer_name(request.match_info["username"])
+    username = request.match_info["username"]
+    for prefix in ("https://www.twitch.tv/", "http://www.twitch.tv/",
+                   "https://twitch.tv/", "http://twitch.tv/", "twitch.tv/"):
+        if username.lower().startswith(prefix):
+            username = username[len(prefix):]
+            break
+    username = username.lstrip("@").split("?")[0].strip()
     body = await request.json()
     channel_id = body.get("channel_id")
     if not channel_id:
         raise web.HTTPBadRequest(reason="channel_id is required")
     await db_execute(
         "UPDATE monitored_streamers SET custom_channel_id = ? WHERE guild_id = ? AND streamer_name = ?",
-        (channel_id, guild_id, username),
+        (channel_id, guild_id, username.lower()),
     )
     # Clear stale permission issues — next check will re-evaluate with new channel
     await db_execute("DELETE FROM permission_issues WHERE guild_id = ?", (guild_id,))
@@ -1091,6 +1071,7 @@ async def edit_reaction_role(request):
         raise web.HTTPInternalServerError(reason="Bot not available")
 
     import reaction_roles as rr_module
+    import discord
 
     # Get current entry from DB
     entry = _bot_ref.db.rr_get(int(message_id))
@@ -1216,8 +1197,8 @@ async def post_support(request):
             guild_obj = _bot_ref.get_guild(int(guild_id))
             if guild_obj:
                 guild_name = guild_obj.name
-        except Exception as _e:
-            logger.debug(f"suppressed exception: {_e}")
+        except Exception:
+            pass
 
     s = get_http_session()
     dm_resp = await s.post(
@@ -1293,8 +1274,8 @@ async def get_birthdays(request):
                     member = guild.get_member(int(r["user_id"]))
                     if member:
                         username = member.display_name
-            except Exception as _e:
-                logger.debug(f"suppressed exception: {_e}")
+            except Exception:
+                pass
         result.append({
             "user_id":  str(r["user_id"]),
             "username": username or str(r["user_id"]),
@@ -1334,9 +1315,7 @@ async def delete_birthday(request):
 async def get_server_settings(request):
     guild_id = request.match_info["guild_id"]
     rows = await db_fetch(
-        "SELECT notification_channel_id, embed_color, auto_delete_notifications, milestone_notifications, "
-        "ping_role_id, live_role_id "
-        "FROM server_settings WHERE guild_id = ?",
+        "SELECT notification_channel_id, embed_color, auto_delete_notifications, milestone_notifications, ping_role_id, live_role_id FROM server_settings WHERE guild_id = ?",
         (guild_id,)
     )
     bday = await db_fetch("SELECT channel_id FROM birthday_channels WHERE guild_id = ?", (guild_id,))
@@ -1515,7 +1494,8 @@ async def set_streamer_limit(request):
     if limit is None or not isinstance(limit, int) or limit < 1:
         raise web.HTTPBadRequest(reason="limit must be a positive integer")
     if _bot_ref:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_streamer_limit(int(guild_id), limit))
+        import asyncio as _asyncio
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_streamer_limit(int(guild_id), limit))
     else:
         await db_execute(
             "INSERT INTO server_settings (guild_id, notification_channel_id, streamer_limit) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET streamer_limit = ?",
@@ -1528,10 +1508,11 @@ async def set_streamer_limit(request):
 async def get_twitch_info(request):
     """Get linked twitch channel + all commands for a guild."""
     guild_id = request.match_info["guild_id"]
+    import asyncio as _asyncio
     if not _bot_ref:
         return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50})
 
-    row = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
+    row = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
 
     # If no /twitchset channel, fall back to the broadcaster OAuth token login
     if not row:
@@ -1541,16 +1522,24 @@ async def get_twitch_info(request):
         if broadcaster_rows:
             twitch_login = broadcaster_rows[0]["twitch_login"]
             # Auto-link the channel using the broadcaster login
-            await asyncio.get_event_loop().run_in_executor(
+            await _asyncio.get_event_loop().run_in_executor(
                 None, lambda: _bot_ref.db.set_twitch_channel(int(guild_id), twitch_login)
             )
+            # Also tell the running chat bot to join this channel. Without
+            # this, the bot only ever joins what was in the DB at startup —
+            # newly-linked channels would be silent until the next restart.
+            if _bot_ref and getattr(_bot_ref, "twitch_chat_bot", None):
+                try:
+                    await _bot_ref.twitch_chat_bot.join_channel(twitch_login)
+                except Exception as e:
+                    logger.warning(f"Auto-link: chat bot failed to join {twitch_login}: {e}")
             row = {"twitch_channel": twitch_login}
         else:
             return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50, "can_link_via_oauth": True})
 
     channel = row["twitch_channel"]
-    commands = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_commands(channel))
-    limit = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_limit(int(guild_id)))
+    commands = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_commands(channel))
+    limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_limit(int(guild_id)))
 
     # Check if bot is modded in the channel
     bot_is_modded = False
@@ -1597,8 +1586,9 @@ async def set_play_enabled(request):
     guild_id = request.match_info["guild_id"]
     body = await request.json()
     enabled = bool(body.get("enabled", False))
+    import asyncio as _asyncio
     if _bot_ref:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_play_enabled(int(guild_id), enabled))
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_play_enabled(int(guild_id), enabled))
     else:
         await db_execute("UPDATE twitch_channels SET play_enabled = ? WHERE guild_id = ?", (int(enabled), guild_id))
     return web.json_response({"ok": True, "play_enabled": enabled})
@@ -1609,8 +1599,9 @@ async def set_overlay_volume(request):
     guild_id = request.match_info["guild_id"]
     body = await request.json()
     volume = max(0, min(100, int(body.get("volume", 100))))
+    import asyncio as _asyncio
     if _bot_ref:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_overlay_volume(int(guild_id), volume))
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_overlay_volume(int(guild_id), volume))
     else:
         await db_execute("UPDATE twitch_channels SET overlay_volume = ? WHERE guild_id = ?", (volume, guild_id))
     # Push live to any connected overlay WebSockets
@@ -1683,11 +1674,12 @@ async def add_twitch_command(request):
     guild_id = request.match_info["guild_id"]
     body = await request.json()
     session = request.get("session", {})
+    import asyncio as _asyncio
 
     if not _bot_ref:
         raise web.HTTPInternalServerError(reason="Bot not available")
 
-    row = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
+    row = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
     if not row:
         raise web.HTTPBadRequest(reason="No Twitch channel linked to this guild")
 
@@ -1705,14 +1697,14 @@ async def add_twitch_command(request):
         raise web.HTTPBadRequest(reason="Invalid permission level")
 
     # Check limit unless dev or editing existing
-    existing = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_command(channel, command_name))
+    existing = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_command(channel, command_name))
     if not existing and not session.get("dev"):
-        limit = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_limit(int(guild_id)))
-        count = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_count(int(guild_id)))
+        limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_limit(int(guild_id)))
+        count = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_count(int(guild_id)))
         if count >= limit:
             raise web.HTTPForbidden(reason=f"Command limit reached ({count}/{limit}). Contact the bot owner to increase your limit.")
 
-    success = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.add_twitch_command(channel, command_name, response, permission, cooldown))
+    success = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.add_twitch_command(channel, command_name, response, permission, cooldown))
     if not success:
         raise web.HTTPInternalServerError(reason="Failed to save command")
     return web.json_response({"ok": True})
@@ -1720,15 +1712,16 @@ async def add_twitch_command(request):
 async def delete_twitch_command(request):
     guild_id = request.match_info["guild_id"]
     command_name = request.match_info["command_name"]
+    import asyncio as _asyncio
 
     if not _bot_ref:
         raise web.HTTPInternalServerError(reason="Bot not available")
 
-    row = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
+    row = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
     if not row:
         raise web.HTTPNotFound(reason="No Twitch channel linked")
 
-    await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.remove_twitch_command(row["twitch_channel"], command_name))
+    await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.remove_twitch_command(row["twitch_channel"], command_name))
     return web.json_response({"ok": True})
 
 async def set_command_limit(request):
@@ -1740,8 +1733,9 @@ async def set_command_limit(request):
     limit = body.get("limit")
     if limit is None or not isinstance(limit, int) or limit < 1:
         raise web.HTTPBadRequest(reason="limit must be a positive integer")
+    import asyncio as _asyncio
     if _bot_ref:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_command_limit(int(guild_id), limit))
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_command_limit(int(guild_id), limit))
     else:
         await db_execute("INSERT INTO server_settings (guild_id, notification_channel_id, command_limit) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET command_limit = ?", (guild_id, limit, limit))
     return web.json_response({"ok": True, "limit": limit})
@@ -1768,6 +1762,7 @@ async def twitch_broadcaster_login(request):
         "expires_at":    (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
     }
 
+    import urllib.parse
     params = urllib.parse.urlencode({
         "client_id":    TWITCH_CLIENT_ID,
         "redirect_uri": TWITCH_REDIRECT_URI,
@@ -1834,9 +1829,31 @@ async def twitch_broadcaster_callback(request):
         raise web.HTTPInternalServerError(reason="Could not get Twitch user info")
 
     if _bot_ref:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_broadcaster_token(
+        import asyncio as _asyncio
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_broadcaster_token(
             int(guild_id), user["id"], user["login"], access_token, refresh_token, expires_at
         ))
+        # Auto-link the chat bot's commands surface to this Twitch channel
+        # too (otherwise the user has to also run /twitchset). Then tell
+        # the running chat bot to join the new channel dynamically — without
+        # this, custom commands work in DB but the bot isn't in chat.
+        twitch_login = user["login"]
+        try:
+            existing = await _asyncio.get_event_loop().run_in_executor(
+                None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id))
+            )
+            if not existing:
+                await _asyncio.get_event_loop().run_in_executor(
+                    None, lambda: _bot_ref.db.set_twitch_channel(int(guild_id), twitch_login)
+                )
+        except Exception as e:
+            logger.warning(f"OAuth: failed to auto-link twitch_channel for guild {guild_id}: {e}")
+        if getattr(_bot_ref, "twitch_chat_bot", None):
+            try:
+                await _bot_ref.twitch_chat_bot.join_channel(twitch_login)
+                logger.info(f"OAuth: chat bot joining new channel {twitch_login}")
+            except Exception as e:
+                logger.warning(f"OAuth: chat bot failed to join {twitch_login}: {e}")
     else:
         await db_execute(
             "INSERT INTO broadcaster_tokens (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET twitch_user_id=excluded.twitch_user_id, twitch_login=excluded.twitch_login, access_token=excluded.access_token, refresh_token=excluded.refresh_token, expires_at=excluded.expires_at",
@@ -1852,7 +1869,8 @@ async def twitch_broadcaster_disconnect(request):
     """Remove stored broadcaster token for a guild."""
     guild_id = request.match_info["guild_id"]
     if _bot_ref:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.delete_broadcaster_token(int(guild_id)))
+        import asyncio as _asyncio
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.delete_broadcaster_token(int(guild_id)))
     else:
         await db_execute("DELETE FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
     return web.json_response({"ok": True})
@@ -1889,21 +1907,9 @@ async def _register_eventsub(broadcaster_user_id: str):
         logger.error(f"Error registering EventSub for {broadcaster_user_id}: {e}")
 
 # ── EventSub Webhook ──────────────────────────────────────────────────────────
-
-def verify_eventsub_signature(secret: bytes, msg_id: str, msg_timestamp: str,
-                              body: bytes, msg_signature: str) -> bool:
-    """Verify the HMAC-SHA256 signature on an incoming Twitch EventSub webhook.
-
-    Pure, testable. Returns True if the signature is valid, False otherwise.
-    Constant-time comparison via hmac.compare_digest.
-    """
-    hmac_msg = (msg_id + msg_timestamp + body.decode()).encode()
-    expected = "sha256=" + hmac.new(secret, hmac_msg, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, msg_signature)
-
-
 async def eventsub_callback(request):
     """Receive EventSub events from Twitch and push to overlay websockets."""
+    import hmac, hashlib
     body = await request.read()
     secret = os.getenv("EVENTSUB_SECRET")
     if not secret:
@@ -1915,10 +1921,13 @@ async def eventsub_callback(request):
     msg_id        = request.headers.get("Twitch-Eventsub-Message-Id", "")
     msg_timestamp = request.headers.get("Twitch-Eventsub-Message-Timestamp", "")
     msg_signature = request.headers.get("Twitch-Eventsub-Message-Signature", "")
-    if not verify_eventsub_signature(secret, msg_id, msg_timestamp, body, msg_signature):
+    hmac_msg = (msg_id + msg_timestamp + body.decode()).encode()
+    expected = "sha256=" + hmac.new(secret, hmac_msg, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, msg_signature):
         raise web.HTTPForbidden(reason="Invalid signature")
 
-    data = json.loads(body)
+    import json as _json
+    data = _json.loads(body)
     msg_type = request.headers.get("Twitch-Eventsub-Message-Type", "")
 
     # Twitch sends a challenge to verify the webhook
@@ -1926,7 +1935,7 @@ async def eventsub_callback(request):
         return web.Response(text=data["challenge"], content_type="text/plain")
 
     # Deduplicate by message ID — Twitch may re-deliver the same event
-    now = utcnow()
+    now = datetime.utcnow()
     if msg_id in _eventsub_seen:
         logger.debug(f"Dropping duplicate EventSub message {msg_id}")
         return web.Response(status=204)
@@ -1969,7 +1978,8 @@ async def eventsub_callback(request):
                 )
                 if trigger_rows:
                     trigger = trigger_rows[0]
-                    payload = json.dumps({
+                    import json as _json
+                    payload = _json.dumps({
                         "type": "play",
                         "video_url": trigger["video_url"],
                         "volume": trigger["volume"],
@@ -1989,6 +1999,7 @@ async def eventsub_callback(request):
 # ── Overlay WebSocket ─────────────────────────────────────────────────────────
 async def overlay_ws(request):
     """WebSocket endpoint for OBS browser source overlays."""
+    import asyncio as _asyncio
     guild_id = request.match_info["guild_id"]
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
@@ -1997,12 +2008,12 @@ async def overlay_ws(request):
     try:
         volume = _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100
         await ws.send_str(json.dumps({"type": "set_volume", "volume": volume}))
-    except Exception as _e:
-        logger.debug(f"suppressed exception: {_e}")
+    except Exception:
+        pass
     try:
         async for msg in ws:
             pass  # overlay only receives, doesn't need to send back
-    except asyncio.CancelledError:
+    except _asyncio.CancelledError:
         pass
     except Exception as e:
         logger.debug(f"Overlay WS closed for guild {guild_id}: {e}")
@@ -2430,7 +2441,8 @@ async def recheck_permissions(request):
     guild = _bot_ref.get_guild(int(guild_id))
     if not guild:
         raise web.HTTPNotFound(reason="Guild not found")
-    asyncio.create_task(_bot_ref._check_guild_permissions(guild))
+    import asyncio as _asyncio
+    _asyncio.create_task(_bot_ref._check_guild_permissions(guild))
     return web.json_response({"ok": True})
 
 
@@ -2471,6 +2483,7 @@ async def fix_permissions(request):
         })
 
     # Attempt to set channel overwrites
+    import discord as _discord
     try:
         overwrite = channel.overwrites_for(guild.me)
         overwrite.view_channel    = True
@@ -2487,7 +2500,7 @@ async def fix_permissions(request):
             "can_fix": True,
             "message": f"Permissions updated for #{channel.name}. Running a re-check now..."
         })
-    except discord.Forbidden:
+    except _discord.Forbidden:
         return web.json_response({
             "ok": False,
             "can_fix": False,
@@ -2511,8 +2524,9 @@ async def fix_permissions(request):
 # ── Safety ────────────────────────────────────────────────────────────────────
 async def get_safety_settings(request):
     guild_id = request.match_info["guild_id"]
+    import asyncio as _asyncio
     if _bot_ref:
-        settings = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_safety_settings(int(guild_id)))
+        settings = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_safety_settings(int(guild_id)))
     else:
         rows = await db_fetch("SELECT * FROM safety_settings WHERE guild_id = ?", (guild_id,))
         settings = rows[0] if rows else None
@@ -2533,8 +2547,9 @@ async def get_safety_settings(request):
 async def set_safety_settings(request):
     guild_id = request.match_info["guild_id"]
     body = await request.json()
+    import asyncio as _asyncio
     if _bot_ref:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_safety_settings(
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_safety_settings(
             int(guild_id),
             enabled=bool(body.get("enabled", False)),
             min_account_age_days=int(body.get("min_account_age_days", 7)),
@@ -2563,8 +2578,9 @@ async def set_safety_settings(request):
 
 async def get_safety_kicks(request):
     guild_id = request.match_info["guild_id"]
+    import asyncio as _asyncio
     if _bot_ref:
-        kicks = await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_safety_kicks(int(guild_id), limit=100))
+        kicks = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_safety_kicks(int(guild_id), limit=100))
     else:
         rows = await db_fetch(
             "SELECT user_id, username, reason, action, kicked_at FROM safety_kicks WHERE guild_id = ? ORDER BY kicked_at DESC LIMIT 100",
@@ -2573,135 +2589,6 @@ async def get_safety_kicks(request):
         kicks = [{"user_id": str(r["user_id"]), "username": r["username"], "reason": r["reason"],
                   "action": r["action"], "kicked_at": r["kicked_at"]} for r in rows]
     return web.json_response(kicks)
-
-
-# ── Welcome / Goodbye settings ───────────────────────────────────────────────
-async def get_welcome_settings(request):
-    """Return the guild's welcome/goodbye config."""
-    guild_id = int(request.match_info["guild_id"])
-    if not _bot_ref:
-        return web.json_response({"error": "Bot not available"}, status=503)
-    try:
-        cfg = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _bot_ref.db.get_welcome_settings(guild_id)
-        )
-    except Exception as e:
-        logger.error(f"get_welcome_settings failed: {e}", exc_info=True)
-        return web.json_response({"error": str(e)}, status=500)
-    return web.json_response({
-        "welcome_enabled":     bool(cfg.get("welcome_enabled")),
-        "goodbye_enabled":     bool(cfg.get("goodbye_enabled")),
-        "welcome_channel_id":  str(cfg["welcome_channel_id"]) if cfg.get("welcome_channel_id") else None,
-        "goodbye_channel_id":  str(cfg["goodbye_channel_id"]) if cfg.get("goodbye_channel_id") else None,
-        "welcome_message":     cfg.get("welcome_message"),
-        "goodbye_message":     cfg.get("goodbye_message"),
-    })
-
-
-async def set_welcome_settings(request):
-    """Update the guild's welcome/goodbye config. Body keys are all optional."""
-    guild_id = int(request.match_info["guild_id"])
-    if not _bot_ref:
-        return web.json_response({"error": "Bot not available"}, status=503)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-
-    def _opt_int(v):
-        if v is None or v == "":
-            return None
-        try:
-            return int(v)
-        except (TypeError, ValueError):
-            return None
-
-    payload = {}
-    if "welcome_enabled" in body:
-        payload["welcome_enabled"] = bool(body["welcome_enabled"])
-    if "goodbye_enabled" in body:
-        payload["goodbye_enabled"] = bool(body["goodbye_enabled"])
-    if "welcome_channel_id" in body:
-        payload["welcome_channel_id"] = _opt_int(body["welcome_channel_id"])
-    if "goodbye_channel_id" in body:
-        payload["goodbye_channel_id"] = _opt_int(body["goodbye_channel_id"])
-    if "welcome_message" in body:
-        msg = (body["welcome_message"] or "").strip()
-        payload["welcome_message"] = msg if msg else None
-    if "goodbye_message" in body:
-        msg = (body["goodbye_message"] or "").strip()
-        payload["goodbye_message"] = msg if msg else None
-
-    try:
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _bot_ref.db.save_welcome_settings(guild_id, payload)
-        )
-    except Exception as e:
-        logger.error(f"set_welcome_settings failed: {e}", exc_info=True)
-        return web.json_response({"error": str(e)}, status=500)
-    return web.json_response({"ok": True})
-
-
-async def welcome_preview(request):
-    """Generate a sample welcome or goodbye banner for the requesting user
-    (in their session). Lets owners preview what their banner looks like
-    before saving / enabling.
-
-    Query string: ?action=welcome|goodbye
-
-    Returns the PNG bytes directly with image/png Content-Type.
-    """
-    session = request["session"]
-    guild_id = int(request.match_info["guild_id"])
-    if not _bot_ref:
-        raise web.HTTPServiceUnavailable(reason="Bot not available")
-    guild = _bot_ref.get_guild(guild_id)
-    if not guild:
-        raise web.HTTPNotFound(reason="Bot not in guild")
-
-    action = request.query.get("action", "welcome")
-    if action not in ("welcome", "goodbye"):
-        action = "welcome"
-
-    cfg = _bot_ref.db.get_welcome_settings(guild_id)
-    custom_msg = cfg.get("welcome_message" if action == "welcome" else "goodbye_message")
-
-    # Preview as the calling user themselves; fall back to a placeholder
-    # name if the session has none. Construct the Discord CDN URL from the
-    # stored avatar hash + user_id (the session stores the hash, not the URL).
-    username = session.get("username") or "Preview User"
-    avatar_bytes = None
-    try:
-        avatar_hash = session.get("avatar")
-        user_id = session.get("user_id")
-        if avatar_hash and user_id:
-            avatar_url = f"https://cdn.discordapp.com/avatars/{user_id}/{avatar_hash}.png?size=256"
-            import aiohttp
-            async with aiohttp.ClientSession() as cs:
-                async with cs.get(avatar_url, timeout=aiohttp.ClientTimeout(total=5)) as r:
-                    if r.status == 200:
-                        avatar_bytes = await r.read()
-    except Exception as e:
-        logger.debug(f"Preview avatar fetch failed: {e}")
-
-    try:
-        accent = _bot_ref.db.get_embed_color(guild_id) or 0x00F5D4
-    except Exception:
-        accent = 0x00F5D4
-
-    import welcome_banner
-    png = await welcome_banner.render_welcome_banner(
-        username=username,
-        server_name=guild.name,
-        avatar_bytes=avatar_bytes,
-        accent_color=accent,
-        action=action,
-        custom_message=custom_msg,
-    )
-    if not png:
-        raise web.HTTPInternalServerError(reason="Banner generation failed")
-
-    return web.Response(body=png, content_type="image/png")
 
 
 # ── VC Creator ────────────────────────────────────────────────────────────────
@@ -2734,8 +2621,9 @@ async def set_vc_settings(request):
     name_template      = body.get("name_template", "{username}'s VC").strip() or "{username}'s VC"
     if not trigger_channel_id:
         raise web.HTTPBadRequest(reason="trigger_channel_id is required")
+    import asyncio as _asyncio
     if _bot_ref:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_vc_settings(
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_vc_settings(
             int(guild_id), int(trigger_channel_id), name_template
         ))
     else:
@@ -2751,7 +2639,8 @@ async def delete_vc_setting(request):
     guild_id = request.match_info["guild_id"]
     trigger_channel_id = request.match_info["trigger_channel_id"]
     if _bot_ref:
-        await asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.delete_vc_setting(
+        import asyncio as _asyncio
+        await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.delete_vc_setting(
             int(guild_id), int(trigger_channel_id)
         ))
     else:
@@ -2806,6 +2695,7 @@ async def set_stat_channel(request):
     )
     # Trigger an immediate update via the bot
     if _bot_ref:
+        import asyncio as _asyncio
         async def _immediate_update():
             try:
                 guild = _bot_ref.get_guild(int(guild_id))
@@ -2826,8 +2716,8 @@ async def set_stat_channel(request):
                         if resp.status == 200:
                             data = await resp.json()
                             member_count = data.get("approximate_member_count")
-                except Exception as _e:
-                    logger.debug(f"suppressed exception: {_e}")
+                except Exception:
+                    pass
                 if member_count is None:
                     member_count = guild.member_count
                 new_name = fmt.replace('{count}', f'{member_count:,}')
@@ -2838,7 +2728,7 @@ async def set_stat_channel(request):
                 )
             except Exception as e:
                 logger.warning(f"Immediate stat update failed: {e}")
-        asyncio.create_task(_immediate_update())
+        _asyncio.create_task(_immediate_update())
     return web.json_response({"ok": True})
 
 async def delete_stat_channel(request):
@@ -2895,22 +2785,8 @@ async def get_global_stats(request):
         if _bot_ref:
             subs = await _bot_ref.twitch.get_subscriptions()
             eventsub_count = len([s for s in subs if s.get("type") in ("stream.online", "stream.offline")])
-    except Exception as _e:
-        logger.debug(f"suppressed exception: {_e}")
-
-    # Global monthly leaderboard (same data as /globalleaderboard slash command).
-    # Returns all three sort modes in one response so the dashboard can switch
-    # tabs without a round-trip per click.
-    lb_consistency = []
-    lb_hours = []
-    lb_longest = []
-    try:
-        if _bot_ref:
-            lb_consistency = _bot_ref.db.get_global_leaderboard(limit=15, sort_by='consistency')
-            lb_hours       = _bot_ref.db.get_global_leaderboard(limit=15, sort_by='hours')
-            lb_longest     = _bot_ref.db.get_global_leaderboard(limit=15, sort_by='longest')
-    except Exception as _e:
-        logger.debug(f"suppressed exception fetching global leaderboard: {_e}")
+    except Exception:
+        pass
 
     return web.json_response({
         "total_servers":       servers[0]["c"] if servers else 0,
@@ -2923,325 +2799,7 @@ async def get_global_stats(request):
         "eventsub_count":      eventsub_count,
         "top_streamers":       top_streamers,
         "servers_by_count":    enriched_servers,
-        # Backwards compat — old field is alias for consistency sort
-        "global_leaderboard":             lb_consistency,
-        "global_leaderboard_consistency": lb_consistency,
-        "global_leaderboard_hours":       lb_hours,
-        "global_leaderboard_longest":     lb_longest,
     })
-
-
-# ── Dev: Stream Events log ────────────────────────────────────────────────────
-async def dev_stream_events(request):
-    """Dev-only event log viewer. Returns recent global_stream_events rows
-    with computed duration and status, optionally filtered by streamer name
-    and month."""
-    session = request["session"]
-    if not session.get("dev"):
-        raise web.HTTPForbidden(reason="Dev access required")
-    if not _bot_ref:
-        return web.json_response({"events": [], "error": "Bot not available"})
-
-    streamer = request.query.get("streamer", "").strip() or None
-    month = request.query.get("month", "").strip() or None
-    try:
-        limit = max(1, min(int(request.query.get("limit", "100")), 500))
-    except ValueError:
-        limit = 100
-
-    # Validate month format if given (YYYY-MM)
-    if month:
-        import re
-        if not re.match(r"^\d{4}-\d{2}$", month):
-            month = None
-
-    try:
-        events = _bot_ref.db.get_stream_events(streamer=streamer, month=month, limit=limit)
-    except Exception as e:
-        logger.error(f"dev_stream_events failed: {e}", exc_info=True)
-        return web.json_response({"events": [], "error": str(e)})
-
-    return web.json_response({
-        "events": events,
-        "filters": {"streamer": streamer, "month": month, "limit": limit},
-    })
-
-
-# ── Dev: Leaderboard blacklist ────────────────────────────────────────────────
-async def dev_get_blacklist(request):
-    """Dev-only: return current leaderboard blacklist."""
-    session = request["session"]
-    if not session.get("dev"):
-        raise web.HTTPForbidden(reason="Dev access required")
-    if not _bot_ref:
-        return web.json_response({"blacklist": [], "error": "Bot not available"})
-    try:
-        rows = _bot_ref.db.get_leaderboard_blacklist()
-    except Exception as e:
-        logger.error(f"dev_get_blacklist failed: {e}", exc_info=True)
-        return web.json_response({"blacklist": [], "error": str(e)})
-    return web.json_response({"blacklist": rows})
-
-
-async def dev_add_blacklist(request):
-    """Dev-only: add a streamer to the leaderboard blacklist.
-    Body: { streamer_name: str, reason: optional str }."""
-    session = request["session"]
-    if not session.get("dev"):
-        raise web.HTTPForbidden(reason="Dev access required")
-    if not _bot_ref:
-        return web.json_response({"error": "Bot not available"}, status=503)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    streamer = (body.get("streamer_name") or "").strip()
-    reason = body.get("reason") or None
-    if not streamer:
-        return web.json_response({"error": "streamer_name is required"}, status=400)
-    try:
-        added = _bot_ref.db.add_to_leaderboard_blacklist(streamer, reason=reason)
-    except Exception as e:
-        logger.error(f"dev_add_blacklist failed: {e}", exc_info=True)
-        return web.json_response({"error": str(e)}, status=500)
-    return web.json_response({
-        "ok": True,
-        "added": added,
-        "message": (
-            f"Added {streamer} to blacklist" if added
-            else f"{streamer} was already on the blacklist (reason updated)"
-        ),
-    })
-
-
-async def dev_remove_blacklist(request):
-    """Dev-only: remove a streamer from the leaderboard blacklist."""
-    session = request["session"]
-    if not session.get("dev"):
-        raise web.HTTPForbidden(reason="Dev access required")
-    if not _bot_ref:
-        return web.json_response({"error": "Bot not available"}, status=503)
-    streamer = request.match_info.get("streamer_name", "")
-    try:
-        from urllib.parse import unquote
-        streamer = unquote(streamer)
-    except Exception:
-        pass
-    if not streamer:
-        return web.json_response({"error": "streamer_name is required"}, status=400)
-    try:
-        removed = _bot_ref.db.remove_from_leaderboard_blacklist(streamer)
-    except Exception as e:
-        logger.error(f"dev_remove_blacklist failed: {e}", exc_info=True)
-        return web.json_response({"error": str(e)}, status=500)
-    return web.json_response({"ok": True, "removed": removed})
-
-
-# ── Server Setup Wizard ───────────────────────────────────────────────────────
-def _is_setup_caller_authorized(request) -> tuple:
-    """Return (ok, error_message). Setup is restricted to guild owner OR dev.
-
-    Returns guild as the second tuple element if ok, None if not.
-    """
-    session = request["session"]
-    is_dev = session.get("dev", False)
-    if is_dev:
-        # Dev can run setup for any guild
-        return True, None
-    if not _bot_ref:
-        return False, "Bot not available"
-    try:
-        guild_id = int(request.match_info.get("guild_id", "0"))
-    except ValueError:
-        return False, "Invalid guild id"
-    guild = _bot_ref.get_guild(guild_id)
-    if not guild:
-        return False, "Bot is not in that guild"
-    user_id = session.get("user_id")
-    if user_id and int(user_id) == guild.owner_id:
-        return True, None
-    return False, "Only the server owner can run the setup wizard"
-
-
-async def setup_preview(request):
-    """Dry-run preview. Returns the plan + count summary without applying."""
-    ok, err = _is_setup_caller_authorized(request)
-    if not ok:
-        raise web.HTTPForbidden(reason=err)
-    if not _bot_ref:
-        return web.json_response({"error": "Bot not available"}, status=503)
-
-    guild_id = int(request.match_info["guild_id"])
-    try:
-        config = await request.json()
-    except Exception:
-        config = {}
-
-    import server_setup
-    plan = server_setup.build_plan(config or {})
-    counts = server_setup.count_plan_items(plan)
-
-    # Check what would be reused vs created
-    guild = _bot_ref.get_guild(guild_id)
-    existing_roles = set()
-    existing_categories = set()
-    existing_channels = set()
-    if guild:
-        existing_roles = {r.name for r in guild.roles}
-        for c in guild.channels:
-            if hasattr(c, "category_id") and c.category_id is None and hasattr(c, "channels"):
-                existing_categories.add(c.name)
-            else:
-                existing_channels.add(c.name)
-        # Also explicitly enumerate categories
-        for c in guild.categories:
-            existing_categories.add(c.name)
-
-    plan_summary = {
-        "template_id": plan["template_id"],
-        "template_label": plan["template_label"],
-        "verification_enabled": plan["verification_enabled"],
-        "vip_enabled": plan["vip_enabled"],
-        "auto_post_rules": plan["auto_post_rules"],
-        "role_names": plan["role_names"],
-        "role_permissions": {
-            k: server_setup.ROLE_PERMISSIONS.get(k, [])
-            for k in plan["role_names"].keys()
-        },
-        "categories": plan["categories"],
-        "counts": counts,
-        "would_reuse": {
-            "roles": [n for n in plan["role_names"].values() if n in existing_roles],
-            "categories": [c["name"] for c in plan["categories"] if c["name"] in existing_categories],
-        },
-    }
-
-    # ── Established-server detection ──────────────────────────────────────
-    # If the guild already has substantial content, the wizard requires an
-    # explicit confirmation in the frontend before Apply will run. The
-    # heuristic counts existing channels, non-managed roles, and members.
-    # Threshold: any one of (channels >5, custom_roles >3, members >10).
-    # Tuned to NOT trip on a fresh, just-created server but DO trip on any
-    # real, lived-in community.
-    is_established = False
-    establishment_signals = {}
-    if guild:
-        # Channels (text + voice + categories all count)
-        n_channels = len(guild.channels)
-        establishment_signals["channels"] = n_channels
-
-        # Custom roles: exclude @everyone and bot-managed integration roles
-        # (Twitch sub roles, bot roles auto-created when a bot joins, etc).
-        # `role.managed` flags those.
-        custom_roles = [r for r in guild.roles
-                        if r.name != "@everyone" and not r.managed]
-        establishment_signals["custom_roles"] = len(custom_roles)
-
-        # Members
-        n_members = guild.member_count or len(guild.members)
-        establishment_signals["members"] = n_members
-
-        if server_setup.is_server_established(n_channels, len(custom_roles), n_members):
-            is_established = True
-
-    plan_summary["is_established"] = is_established
-    plan_summary["establishment_signals"] = establishment_signals
-
-    # Surface missing permissions before they hit Apply
-    missing_perms = []
-    if guild and guild.me:
-        gp = guild.me.guild_permissions
-        if not gp.manage_channels: missing_perms.append("Manage Channels")
-        if not gp.manage_roles: missing_perms.append("Manage Roles")
-        if not gp.view_channel: missing_perms.append("View Channels")
-        if not gp.send_messages: missing_perms.append("Send Messages")
-        if not gp.read_message_history: missing_perms.append("Read Message History")
-    plan_summary["missing_permissions"] = missing_perms
-
-    return web.json_response(plan_summary)
-
-
-async def setup_apply(request):
-    """Kick off the setup. Returns a setup_id that the dashboard polls
-    /setup/status/:id with for live progress."""
-    ok, err = _is_setup_caller_authorized(request)
-    if not ok:
-        raise web.HTTPForbidden(reason=err)
-    if not _bot_ref:
-        return web.json_response({"error": "Bot not available"}, status=503)
-
-    guild_id = int(request.match_info["guild_id"])
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    config = body.get("config", {})
-    dry_run = bool(body.get("dry_run", False))
-    confirm_established = bool(body.get("confirm_established", False))
-
-    # Server-side enforcement: if the guild trips the establishment heuristic
-    # AND this is NOT a dry run, the request must include confirm_established.
-    # Dry runs are always allowed (they don't modify anything). This way an
-    # uncareful API client or stale frontend can't skip the confirmation.
-    if not dry_run:
-        guild = _bot_ref.get_guild(guild_id)
-        if guild:
-            custom_roles = [r for r in guild.roles
-                            if r.name != "@everyone" and not r.managed]
-            n_channels = len(guild.channels)
-            n_members = guild.member_count or len(guild.members)
-            import server_setup as _ss
-            is_established = _ss.is_server_established(
-                n_channels, len(custom_roles), n_members
-            )
-            if is_established and not confirm_established:
-                return web.json_response({
-                    "error": "established_server_requires_confirmation",
-                    "message": (
-                        "This server has existing content. Apply requires "
-                        "explicit confirmation via the confirm_established "
-                        "flag to prevent accidental modification."
-                    ),
-                    "signals": {
-                        "channels": n_channels,
-                        "custom_roles": len(custom_roles),
-                        "members": n_members,
-                    },
-                }, status=409)
-
-    import uuid
-    setup_id = uuid.uuid4().hex
-
-    # Initialize status BEFORE scheduling the task — guarantees the dashboard
-    # can poll immediately without a 404
-    _bot_ref._setup_status[setup_id] = {
-        "guild_id": guild_id,
-        "dry_run": dry_run,
-        "status": "pending",
-        "steps": [],
-        "summary": {"created": 0, "reused": 0, "failed": 0},
-        "started_at": None,
-        "finished_at": None,
-        "error": None,
-        "notes": [],
-    }
-    asyncio.create_task(_bot_ref.run_server_setup(guild_id, config, setup_id, dry_run=dry_run))
-    return web.json_response({"setup_id": setup_id})
-
-
-async def setup_status(request):
-    """Poll endpoint for live setup progress."""
-    ok, err = _is_setup_caller_authorized(request)
-    if not ok:
-        raise web.HTTPForbidden(reason=err)
-    if not _bot_ref:
-        return web.json_response({"error": "Bot not available"}, status=503)
-
-    setup_id = request.match_info["setup_id"]
-    status = _bot_ref._setup_status.get(setup_id)
-    if not status:
-        return web.json_response({"error": "Setup id not found or expired"}, status=404)
-    return web.json_response(status)
 
 
 # ── Dev: DB Tools ─────────────────────────────────────────────────────────────
@@ -3275,51 +2833,12 @@ async def db_tools_status(request):
     # stat_channels
     stat_channels = await db_fetch("SELECT guild_id, channel_id, format, last_updated FROM stat_channels")
 
-    # Live streamers (in-memory set), with hours-live computed from _stream_starts
-    live_list = []
-    if _bot_ref:
-        try:
-            now = datetime.now(timezone.utc)
-            for login in sorted(_bot_ref.live_streamers):
-                started = _bot_ref._stream_starts.get(login)
-                hours_live = None
-                if started:
-                    try:
-                        hours_live = round((now - started).total_seconds() / 3600, 2)
-                    except Exception:
-                        hours_live = None
-                live_list.append({
-                    "streamer_name": login,
-                    "hours_live": hours_live,
-                })
-        except Exception as _e:
-            logger.debug(f"Failed to enumerate live streamers: {_e}")
-
-    # Recent orphan closures from the 15-min health-poll loop
-    recent_closures = []
-    if _bot_ref:
-        try:
-            recent_closures = list(reversed(getattr(_bot_ref, '_recent_orphan_closures', [])))
-        except Exception:
-            pass
-
-    # Count of currently-open (NULL ended_at) global_stream_events rows
-    orphan_count = 0
-    try:
-        if _bot_ref:
-            orphan_count = _bot_ref.db.get_open_session_count()
-    except Exception as _e:
-        logger.debug(f"orphan_count query failed: {_e}")
-
     return web.json_response({
         "orphaned_notification_messages": [r["streamer_name"] for r in orphaned_notifs],
         "orphaned_permission_issues": [{"guild_id": str(r["guild_id"]), "channel_id": str(r["channel_id"])} for r in orphaned_perms],
         "bad_streamer_names": [{"name": r["streamer_name"], "guild_count": r["guild_count"]} for r in bad_names],
         "notification_log_rows": log_count[0]["c"] if log_count else 0,
         "stat_channels": [{"guild_id": str(r["guild_id"]), "channel_id": str(r["channel_id"]), "format": r["format"], "last_updated": r["last_updated"]} for r in stat_channels],
-        "live_streamers": live_list,
-        "recent_orphan_closures": recent_closures,
-        "open_session_count": orphan_count,
     })
 
 
@@ -3376,21 +2895,6 @@ async def db_tools_action(request):
             asyncio.create_task(_bot_ref._sync_eventsub_subscriptions())
             return web.json_response({"ok": True, "message": "EventSub sync triggered."})
         return web.json_response({"ok": False, "message": "Bot not available."})
-
-    elif action == "reset_hours":
-        # Reset every ended_at to NULL in both stream_events tables.
-        # Wipes hours/longest metrics across the board; preserves stream
-        # counts (the row still exists, just with no end timestamp).
-        if not _bot_ref:
-            return web.json_response({"ok": False, "message": "Bot not available."})
-        try:
-            n_global, n_per_server = _bot_ref.db.null_all_ended_at()
-            return web.json_response({
-                "ok": True,
-                "message": f"Reset {n_global} global + {n_per_server} per-server ended_at to NULL."
-            })
-        except Exception as e:
-            return web.json_response({"ok": False, "message": f"Reset failed: {e}"})
 
     raise web.HTTPBadRequest(reason=f"Unknown action: {action}")
 
@@ -4138,8 +3642,8 @@ async def handle_companion_guild_info(request: web.Request) -> web.Response:
             guild_obj = _bot_ref.get_guild(int(guild_id))
             if guild_obj:
                 name = guild_obj.name
-        except Exception as _e:
-            logger.debug(f"suppressed exception: {_e}")
+        except Exception:
+            pass
     return web.json_response({"guild_id": guild_id, "name": name})
 
 
@@ -4230,13 +3734,6 @@ def create_dashboard_app(bot=None):
     app.router.add_get  ("/api/dev/global-stats",   get_global_stats)
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
     app.router.add_post ("/api/dev/db-tools",       db_tools_action)
-    app.router.add_get   ("/api/dev/stream-events",        dev_stream_events)
-    app.router.add_get   ("/api/dev/leaderboard-blacklist", dev_get_blacklist)
-    app.router.add_post  ("/api/dev/leaderboard-blacklist", dev_add_blacklist)
-    app.router.add_delete("/api/dev/leaderboard-blacklist/{streamer_name}", dev_remove_blacklist)
-    app.router.add_post ("/api/guild/{guild_id}/setup/preview", setup_preview)
-    app.router.add_post ("/api/guild/{guild_id}/setup/apply",   setup_apply)
-    app.router.add_get  ("/api/guild/{guild_id}/setup/status/{setup_id}", setup_status)
     app.router.add_get   ("/api/guild/{guild_id}/stat-channels",            get_stat_channels)
     app.router.add_get   ("/api/guild/{guild_id}/vc-settings",                          get_vc_settings)
     app.router.add_post  ("/api/guild/{guild_id}/vc-settings",                          set_vc_settings)
@@ -4245,9 +3742,6 @@ def create_dashboard_app(bot=None):
     app.router.add_get   ("/api/guild/{guild_id}/safety-settings",          get_safety_settings)
     app.router.add_post  ("/api/guild/{guild_id}/safety-settings",          set_safety_settings)
     app.router.add_get   ("/api/guild/{guild_id}/safety-kicks",             get_safety_kicks)
-    app.router.add_get   ("/api/guild/{guild_id}/welcome-settings",         get_welcome_settings)
-    app.router.add_post  ("/api/guild/{guild_id}/welcome-settings",         set_welcome_settings)
-    app.router.add_get   ("/api/guild/{guild_id}/welcome-preview",          welcome_preview)
     app.router.add_post  ("/api/guild/{guild_id}/stat-channels",            set_stat_channel)
     app.router.add_delete("/api/guild/{guild_id}/stat-channels/{channel_id}", delete_stat_channel)
 
@@ -4269,8 +3763,8 @@ def create_dashboard_app(bot=None):
             if hasattr(route, 'resource') and route.resource and '/ws' in str(route.resource.canonical):
                 continue
             cors.add(route)
-        except Exception as _e:
-            logger.debug(f"suppressed exception: {_e}")
+        except Exception:
+            pass
 
     async def on_cleanup(app):
         global _http_session
