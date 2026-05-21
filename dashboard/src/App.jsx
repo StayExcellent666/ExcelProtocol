@@ -4320,11 +4320,12 @@ export default function App() {
             </div>
           )}
           <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-          <NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={setActiveTab} />
+          <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
+<NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={setActiveTab} />
           <NavGroup icon="🟣" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
           <NavGroup icon="👥" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={setActiveTab} />
           <NavGroup icon="🛡️" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={setActiveTab} />
-          <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
+          
           <NavGroup icon="🪄" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={setActiveTab} />
           <NavItem key="suggestions" icon="💡" label="Contact" active={activeTab==="suggestions"} onClick={()=>setActiveTab("suggestions")} count={null} />
           {devTabs.length > 0 && (
@@ -4389,11 +4390,12 @@ export default function App() {
               </div>
             )}
             <div style={{ fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-            <NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+<NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup icon="🟣" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup icon="👥" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup icon="🛡️" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            
             <NavGroup icon="🪄" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavItem key="suggestions" icon="💡" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
