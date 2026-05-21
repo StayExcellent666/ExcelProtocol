@@ -389,6 +389,48 @@ async def error_logging_middleware(request: web.Request, handler):
         raise web.HTTPInternalServerError(reason="Internal server error")
 
 # ── Auth Middleware ───────────────────────────────────────────────────────────
+def verify_eventsub_signature(secret: bytes, msg_id: str, msg_timestamp: str,
+                                body: bytes, msg_signature: str) -> bool:
+    """Verify a Twitch EventSub webhook HMAC-SHA256 signature.
+
+    Twitch signs each webhook with HMAC-SHA256 over
+    `msg_id + msg_timestamp + body`, using a shared secret. The signature
+    header arrives as `sha256=<hex digest>`. Returns True on a valid
+    signature, False on anything malformed, tampered, or missing.
+
+    Uses `hmac.compare_digest` for constant-time comparison so attackers
+    can't time-attack the verifier.
+    """
+    import hmac, hashlib
+    if not msg_signature or not msg_signature.startswith("sha256="):
+        return False
+    try:
+        hmac_msg = (msg_id + msg_timestamp + body.decode()).encode()
+        expected = "sha256=" + hmac.new(secret, hmac_msg, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, msg_signature)
+    except Exception:
+        return False
+
+
+def _prune_oauth_states(states: dict, ttl_seconds: int, now: float) -> int:
+    """Drop OAuth state entries older than `ttl_seconds`.
+
+    `states` is a dict mapping state-token → creation timestamp (seconds
+    since epoch as float). Entries whose timestamp is STRICTLY less than
+    `now - ttl_seconds` are removed in-place. Returns the number dropped.
+
+    Boundary behaviour: an entry whose timestamp equals the cutoff is
+    KEPT (i.e. exactly at TTL is still valid). This matches the
+    "strictly less than cutoff is dropped" semantics tested in
+    tests/test_dashboard.py.
+    """
+    cutoff = now - ttl_seconds
+    stale = [k for k, ts in states.items() if ts < cutoff]
+    for k in stale:
+        del states[k]
+    return len(stale)
+
+
 def _session_can_access_guild(session: dict, guild_id: str) -> bool:
     """Check the session has access to the requested guild."""
     if session.get("dev"):
@@ -1909,7 +1951,6 @@ async def _register_eventsub(broadcaster_user_id: str):
 # ── EventSub Webhook ──────────────────────────────────────────────────────────
 async def eventsub_callback(request):
     """Receive EventSub events from Twitch and push to overlay websockets."""
-    import hmac, hashlib
     body = await request.read()
     secret = os.getenv("EVENTSUB_SECRET")
     if not secret:
@@ -1917,13 +1958,11 @@ async def eventsub_callback(request):
         raise web.HTTPInternalServerError(reason="Server misconfiguration")
     secret = secret.encode()
 
-    # Verify signature
+    # Verify signature via the module-level helper (also covered by tests)
     msg_id        = request.headers.get("Twitch-Eventsub-Message-Id", "")
     msg_timestamp = request.headers.get("Twitch-Eventsub-Message-Timestamp", "")
     msg_signature = request.headers.get("Twitch-Eventsub-Message-Signature", "")
-    hmac_msg = (msg_id + msg_timestamp + body.decode()).encode()
-    expected = "sha256=" + hmac.new(secret, hmac_msg, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, msg_signature):
+    if not verify_eventsub_signature(secret, msg_id, msg_timestamp, body, msg_signature):
         raise web.HTTPForbidden(reason="Invalid signature")
 
     import json as _json
