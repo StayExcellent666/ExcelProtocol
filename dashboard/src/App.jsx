@@ -1539,23 +1539,13 @@ function WelcomeSettings({ guildId, channels }) {
   );
 }
 
-// ── Server Settings Tab ───────────────────────────────────────────────────────
-function ServerSettingsTab({ guildId }) {
+// ── General Settings Tab ──────────────────────────────────────────────────────
+function GeneralSettingsTab({ guildId }) {
   const [settings, setSettings]       = useState(null);
   const [channels, setChannels]       = useState([]);
-  const [voiceChannels, setVoiceChannels] = useState([]);
-  const [cleanup, setCleanup]         = useState([]);
-  const [birthdays, setBirthdays]     = useState([]);
-  const [members, setMembers]         = useState([]);
+  const [roles, setRoles]             = useState([]);
   const [loading, setLoading]         = useState(true);
   const [saving, setSaving]           = useState({});
-  const [showCleanupModal, setShowCleanupModal]   = useState(false);
-  const [editingCleanup, setEditingCleanup]       = useState(null);
-  const [cleanupForm, setCleanupForm] = useState({ channel_id:"", interval_hours:24, keep_pinned:true });
-  const [showBdayModal, setShowBdayModal]         = useState(false);
-  const [bdayForm, setBdayForm]       = useState({ user_id:"", day:1, month:1, year:"" });
-  const [bdayEditId, setBdayEditId]   = useState(null);
-  const [roles, setRoles]             = useState([]);
   const [showCreateRoleModal, setShowCreateRoleModal] = useState(false);
   const [createRoleForm, setCreateRoleForm] = useState({ name:"", color:"#5865f2" });
   const [showCreateLiveRoleModal, setShowCreateLiveRoleModal] = useState(false);
@@ -1564,34 +1554,20 @@ function ServerSettingsTab({ guildId }) {
   const [rechecking, setRechecking]   = useState(false);
   const [fixing, setFixing]           = useState({});
   const [fixResults, setFixResults]   = useState({});
-  const [vcSettings, setVcSettings]   = useState(null);
-  const [vcForm, setVcForm]           = useState({ trigger_channel_id:"", name_template:"{username}'s VC" });
-  const [savingVc, setSavingVc]       = useState(false);
-
-  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, ch, cl, bd, mb, rl, pi, vc] = await Promise.all([
+      const [s, ch, rl, pi] = await Promise.all([
         apiFetch(`/api/guild/${guildId}/settings`),
         apiFetch(`/api/guild/${guildId}/channels`),
-        apiFetch(`/api/guild/${guildId}/cleanup`),
-        apiFetch(`/api/guild/${guildId}/birthdays`),
-        apiFetch(`/api/guild/${guildId}/members`),
         apiFetch(`/api/guild/${guildId}/roles`),
         apiFetch(`/api/guild/${guildId}/permission-issues`),
-        apiFetch(`/api/guild/${guildId}/vc-settings`).catch(() => ({ enabled: false })),
       ]);
       setSettings(s);
       setChannels(ch.channels || []);
-      setVoiceChannels(ch.voice_channels || []);
-      setCleanup(cl);
-      setBirthdays(bd);
-      setMembers(Array.isArray(mb) ? mb : (mb?.members || []));
       setRoles(rl || []);
       setPermIssues(pi || []);
-      setVcSettings(vc);
     } catch(e) { console.error(e); }
     finally { setLoading(false); }
   }, [guildId]);
@@ -1689,70 +1665,6 @@ function ServerSettingsTab({ guildId }) {
     finally { setFixing(p => ({ ...p, [channelId]: false })); }
   };
 
-  const openAddCleanup = () => {
-    setEditingCleanup(null);
-    setCleanupForm({ channel_id: channels[0]?.id || "", interval_hours: 24, keep_pinned: true });
-    setShowCleanupModal(true);
-  };
-
-  const openEditCleanup = (c) => {
-    setEditingCleanup(c);
-    setCleanupForm({ channel_id: c.channel_id, interval_hours: c.interval_hours, keep_pinned: c.keep_pinned });
-    setShowCleanupModal(true);
-  };
-
-  const saveCleanup = async () => {
-    try {
-      if (editingCleanup) {
-        await apiFetch(`/api/guild/${guildId}/cleanup/${editingCleanup.channel_id}`, {
-          method:"PATCH", body: JSON.stringify({ interval_hours: cleanupForm.interval_hours, keep_pinned: cleanupForm.keep_pinned })
-        });
-      } else {
-        await apiFetch(`/api/guild/${guildId}/cleanup`, {
-          method:"POST", body: JSON.stringify(cleanupForm)
-        });
-      }
-      setShowCleanupModal(false);
-      load();
-    } catch(e) { alert("Failed: " + e.message); }
-  };
-
-  const openAddBday = () => {
-    setBdayEditId(null);
-    setBdayForm({ user_id: members[0]?.id || "", day:1, month:1, year:"" });
-    setShowBdayModal(true);
-  };
-  const openEditBday = (b) => {
-    setBdayEditId(b.user_id);
-    setBdayForm({ user_id: b.user_id, day: b.day, month: b.month, year: b.year || "" });
-    setShowBdayModal(true);
-  };
-  const saveBday = async () => {
-    try {
-      await apiFetch(`/api/guild/${guildId}/birthdays`, {
-        method:"POST",
-        body: JSON.stringify({ user_id: bdayForm.user_id, day: Number(bdayForm.day), month: Number(bdayForm.month), year: bdayForm.year ? Number(bdayForm.year) : 0 })
-      });
-      setShowBdayModal(false);
-      load();
-    } catch(e) { alert("Failed: " + e.message); }
-  };
-  const deleteBday = async (userId) => {
-    if (!confirm("Remove this birthday?")) return;
-    try {
-      await apiFetch(`/api/guild/${guildId}/birthdays/${userId}`, { method:"DELETE" });
-      load();
-    } catch(e) { alert("Failed: " + e.message); }
-  };
-
-  const deleteCleanup = async (channelId) => {
-    if (!confirm("Remove cleanup for this channel?")) return;
-    try {
-      await apiFetch(`/api/guild/${guildId}/cleanup/${channelId}`, { method:"DELETE" });
-      load();
-    } catch(e) { alert("Failed: " + e.message); }
-  };
-
   if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
 
   const toggle = (label, field, value) => (
@@ -1770,7 +1682,7 @@ function ServerSettingsTab({ guildId }) {
 
   return (
     <div>
-      <PageHeader title="Server Settings" subtitle="Configure this server's bot behaviour" />
+      <PageHeader title="General Settings" subtitle="Core notification, appearance, and role settings" />
 
       {/* ── Permission Issues Banner ── */}
       {permIssues.length > 0 && (
@@ -1939,47 +1851,6 @@ function ServerSettingsTab({ guildId }) {
         </div>
       </div>
 
-      {/* ── Birthdays ── */}
-      <div style={{ ...C.card, marginBottom:16 }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:18 }}>
-          {sectionHead("Birthdays", "Announcement channel and member birthdays")}
-          <button onClick={openAddBday} style={{ ...C.btnPrimary, flexShrink:0 }}>+ Add Birthday</button>
-        </div>
-
-        <Field label="Birthday Announcement Channel">
-          <CyanSelect value={settings?.birthday_channel_id || ""} onChange={e => save("birthday_channel_id", e.target.value)}>
-            <option value="">Not set</option>
-            {channels.map(c => <option key={c.id} value={c.id}>#{c.name}</option>)}
-          </CyanSelect>
-        </Field>
-
-        {birthdays.length > 0 && (
-          <div style={{ marginTop:16 }}>
-            <div style={{ fontSize:10, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.2, fontFamily:"'JetBrains Mono',monospace", marginBottom:10 }}>Registered Birthdays ({birthdays.length})</div>
-            <div style={{ display:"flex", flexDirection:"column", gap:6, maxHeight:240, overflowY:"auto" }}>
-              {birthdays.map(b => (
-                <div key={b.user_id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:8, background:"rgba(8,11,15,0.6)", border:"1px solid var(--border)" }}>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontSize:13, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>{b.username}</div>
-                    <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>
-                      {MONTHS[b.month-1]} {b.day}{b.year ? `, ${b.year}` : ""}
-                    </div>
-                  </div>
-                  <button onClick={() => openEditBday(b)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12 }}>Edit</button>
-                  <button onClick={() => deleteBday(b.user_id)} style={{ ...C.btnDanger }}>Remove</button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {birthdays.length === 0 && (
-          <div style={{ textAlign:"center", padding:"24px 0 8px", color:"var(--text3)" }}>
-            <div style={{ fontSize:24, marginBottom:6 }}>🎂</div>
-            <div style={{ fontSize:13, fontFamily:"'Outfit',sans-serif" }}>No birthdays registered</div>
-          </div>
-        )}
-      </div>
-
       {/* ── Create Ping Role Modal ── */}
       {showCreateRoleModal && (
         <Modal onClose={() => setShowCreateRoleModal(false)} width={400}>
@@ -2045,14 +1916,131 @@ function ServerSettingsTab({ guildId }) {
           </div>
         </Modal>
       )}
+    </div>
+  );
+}
 
-      {/* ── Birthday Modal ── */}
+
+// ── Birthdays Tab ─────────────────────────────────────────────────────────────
+function BirthdaysTab({ guildId }) {
+  const [settings, setSettings]   = useState(null);
+  const [channels, setChannels]   = useState([]);
+  const [birthdays, setBirthdays] = useState([]);
+  const [members, setMembers]     = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const [saving, setSaving]       = useState({});
+  const [showBdayModal, setShowBdayModal] = useState(false);
+  const [bdayForm, setBdayForm]   = useState({ user_id:"", day:1, month:1, year:"" });
+  const [bdayEditId, setBdayEditId] = useState(null);
+
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [s, ch, bd, mb] = await Promise.all([
+        apiFetch(`/api/guild/${guildId}/settings`),
+        apiFetch(`/api/guild/${guildId}/channels`),
+        apiFetch(`/api/guild/${guildId}/birthdays`),
+        apiFetch(`/api/guild/${guildId}/members`),
+      ]);
+      setSettings(s);
+      setChannels(ch.channels || []);
+      setBirthdays(bd);
+      setMembers(Array.isArray(mb) ? mb : (mb?.members || []));
+    } catch(e) { console.error(e); }
+    finally { setLoading(false); }
+  }, [guildId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async (field, value) => {
+    setSaving(p => ({ ...p, [field]: true }));
+    try {
+      await apiFetch(`/api/guild/${guildId}/settings`, { method:"PATCH", body: JSON.stringify({ [field]: value }) });
+      setSettings(p => ({ ...p, [field]: value }));
+    } catch(e) { alert("Failed to save: " + e.message); }
+    finally { setSaving(p => ({ ...p, [field]: false })); }
+  };
+
+  const openAddBday = () => {
+    setBdayEditId(null);
+    setBdayForm({ user_id: members[0]?.id || "", day:1, month:1, year:"" });
+    setShowBdayModal(true);
+  };
+  const openEditBday = (b) => {
+    setBdayEditId(b.user_id);
+    setBdayForm({ user_id: b.user_id, day: b.day, month: b.month, year: b.year || "" });
+    setShowBdayModal(true);
+  };
+  const saveBday = async () => {
+    try {
+      await apiFetch(`/api/guild/${guildId}/birthdays`, {
+        method:"POST",
+        body: JSON.stringify({ user_id: bdayForm.user_id, day: Number(bdayForm.day), month: Number(bdayForm.month), year: bdayForm.year ? Number(bdayForm.year) : 0 })
+      });
+      setShowBdayModal(false);
+      load();
+    } catch(e) { alert("Failed: " + e.message); }
+  };
+  const deleteBday = async (userId) => {
+    if (!confirm("Remove this birthday?")) return;
+    try {
+      await apiFetch(`/api/guild/${guildId}/birthdays/${userId}`, { method:"DELETE" });
+      load();
+    } catch(e) { alert("Failed: " + e.message); }
+  };
+
+  if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
+
+  return (
+    <div>
+      <PageHeader title="Birthdays" subtitle="Announcement channel and member birthdays" />
+
+      <div style={{ ...C.card, marginBottom:16 }}>
+        <Field label="Birthday Announcement Channel">
+          <CyanSelect value={settings?.birthday_channel_id || ""} onChange={e => save("birthday_channel_id", e.target.value)}>
+            <option value="">Not set</option>
+            {channels.map(c => <option key={c.id} value={c.id}>#{c.name}</option>)}
+          </CyanSelect>
+        </Field>
+      </div>
+
+      <div style={{ ...C.card }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18 }}>
+          {sectionHead("Registered Birthdays", `${birthdays.length} member${birthdays.length !== 1 ? "s" : ""}`)}
+          <button onClick={openAddBday} style={{ ...C.btnPrimary, flexShrink:0 }}>+ Add Birthday</button>
+        </div>
+
+        {birthdays.length > 0 && (
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            {birthdays.map(b => (
+              <div key={b.user_id} style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 14px", borderRadius:8, background:"rgba(8,11,15,0.6)", border:"1px solid var(--border)" }}>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:13, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>{b.username}</div>
+                  <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>
+                    {MONTHS[b.month-1]} {b.day}{b.year ? `, ${b.year}` : ""}
+                  </div>
+                </div>
+                <button onClick={() => openEditBday(b)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12 }}>Edit</button>
+                <button onClick={() => deleteBday(b.user_id)} style={{ ...C.btnDanger }}>Remove</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {birthdays.length === 0 && (
+          <div style={{ textAlign:"center", padding:"24px 0 8px", color:"var(--text3)" }}>
+            <div style={{ fontSize:24, marginBottom:6 }}>🎂</div>
+            <div style={{ fontSize:13, fontFamily:"'Outfit',sans-serif" }}>No birthdays registered yet</div>
+          </div>
+        )}
+      </div>
+
       {showBdayModal && (
         <Modal onClose={() => setShowBdayModal(false)} width={400}>
           <div style={{ fontWeight:800, fontSize:16, fontFamily:"'Orbitron',sans-serif", color:"var(--cyan)", textShadow:"0 0 10px rgba(0,245,212,0.4)" }}>
             {bdayEditId ? "Edit Birthday" : "Add Birthday"}
           </div>
-
           {!bdayEditId && (
             <Field label="Member">
               <CyanSelect value={bdayForm.user_id} onChange={e => setBdayForm(p => ({ ...p, user_id: e.target.value }))}>
@@ -2066,7 +2054,6 @@ function ServerSettingsTab({ guildId }) {
               Editing: <span style={{ color:"var(--cyan)" }}>{birthdays.find(b=>b.user_id===bdayEditId)?.username}</span>
             </div>
           )}
-
           <div style={{ display:"flex", gap:10 }}>
             <Field label="Day">
               <CyanInput type="number" min={1} max={31} value={bdayForm.day}
@@ -2082,58 +2069,86 @@ function ServerSettingsTab({ guildId }) {
                 onChange={e => setBdayForm(p => ({ ...p, year: e.target.value }))} style={{ width:90 }} placeholder="—" />
             </Field>
           </div>
-
           <div style={{ display:"flex", justifyContent:"flex-end", gap:10 }}>
             <button onClick={() => setShowBdayModal(false)} style={C.btnSecondary}>Cancel</button>
             <button onClick={saveBday} style={C.btnPrimary}>{bdayEditId ? "Save Changes" : "Add Birthday"}</button>
           </div>
         </Modal>
       )}
+    </div>
+  );
+}
 
-      {/* ── Channel Cleanup ── */}
+
+// ── Welcome & Goodbye Tab ─────────────────────────────────────────────────────
+function WelcomeGoodbyeTab({ guildId }) {
+  const [channels, setChannels] = useState([]);
+  const [loading, setLoading]   = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const ch = await apiFetch(`/api/guild/${guildId}/channels`);
+      setChannels(ch.channels || []);
+    } catch(e) { console.error(e); }
+    finally { setLoading(false); }
+  }, [guildId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
+
+  return (
+    <div>
+      <PageHeader title="Welcome & Goodbye" subtitle="Auto-post banner images when members join or leave" />
+      <WelcomeSettings guildId={guildId} channels={channels} />
+    </div>
+  );
+}
+
+
+// ── Voice Rooms Tab ───────────────────────────────────────────────────────────
+function VoiceRoomsTab({ guildId }) {
+  const [voiceChannels, setVoiceChannels] = useState([]);
+  const [vcSettings, setVcSettings]       = useState(null);
+  const [vcForm, setVcForm]               = useState({ trigger_channel_id:"", name_template:"{username}'s VC" });
+  const [savingVc, setSavingVc]           = useState(false);
+  const [loading, setLoading]             = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [ch, vc] = await Promise.all([
+        apiFetch(`/api/guild/${guildId}/channels`),
+        apiFetch(`/api/guild/${guildId}/vc-settings`).catch(() => ({ enabled: false })),
+      ]);
+      setVoiceChannels(ch.voice_channels || []);
+      setVcSettings(vc);
+    } catch(e) { console.error(e); }
+    finally { setLoading(false); }
+  }, [guildId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
+
+  return (
+    <div>
+      <PageHeader title="Voice Rooms" subtitle="Auto-create personal voice channels when members join a trigger channel" />
+
       <div style={{ ...C.card }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:18 }}>
-          {sectionHead("Channel Cleanup", "Auto-delete messages in selected channels after a set time")}
-          <button onClick={openAddCleanup} style={{ ...C.btnPrimary, flexShrink:0 }}>+ Add Channel</button>
-        </div>
-
-        {cleanup.length === 0 ? (
-          <div style={{ textAlign:"center", padding:"32px 0", color:"var(--text3)" }}>
-            <div style={{ fontSize:28, marginBottom:8 }}>🧹</div>
-            <div style={{ fontSize:13, fontFamily:"'Outfit',sans-serif" }}>No cleanup rules configured</div>
-          </div>
-        ) : (
-          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-            {cleanup.map(c => (
-              <div key={c.channel_id} style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 14px", borderRadius:8, background:"rgba(8,11,15,0.6)", border:"1px solid var(--border)" }}>
-                <div style={{ flex:1 }}>
-                  <div style={{ fontSize:13, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>{c.channel_name}</div>
-                  <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>
-                    Every {c.interval_hours}h · {c.keep_pinned ? "keep pinned" : "delete pinned too"}
-                  </div>
-                </div>
-                <button onClick={() => openEditCleanup(c)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12 }}>Edit</button>
-                <button onClick={() => deleteCleanup(c.channel_id)} style={{ ...C.btnDanger }}>Remove</button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ── VC Creator ── */}
-      <div style={{ ...C.card, marginTop:16 }}>
-        {sectionHead("VC Creator", "Auto-create voice channels when a member joins a trigger channel")}
+        {sectionHead("Trigger Setup", "Members who join the trigger channel get their own voice room")}
         <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
           <Field label="Trigger Channel (Voice)">
             <CyanSelect value={vcForm.trigger_channel_id} onChange={e => setVcForm(p => ({ ...p, trigger_channel_id: e.target.value }))}>
               <option value="">Select voice channel...</option>
-              {(voiceChannels || []).map(c => <option key={c.id} value={c.id}>🔊 {c.name}</option>)}
+              {voiceChannels.map(c => <option key={c.id} value={c.id}>🔊 {c.name}</option>)}
             </CyanSelect>
             <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"'JetBrains Mono',monospace" }}>
-              Members who join this channel will get their own VC created automatically
+              Members who join this channel will get their own voice room created automatically
             </div>
           </Field>
-          <Field label="Channel Name Template">
+          <Field label="Room Name Template">
             <CyanInput value={vcForm.name_template} onChange={e => setVcForm(p => ({ ...p, name_template: e.target.value }))} placeholder="{username}'s VC" />
             <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"'JetBrains Mono',monospace" }}>
               Use <span style={{ color:"var(--cyan)" }}>{"{username}"}</span> as a placeholder for the member&apos;s display name
@@ -2182,18 +2197,109 @@ function ServerSettingsTab({ guildId }) {
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
 
-        {/* ── Welcome & Goodbye Banners ──────────────────────────── */}
-        <WelcomeSettings guildId={guildId} channels={channels} />
+
+// ── Cleanup Rules Tab ─────────────────────────────────────────────────────────
+function CleanupRulesTab({ guildId }) {
+  const [channels, setChannels]           = useState([]);
+  const [cleanup, setCleanup]             = useState([]);
+  const [loading, setLoading]             = useState(true);
+  const [showCleanupModal, setShowCleanupModal] = useState(false);
+  const [editingCleanup, setEditingCleanup]     = useState(null);
+  const [cleanupForm, setCleanupForm]     = useState({ channel_id:"", interval_hours:24, keep_pinned:true });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [ch, cl] = await Promise.all([
+        apiFetch(`/api/guild/${guildId}/channels`),
+        apiFetch(`/api/guild/${guildId}/cleanup`),
+      ]);
+      setChannels(ch.channels || []);
+      setCleanup(cl);
+    } catch(e) { console.error(e); }
+    finally { setLoading(false); }
+  }, [guildId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const openAddCleanup = () => {
+    setEditingCleanup(null);
+    setCleanupForm({ channel_id: channels[0]?.id || "", interval_hours: 24, keep_pinned: true });
+    setShowCleanupModal(true);
+  };
+  const openEditCleanup = (c) => {
+    setEditingCleanup(c);
+    setCleanupForm({ channel_id: c.channel_id, interval_hours: c.interval_hours, keep_pinned: c.keep_pinned });
+    setShowCleanupModal(true);
+  };
+  const saveCleanup = async () => {
+    try {
+      if (editingCleanup) {
+        await apiFetch(`/api/guild/${guildId}/cleanup/${editingCleanup.channel_id}`, {
+          method:"PATCH", body: JSON.stringify({ interval_hours: cleanupForm.interval_hours, keep_pinned: cleanupForm.keep_pinned })
+        });
+      } else {
+        await apiFetch(`/api/guild/${guildId}/cleanup`, {
+          method:"POST", body: JSON.stringify(cleanupForm)
+        });
+      }
+      setShowCleanupModal(false);
+      load();
+    } catch(e) { alert("Failed: " + e.message); }
+  };
+  const deleteCleanup = async (channelId) => {
+    if (!confirm("Remove cleanup for this channel?")) return;
+    try {
+      await apiFetch(`/api/guild/${guildId}/cleanup/${channelId}`, { method:"DELETE" });
+      load();
+    } catch(e) { alert("Failed: " + e.message); }
+  };
+
+  if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
+
+  return (
+    <div>
+      <PageHeader title="Cleanup Rules" subtitle="Auto-delete messages in selected channels after a set time" />
+
+      <div style={{ ...C.card }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:18 }}>
+          {sectionHead("Configured Channels", "Messages older than the interval are automatically deleted")}
+          <button onClick={openAddCleanup} style={{ ...C.btnPrimary, flexShrink:0 }}>+ Add Channel</button>
+        </div>
+
+        {cleanup.length === 0 ? (
+          <div style={{ textAlign:"center", padding:"32px 0", color:"var(--text3)" }}>
+            <div style={{ fontSize:28, marginBottom:8 }}>🧹</div>
+            <div style={{ fontSize:13, fontFamily:"'Outfit',sans-serif" }}>No cleanup rules configured</div>
+          </div>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {cleanup.map(c => (
+              <div key={c.channel_id} style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 14px", borderRadius:8, background:"rgba(8,11,15,0.6)", border:"1px solid var(--border)" }}>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:13, fontWeight:600, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>{c.channel_name}</div>
+                  <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginTop:2 }}>
+                    Every {c.interval_hours}h · {c.keep_pinned ? "keep pinned" : "delete pinned too"}
+                  </div>
+                </div>
+                <button onClick={() => openEditCleanup(c)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12 }}>Edit</button>
+                <button onClick={() => deleteCleanup(c.channel_id)} style={{ ...C.btnDanger }}>Remove</button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* ── Cleanup Modal ── */}
       {showCleanupModal && (
         <Modal onClose={() => setShowCleanupModal(false)} width={420}>
           <div style={{ fontWeight:800, fontSize:16, fontFamily:"'Orbitron',sans-serif", color:"var(--cyan)", textShadow:"0 0 10px rgba(0,245,212,0.4)" }}>
             {editingCleanup ? "Edit Cleanup Rule" : "Add Cleanup Rule"}
           </div>
-
           {!editingCleanup && (
             <Field label="Channel">
               <CyanSelect value={cleanupForm.channel_id} onChange={e => setCleanupForm(p => ({ ...p, channel_id: e.target.value }))}>
@@ -2207,12 +2313,10 @@ function ServerSettingsTab({ guildId }) {
               Editing: <span style={{ color:"var(--cyan)" }}>{editingCleanup.channel_name}</span>
             </div>
           )}
-
           <Field label="Delete messages older than (hours)">
             <CyanInput type="number" min={1} max={8760} value={cleanupForm.interval_hours}
               onChange={e => setCleanupForm(p => ({ ...p, interval_hours: parseInt(e.target.value) || 24 })) } />
           </Field>
-
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"12px 0", borderTop:"1px solid var(--border)" }}>
             <span style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>Keep pinned messages</span>
             <button
@@ -2222,7 +2326,6 @@ function ServerSettingsTab({ guildId }) {
               <div style={{ position:"absolute", top:3, left:cleanupForm.keep_pinned?22:3, width:18, height:18, borderRadius:"50%", background:"#fff", transition:"left 0.2s" }} />
             </button>
           </div>
-
           <div style={{ display:"flex", justifyContent:"flex-end", gap:10 }}>
             <button onClick={() => setShowCleanupModal(false)} style={C.btnSecondary}>Cancel</button>
             <button onClick={saveCleanup} style={C.btnPrimary}>{editingCleanup ? "Save Changes" : "Add Rule"}</button>
@@ -4099,31 +4202,38 @@ export default function App() {
   if (!loggedIn) return <LoginScreen />;
 
   const guild = guilds.find(g=>g.id===activeGuild)||guilds[0]||{ id:"", name:"..." };
-  const topTabs = [
-    { id:"settings",    icon:"⚙️", label:"Server Settings" },
-    { id:"statstab",    icon:"📊", label:"Server Stats"     },
-    { id:"streamers",   icon:"📺", label:"Streams"          },
-    { id:"roles",       icon:"🎭", label:"Reaction Roles"   },
+  const notificationsTabs = [
+    { id:"streamers",      icon:"📺", label:"Streams"           },
+    { id:"notiflog",       icon:"📋", label:"Notification Log"  },
   ];
   const twitchTabs = [
-    { id:"twitch",      icon:"💬", label:"Chat Commands"    },
-    { id:"rewards",     icon:"🎁", label:"Channel Rewards"  },
+    { id:"twitch",         icon:"💬", label:"Chat Commands"     },
+    { id:"rewards",        icon:"🎁", label:"Channel Rewards"   },
   ];
-  const serverToolsTabs = [
-    { id:"setupwizard", icon:"🪄", label:"Set Up Server"   },
+  const communityTabs = [
+    { id:"roles",          icon:"🎭", label:"Reaction Roles"    },
+    { id:"birthdays",      icon:"🎂", label:"Birthdays"         },
+    { id:"welcomegoodbye", icon:"👋", label:"Welcome & Goodbye" },
+    { id:"voicerooms",     icon:"🔊", label:"Voice Rooms"       },
   ];
-  const bottomTabs = [
-    { id:"safety",      icon:"🛡️", label:"Safety"           },
-    { id:"notiflog",    icon:"📋", label:"Notif Log"        },
-    { id:"suggestions", icon:"💡", label:"Contact"          },
+  const moderationTabs = [
+    { id:"safety",         icon:"🛡️", label:"Safety"            },
+    { id:"cleanuprules",   icon:"🧹", label:"Cleanup Rules"     },
+  ];
+  const serverConfigTabs = [
+    { id:"settings",       icon:"⚙️", label:"General Settings"  },
+    { id:"statstab",       icon:"📊", label:"Stats Channel"     },
+  ];
+  const setupWizardTabs = [
+    { id:"setupwizard",    icon:"🪄", label:"Set Up Server"     },
   ];
   const isActuallyDev = user?.is_dev === true;
   const effectivelyDev = isActuallyDev && devViewActive;
   const devTabs = effectivelyDev ? [
-    { id:"globalstats", icon:"🌐", label:"Global Stats"     },
-    { id:"dbtools",     icon:"🛠️", label:"DB Tools"         },
+    { id:"globalstats",    icon:"🌐", label:"Global Stats"      },
+    { id:"dbtools",        icon:"🛠️", label:"DB Tools"          },
   ] : [];
-  const tabs = [...topTabs, ...twitchTabs, ...serverToolsTabs, ...bottomTabs];
+  const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
 
   return (
     <div style={{ height:"100vh", width:"100vw", background:"var(--bg)", color:"var(--text)", fontFamily:"'Outfit',sans-serif", display:"flex", flexDirection:"column", overflow:"hidden", position:"relative" }}>
@@ -4210,10 +4320,13 @@ export default function App() {
             </div>
           )}
           <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-          {topTabs.map(t=><NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={()=>setActiveTab(t.id)} count={null} />)}
+          <NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={setActiveTab} />
           <NavGroup icon="🟣" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
-          {bottomTabs.map(t=><NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={()=>setActiveTab(t.id)} count={null} />)}
-          <NavGroup icon="🧰" label="Server Tools" activeTab={activeTab} tabs={serverToolsTabs} onSelect={setActiveTab} />
+          <NavGroup icon="👥" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={setActiveTab} />
+          <NavGroup icon="🛡️" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={setActiveTab} />
+          <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
+          <NavGroup icon="🪄" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={setActiveTab} />
+          <NavItem key="suggestions" icon="💡" label="Contact" active={activeTab==="suggestions"} onClick={()=>setActiveTab("suggestions")} count={null} />
           {devTabs.length > 0 && (
             <>
               <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>Dev Only</div>
@@ -4232,18 +4345,22 @@ export default function App() {
         <div className="mob-main-pad" style={{ flex:1, minWidth:0, width:0, padding:"24px 28px", overflowY:"auto" }}>
           {!activeGuild ? <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div> : (
             <>
-              {activeTab==="settings"    && <ServerSettingsTab guildId={activeGuild} />}
-              {activeTab==="setupwizard" && <SetupWizardTab    guildId={activeGuild} isDev={effectivelyDev} />}
-              {activeTab==="statstab"    && <ServerStatsTab    guildId={activeGuild} />}
-              {activeTab==="streamers"   && <StreamersTab guildId={activeGuild} isDev={effectivelyDev} />}
-              {activeTab==="roles"       && <ReactionRolesTab guildId={activeGuild} />}
-              {activeTab==="twitch"      && <TwitchTab       guildId={activeGuild} isDev={effectivelyDev} />}
-              {activeTab==="rewards"     && <ChannelRewardsTab guildId={activeGuild} />}
-              {activeTab==="notiflog"    && <NotifLogTab      guildId={activeGuild} />}
-              {activeTab==="safety"      && <SafetyTab        guildId={activeGuild} />}
-              {activeTab==="suggestions" && <SuggestionsTab guildId={activeGuild} />}
-              {activeTab==="globalstats" && effectivelyDev && <GlobalStatsTab />}
-              {activeTab==="dbtools"     && effectivelyDev && <DbToolsTab />}
+              {activeTab==="settings"      && <GeneralSettingsTab  guildId={activeGuild} />}
+              {activeTab==="setupwizard"   && <SetupWizardTab      guildId={activeGuild} isDev={effectivelyDev} />}
+              {activeTab==="statstab"      && <ServerStatsTab      guildId={activeGuild} />}
+              {activeTab==="streamers"     && <StreamersTab        guildId={activeGuild} isDev={effectivelyDev} />}
+              {activeTab==="roles"         && <ReactionRolesTab    guildId={activeGuild} />}
+              {activeTab==="birthdays"     && <BirthdaysTab        guildId={activeGuild} />}
+              {activeTab==="welcomegoodbye"&& <WelcomeGoodbyeTab   guildId={activeGuild} />}
+              {activeTab==="voicerooms"    && <VoiceRoomsTab       guildId={activeGuild} />}
+              {activeTab==="cleanuprules"  && <CleanupRulesTab     guildId={activeGuild} />}
+              {activeTab==="twitch"        && <TwitchTab           guildId={activeGuild} isDev={effectivelyDev} />}
+              {activeTab==="rewards"       && <ChannelRewardsTab   guildId={activeGuild} />}
+              {activeTab==="notiflog"      && <NotifLogTab         guildId={activeGuild} />}
+              {activeTab==="safety"        && <SafetyTab           guildId={activeGuild} />}
+              {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
+              {activeTab==="globalstats"   && effectivelyDev && <GlobalStatsTab />}
+              {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
             </>
           )}
         </div>
@@ -4272,14 +4389,13 @@ export default function App() {
               </div>
             )}
             <div style={{ fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-            {topTabs.map(t => (
-              <NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={() => { setActiveTab(t.id); setNavDrawerOpen(false); }} />
-            ))}
+            <NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup icon="🟣" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            {bottomTabs.map(t => (
-              <NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={() => { setActiveTab(t.id); setNavDrawerOpen(false); }} />
-            ))}
-            <NavGroup icon="🧰" label="Server Tools" activeTab={activeTab} tabs={serverToolsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="👥" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="🛡️" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="🪄" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavItem key="suggestions" icon="💡" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>
             </div>
@@ -4290,11 +4406,11 @@ export default function App() {
       {/* Mobile bottom nav bar — quick access to most-used tabs */}
       <div className="mob-bottom-nav">
         {[
-          { id:"settings",  icon:"⚙️" },
-          { id:"streamers", icon:"📺" },
-          { id:"twitch",    icon:"🎮" },
-          { id:"rewards",   icon:"🎁" },
-          { id:"notiflog",  icon:"📋" },
+          { id:"streamers",  icon:"📺" },
+          { id:"twitch",     icon:"💬" },
+          { id:"rewards",    icon:"🎁" },
+          { id:"settings",   icon:"⚙️" },
+          { id:"notiflog",   icon:"📋" },
         ].map(t => (
           <button key={t.id} onClick={() => setActiveTab(t.id)} style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3, background:"transparent", border:"none", cursor:"pointer", padding:"6px 10px", borderRadius:8, color: activeTab===t.id ? "var(--cyan)" : "var(--text3)", fontSize:20, lineHeight:1 }}>
             <span>{t.icon}</span>
