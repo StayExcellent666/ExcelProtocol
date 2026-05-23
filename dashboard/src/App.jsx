@@ -82,6 +82,8 @@ if (typeof document !== "undefined") {
       .mob-nav-drawer { display: flex !important; }
       .mob-main-pad { padding: 14px 14px 24px 14px !important; }
       .mob-top-height { height: 48px !important; }
+      .mob-stack { flex-direction: column !important; align-items: stretch !important; }
+      .mob-full { width: 100% !important; box-sizing: border-box !important; }
     }
     @media (min-width: 769px) {
       .mob-nav-drawer { display: none !important; }
@@ -433,6 +435,7 @@ function EmojiPicker({ guildId, value, onChange, onClose }) {
   const [tab, setTab] = useState("standard");
   const [serverSearch, setServerSearch] = useState("");
   const ref = useRef();
+  const isMobile = useIsMobile();
   useEffect(() => {
     apiFetch(`/api/guild/${guildId}/emojis`).then(setGuildEmojis).catch(()=>{});
     const handler = e => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
@@ -444,8 +447,13 @@ function EmojiPicker({ guildId, value, onChange, onClose }) {
     e => !serverSearch || e.name.toLowerCase().includes(serverSearch.toLowerCase())
   );
 
+  const mobileW = Math.min(340, window.innerWidth - 24);
+  const pickerStyle = isMobile
+    ? { position:"fixed", zIndex:600, background:"var(--bg1)", border:"1px solid var(--border2)", borderRadius:10, padding:tab==="standard"?0:12, width:mobileW, boxShadow:"0 8px 32px rgba(0,0,0,0.8)", top:"50%", left:"50%", transform:"translate(-50%,-50%)", maxHeight:"80vh", overflowY:"auto" }
+    : { position:"absolute", zIndex:300, background:"var(--bg1)", border:"1px solid var(--border2)", borderRadius:10, padding:tab==="standard"?0:12, width:tab==="standard"?350:300, boxShadow:"0 8px 32px rgba(0,0,0,0.6)", top:"110%", left:0 };
+
   return (
-    <div ref={ref} style={{ position:"absolute", zIndex:300, background:"var(--bg1)", border:"1px solid var(--border2)", borderRadius:10, padding:tab==="standard"?0:12, width:tab==="standard"?350:300, boxShadow:"0 8px 32px rgba(0,0,0,0.6)", top:"110%", left:0 }}>
+    <div ref={ref} style={pickerStyle}>
       <div style={{ display:"flex", gap:4, padding:tab==="standard"?"12px 12px 8px":"0 0 10px", borderBottom: tab==="standard" ? "1px solid var(--border)" : "none" }}>
         {["standard","guild"].map(t=>(
           <button key={t} onClick={()=>setTab(t)} style={{ flex:1, padding:"6px 8px", borderRadius:5, border:tab===t?"1px solid var(--cyan)":"1px solid var(--border)", background:tab===t?"var(--cyan-dim)":"transparent", color:tab===t?"var(--cyan)":"var(--text2)", cursor:"pointer", fontSize:11, fontFamily:"'Outfit',sans-serif", fontWeight:600 }}>
@@ -467,8 +475,8 @@ function EmojiPicker({ guildId, value, onChange, onClose }) {
           emojiStyle={EmojiStyle.NATIVE}
           suggestedEmojisMode={SuggestionMode.FREQUENT}
           searchPlaceHolder="Search emojis…"
-          width={350}
-          height={400}
+          width={isMobile ? mobileW : 350}
+          height={isMobile ? 360 : 400}
           previewConfig={{ showPreview: false }}
           lazyLoadEmojis={true}
         />
