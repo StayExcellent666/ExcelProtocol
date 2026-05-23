@@ -4321,7 +4321,7 @@ export default function App() {
       <div style={{ height:52, background:"linear-gradient(180deg, rgba(14,20,28,0.99) 0%, rgba(10,15,22,0.99) 100%)", borderBottom:"1px solid rgba(0,245,212,0.15)", display:"flex", alignItems:"center", padding:"0 18px", gap:12, flexShrink:0, boxShadow:"0 1px 12px rgba(0,245,212,0.07), 0 2px 8px rgba(0,0,0,0.4)" }}>
         {/* Logo */}
         <div style={{ display:"flex", alignItems:"center", gap:10, marginRight:8 }}>
-          <img src="/app/protocol.png" alt="ExcelProtocol" style={{ width:28, height:28, borderRadius:"50%", border:"1px solid var(--cyan)", boxShadow:"0 0 10px rgba(0,245,212,0.4), 0 0 24px rgba(0,245,212,0.15)", objectFit:"cover", display:"block" }} />
+          <img src="/app/protocol.png" alt="ExcelProtocol" style={{ width:40, height:40, display:"block", flexShrink:0 }} />
           <div>
             <div style={{ fontWeight:800, fontSize:13, letterSpacing:0.5, color:"var(--text)", textShadow:"0 0 12px rgba(0,245,212,0.35)" }}>ExcelProtocol</div>
             <div style={{ fontSize:9, color:"var(--cyan2)", letterSpacing:1.5, fontFamily:"'JetBrains Mono',monospace", lineHeight:1, textShadow:"0 0 8px rgba(0,196,170,0.6)" }}>DASHBOARD</div>
