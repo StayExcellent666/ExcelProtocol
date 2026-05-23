@@ -1,4 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import EmojiPickerLib, { Theme as EmojiTheme, EmojiStyle, SuggestionMode } from "emoji-picker-react";
+import {
+  DndContext, closestCenter, PointerSensor, KeyboardSensor,
+  useSensor, useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy,
+  useSortable, arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 const API_BASE = import.meta.env.VITE_API_URL || "https://excelprotocol.fly.dev";
 
@@ -122,31 +132,6 @@ function roleColor(int) {
   return `#${int.toString(16).padStart(6, "0")}`;
 }
 
-
-const STANDARD_EMOJIS = [
-  // Colored circles — most useful for color roles
-  "🔴","🟠","🟡","🟢","🔵","🟣","🟤","⚫","⚪",
-  // Colored squares — alternative for color roles
-  "🟥","🟧","🟨","🟩","🟦","🟪","🟫","⬛","⬜",
-  // Diamonds and shapes
-  "🔶","🔷","🔸","🔹","⭐","✨","💫","🌟","💎",
-  // Faces
-  "😀","😂","😍","🤔","😎","😢","😡","🥳","🤩","😴",
-  // Hands / gestures
-  "👍","👎","👋","🙌","🤝","✌️","🫡","💪","🎉","🔥",
-  // Hearts (covers color-role uses too)
-  "❤️","🧡","💛","💚","💙","💜","🤎","🖤","🤍",
-  // Activities
-  "🎮","🎯","🎲","🏆","🥇","🎖️","🏅","🎗️","🎪","🎭",
-  // World
-  "🌍","🌎","🌏","🗺️","🧭","🌐","🏴","🚀","⚡","🌈",
-  // Animals
-  "🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯",
-  // Food
-  "🍕","🍔","🌮","🍜","🍣","🍦","🎂","🍩","☕","🧋",
-  // Flags
-  "EU","US","AU","NZ","UK","🇪🇺","🇺🇸","🇬🇧","🇦🇺","🇨🇦",
-];
 
 // ── Design tokens ─────────────────────────────────────────────────────────────
 const C = {
@@ -449,7 +434,7 @@ function ChannelSelect({ guildId, value, onChange }) {
 function EmojiPicker({ guildId, value, onChange, onClose }) {
   const [guildEmojis, setGuildEmojis] = useState([]);
   const [tab, setTab] = useState("standard");
-  const [search, setSearch] = useState("");
+  const [serverSearch, setServerSearch] = useState("");
   const ref = useRef();
   useEffect(() => {
     apiFetch(`/api/guild/${guildId}/emojis`).then(setGuildEmojis).catch(()=>{});
@@ -457,29 +442,52 @@ function EmojiPicker({ guildId, value, onChange, onClose }) {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [guildId]);
-  const filtered = tab === "standard"
-    ? STANDARD_EMOJIS.filter(e => !search || e.includes(search))
-    : guildEmojis.filter(e => !search || e.name.toLowerCase().includes(search.toLowerCase()));
+
+  const filteredServer = guildEmojis.filter(
+    e => !serverSearch || e.name.toLowerCase().includes(serverSearch.toLowerCase())
+  );
+
   return (
-    <div ref={ref} style={{ position:"absolute", zIndex:300, background:"var(--bg1)", border:"1px solid var(--border2)", borderRadius:10, padding:12, width:300, boxShadow:"0 8px 32px rgba(0,0,0,0.6)", top:"110%", left:0 }}>
-      <CyanInput value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search emojis..." style={{ marginBottom:10, fontSize:12 }} />
-      <div style={{ display:"flex", gap:4, marginBottom:10 }}>
+    <div ref={ref} style={{ position:"absolute", zIndex:300, background:"var(--bg1)", border:"1px solid var(--border2)", borderRadius:10, padding:tab==="standard"?0:12, width:tab==="standard"?350:300, boxShadow:"0 8px 32px rgba(0,0,0,0.6)", top:"110%", left:0 }}>
+      <div style={{ display:"flex", gap:4, padding:tab==="standard"?"12px 12px 8px":"0 0 10px", borderBottom: tab==="standard" ? "1px solid var(--border)" : "none" }}>
         {["standard","guild"].map(t=>(
-          <button key={t} onClick={()=>setTab(t)} style={{ flex:1, padding:"5px 8px", borderRadius:5, border:tab===t?"1px solid var(--cyan)":"1px solid var(--border)", background:tab===t?"var(--cyan-dim)":"transparent", color:tab===t?"var(--cyan)":"var(--text2)", cursor:"pointer", fontSize:11, fontFamily:"'Outfit',sans-serif", fontWeight:600 }}>
+          <button key={t} onClick={()=>setTab(t)} style={{ flex:1, padding:"6px 8px", borderRadius:5, border:tab===t?"1px solid var(--cyan)":"1px solid var(--border)", background:tab===t?"var(--cyan-dim)":"transparent", color:tab===t?"var(--cyan)":"var(--text2)", cursor:"pointer", fontSize:11, fontFamily:"'Outfit',sans-serif", fontWeight:600 }}>
             {t==="standard"?"Standard":`Server (${guildEmojis.length})`}
           </button>
         ))}
       </div>
-      <div style={{ display:"flex", flexWrap:"wrap", gap:3, maxHeight:180, overflowY:"auto" }}>
-        {tab==="standard" ? filtered.map((e,i)=>(
-          <button key={i} onClick={()=>{onChange(e);onClose();}} style={{ width:34, height:34, borderRadius:5, border:value===e?"1px solid var(--cyan)":"1px solid transparent", background:value===e?"var(--cyan-dim)":"transparent", cursor:"pointer", fontSize:17, display:"flex", alignItems:"center", justifyContent:"center" }}>{e}</button>
-        )) : filtered.map(e=>(
-          <button key={e.id} onClick={()=>{onChange(`<:${e.name}:${e.id}>`);onClose();}} style={{ width:34, height:34, borderRadius:5, border:"1px solid transparent", background:"transparent", cursor:"pointer", padding:2 }}>
-            <img src={`https://cdn.discordapp.com/emojis/${e.id}.${e.animated?"gif":"png"}`} style={{ width:26, height:26 }} alt={e.name} />
-          </button>
-        ))}
-        {filtered.length===0 && <div style={{ color:"var(--text3)", fontSize:12, padding:"10px 0", width:"100%" }}>No emojis found</div>}
-      </div>
+
+      {tab === "standard" ? (
+        // emoji-picker-react provides its own search bar, category tabs,
+        // skin-tone selector, and ~3700 emojis. We theme it to roughly
+        // match the dashboard's dark+cyan look via the `theme` prop.
+        <EmojiPickerLib
+          onEmojiClick={(emojiData) => {
+            onChange(emojiData.emoji);
+            onClose();
+          }}
+          theme={EmojiTheme.DARK}
+          emojiStyle={EmojiStyle.NATIVE}
+          suggestedEmojisMode={SuggestionMode.FREQUENT}
+          searchPlaceHolder="Search emojis…"
+          width={350}
+          height={400}
+          previewConfig={{ showPreview: false }}
+          lazyLoadEmojis={true}
+        />
+      ) : (
+        <>
+          <CyanInput value={serverSearch} onChange={e=>setServerSearch(e.target.value)} placeholder="Search server emojis..." style={{ marginBottom:10, fontSize:12 }} />
+          <div style={{ display:"flex", flexWrap:"wrap", gap:3, maxHeight:240, overflowY:"auto" }}>
+            {filteredServer.map(e=>(
+              <button key={e.id} onClick={()=>{onChange(`<:${e.name}:${e.id}>`);onClose();}} style={{ width:34, height:34, borderRadius:5, border:value===`<:${e.name}:${e.id}>`?"1px solid var(--cyan)":"1px solid transparent", background:value===`<:${e.name}:${e.id}>`?"var(--cyan-dim)":"transparent", cursor:"pointer", padding:2 }}>
+                <img src={`https://cdn.discordapp.com/emojis/${e.id}.${e.animated?"gif":"png"}`} style={{ width:26, height:26 }} alt={e.name} />
+              </button>
+            ))}
+            {filteredServer.length===0 && <div style={{ color:"var(--text3)", fontSize:12, padding:"10px 0", width:"100%", textAlign:"center" }}>No server emojis found</div>}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -635,11 +643,31 @@ function EditStreamerModal({ guildId, streamer, onClose, onSaved }) {
 }
 
 // ── Reaction Role Editor ──────────────────────────────────────────────────────
-function RoleRowEditor({ guildId, role, onChange, onRemove }) {
+function RoleRowEditor({ id, guildId, role, onChange, onRemove }) {
   const [showEmoji, setShowEmoji] = useState(false);
+  // Drag-reorder: each row is a sortable item. The grip handle has its own
+  // listeners so dragging only starts from the handle, not the whole row
+  // (otherwise tapping inputs would accidentally start drags).
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id });
+  const dragStyle = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : 1,
+    zIndex: isDragging ? 10 : "auto",
+  };
   return (
-    <div style={{ background:"var(--bg)", border:"1px solid var(--border)", borderRadius:8, padding:"12px 14px", display:"flex", flexDirection:"column", gap:10 }}>
+    <div ref={setNodeRef} style={{ ...dragStyle, background:"var(--bg)", border:"1px solid var(--border)", borderRadius:8, padding:"12px 14px", display:"flex", flexDirection:"column", gap:10 }} {...attributes}>
       <div style={{ display:"flex", gap:8, alignItems:"flex-end" }}>
+        {/* Drag handle — cursor:grab, only this element starts the drag */}
+        <button
+          {...listeners}
+          aria-label="Drag to reorder"
+          style={{ width:28, height:40, background:"transparent", border:"none", color:"var(--text3)", cursor:"grab", fontSize:18, lineHeight:1, padding:0, marginBottom:1, touchAction:"none", display:"flex", alignItems:"center", justifyContent:"center" }}
+          onMouseDown={(e)=>e.preventDefault() /* prevent text selection */}
+        >
+          ⋮⋮
+        </button>
         <div style={{ position:"relative", flexShrink:0 }}>
           <label style={C.label}>Emoji</label>
           <button onClick={()=>setShowEmoji(v=>!v)} style={{ width:40, height:40, borderRadius:7, border:"1px solid var(--border2)", background:"var(--bg2)", cursor:"pointer", fontSize:18, display:"flex", alignItems:"center", justifyContent:"center" }}>
@@ -664,12 +692,37 @@ function ReactionRolePanelModal({ guildId, panel, onClose, onSaved }) {
   const [onlyAdd, setOnlyAdd] = useState(!!panel?.only_add);
   const [maxRoles, setMaxRoles] = useState(panel?.max_roles||"");
   const [channelId, setChannelId] = useState(panel ? String(panel.channel_id) : "");
-  const [roles, setRoles] = useState(panel?.roles||[]);
+  // Each role needs a stable id for drag-reorder + React key. Generate one
+  // per row that survives reordering. Use a monotonic counter so we don't
+  // depend on crypto APIs (some embedded clients lack `crypto.randomUUID`).
+  const nextIdRef = useRef(0);
+  const newId = () => `r${Date.now()}_${nextIdRef.current++}`;
+  const [roles, setRoles] = useState(() =>
+    (panel?.roles || []).map(r => ({ ...r, _uiId: newId() }))
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const addRole = () => setRoles(r=>[...r, { label:"", emoji:"", role_id:"" }]);
-  const updateRole = (i, val) => setRoles(r=>r.map((x,j)=>j===i?val:x));
-  const removeRole = i => setRoles(r=>r.filter((_,j)=>j!==i));
+  const addRole = () => setRoles(r => [...r, { label:"", emoji:"", role_id:"", _uiId: newId() }]);
+  const updateRole = (uiId, val) => setRoles(r => r.map(x => x._uiId === uiId ? { ...val, _uiId: uiId } : x));
+  const removeRole = (uiId) => setRoles(r => r.filter(x => x._uiId !== uiId));
+
+  // Drag-reorder sensors: PointerSensor + small activation distance so a
+  // pointerdown that immediately moves to click doesn't accidentally start
+  // a drag (lets the user click the drag handle without instantly dragging).
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const handleDragEnd = (event) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    setRoles(items => {
+      const oldIndex = items.findIndex(i => i._uiId === active.id);
+      const newIndex = items.findIndex(i => i._uiId === over.id);
+      if (oldIndex < 0 || newIndex < 0) return items;
+      return arrayMove(items, oldIndex, newIndex);
+    });
+  };
   const save = async () => {
     if (!title.trim()) { setError("Title is required."); return; }
     if (!channelId && !isEdit) { setError("Channel is required."); return; }
@@ -679,11 +732,15 @@ function ReactionRolePanelModal({ guildId, panel, onClose, onSaved }) {
       if (!r.role_id) { setError("All roles need a Discord role."); return; }
     }
     setLoading(true); setError("");
+    // Backend doesn't need our UI-only drag ID; strip before sending.
+    // Order in the array IS the new role order (already reordered locally
+    // by drag handler), so no separate "order" field is needed.
+    const payloadRoles = roles.map(({ _uiId, ...rest }) => rest);
     try {
       if (isEdit) {
-        await apiFetch(`/api/guild/${guildId}/reaction-roles/${panel.message_id}`, { method:"PATCH", body:JSON.stringify({ title, body_text:bodyText.trim()||null, type, only_add:onlyAdd, max_roles:maxRoles?parseInt(maxRoles):null, roles }) });
+        await apiFetch(`/api/guild/${guildId}/reaction-roles/${panel.message_id}`, { method:"PATCH", body:JSON.stringify({ title, body_text:bodyText.trim()||null, type, only_add:onlyAdd, max_roles:maxRoles?parseInt(maxRoles):null, roles:payloadRoles }) });
       } else {
-        await apiFetch(`/api/guild/${guildId}/reaction-roles`, { method:"POST", body:JSON.stringify({ title, body_text:bodyText.trim()||null, type, only_add:onlyAdd, max_roles:maxRoles?parseInt(maxRoles):null, channel_id:channelId, roles }) });
+        await apiFetch(`/api/guild/${guildId}/reaction-roles`, { method:"POST", body:JSON.stringify({ title, body_text:bodyText.trim()||null, type, only_add:onlyAdd, max_roles:maxRoles?parseInt(maxRoles):null, channel_id:channelId, roles:payloadRoles }) });
       }
       onSaved(); onClose();
     } catch(e) { setError(e.message||"Failed to save."); }
@@ -721,7 +778,20 @@ function ReactionRolePanelModal({ guildId, panel, onClose, onSaved }) {
           <button onClick={addRole} style={{ ...C.btnPrimary, padding:"5px 12px", fontSize:11 }}>+ Add Role</button>
         </div>
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-          {roles.map((r,i)=><RoleRowEditor key={i} guildId={guildId} role={r} onChange={v=>updateRole(i,v)} onRemove={()=>removeRole(i)} />)}
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext items={roles.map(r => r._uiId)} strategy={verticalListSortingStrategy}>
+              {roles.map(r => (
+                <RoleRowEditor
+                  key={r._uiId}
+                  id={r._uiId}
+                  guildId={guildId}
+                  role={r}
+                  onChange={v => updateRole(r._uiId, v)}
+                  onRemove={() => removeRole(r._uiId)}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
           {!roles.length && <div style={{ textAlign:"center", padding:"18px 0", color:"var(--text3)", fontSize:13, border:"1px dashed var(--border)", borderRadius:8, fontFamily:"'Outfit',sans-serif" }}>No roles yet — click + Add Role</div>}
         </div>
       </div>
