@@ -389,7 +389,7 @@ function LoginScreen() {
       <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:28, padding:"48px 52px", borderRadius:20, background:"linear-gradient(160deg, rgba(18,26,38,0.98) 0%, rgba(10,16,24,0.99) 100%)", border:"1px solid rgba(0,245,212,0.25)", boxShadow:"0 8px 48px rgba(0,0,0,0.7), 0 0 40px rgba(0,245,212,0.07), inset 0 1px 0 rgba(0,245,212,0.10)", animation:"fadeIn 0.4s ease" }}>
 
       <div style={{ display:"flex", alignItems:"center", gap:14 }}>
-        <img src="/protocol.png" alt="ExcelProtocol" style={{ width:48, height:48, borderRadius:"50%", border:"1px solid var(--cyan)", boxShadow:"0 0 16px rgba(0,245,212,0.5), 0 0 40px rgba(0,245,212,0.2), 0 0 60px rgba(0,245,212,0.08)", objectFit:"cover", display:"block", flexShrink:0 }} />
+        <img src="/app/protocol.png" alt="ExcelProtocol" style={{ width:48, height:48, borderRadius:"50%", border:"1px solid var(--cyan)", boxShadow:"0 0 16px rgba(0,245,212,0.5), 0 0 40px rgba(0,245,212,0.2), 0 0 60px rgba(0,245,212,0.08)", objectFit:"cover", display:"block", flexShrink:0 }} />
         <div>
           <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:26, color:"var(--text)", letterSpacing:0, textShadow:"0 0 20px rgba(0,245,212,0.4), 0 0 40px rgba(0,245,212,0.15)" }}>ExcelProtocol</div>
           <div style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:11, color:"var(--cyan2)", letterSpacing:1, textShadow:"0 0 10px rgba(0,196,170,0.7)" }}>DASHBOARD v2</div>
@@ -4321,7 +4321,7 @@ export default function App() {
       <div style={{ height:52, background:"linear-gradient(180deg, rgba(14,20,28,0.99) 0%, rgba(10,15,22,0.99) 100%)", borderBottom:"1px solid rgba(0,245,212,0.15)", display:"flex", alignItems:"center", padding:"0 18px", gap:12, flexShrink:0, boxShadow:"0 1px 12px rgba(0,245,212,0.07), 0 2px 8px rgba(0,0,0,0.4)" }}>
         {/* Logo */}
         <div style={{ display:"flex", alignItems:"center", gap:10, marginRight:8 }}>
-          <img src="/protocol.png" alt="ExcelProtocol" style={{ width:28, height:28, borderRadius:"50%", border:"1px solid var(--cyan)", boxShadow:"0 0 10px rgba(0,245,212,0.4), 0 0 24px rgba(0,245,212,0.15)", objectFit:"cover", display:"block" }} />
+          <img src="/app/protocol.png" alt="ExcelProtocol" style={{ width:28, height:28, borderRadius:"50%", border:"1px solid var(--cyan)", boxShadow:"0 0 10px rgba(0,245,212,0.4), 0 0 24px rgba(0,245,212,0.15)", objectFit:"cover", display:"block" }} />
           <div>
             <div style={{ fontWeight:800, fontSize:13, letterSpacing:0.5, color:"var(--text)", textShadow:"0 0 12px rgba(0,245,212,0.35)" }}>ExcelProtocol</div>
             <div style={{ fontSize:9, color:"var(--cyan2)", letterSpacing:1.5, fontFamily:"'JetBrains Mono',monospace", lineHeight:1, textShadow:"0 0 8px rgba(0,196,170,0.6)" }}>DASHBOARD</div>
