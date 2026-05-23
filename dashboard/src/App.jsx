@@ -80,16 +80,13 @@ if (typeof document !== "undefined") {
       .mob-topbar-username { display: none !important; }
       .mob-topbar-logout { display: none !important; }
       .mob-nav-drawer { display: flex !important; }
-      .mob-main-pad { padding: 14px 14px 80px 14px !important; }
-      .mob-bottom-nav { display: flex !important; }
+      .mob-main-pad { padding: 14px 14px 24px 14px !important; }
       .mob-top-height { height: 48px !important; }
     }
     @media (min-width: 769px) {
       .mob-nav-drawer { display: none !important; }
-      .mob-bottom-nav { display: none !important; }
     }
     .mob-nav-drawer { display: none; position: fixed; inset: 0; z-index: 500; background: rgba(0,0,0,0.7); }
-    .mob-bottom-nav { display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 400; background: rgba(9,14,21,0.98); border-top: 1px solid rgba(0,245,212,0.15); height: 60px; align-items: center; justify-content: space-around; padding: 0 4px; box-shadow: 0 -4px 20px rgba(0,0,0,0.4); }
     @keyframes scanline {
       0% { transform: translateY(-100%); }
       100% { transform: translateY(100vh); }
@@ -4366,7 +4363,7 @@ export default function App() {
           </div>}
           {isMobile && <button
             onClick={() => setNavDrawerOpen(true)}
-            style={{ background:"transparent", border:"1px solid var(--border2)", borderRadius:6, color:"var(--text2)", padding:"4px 8px", cursor:"pointer", fontSize:16, lineHeight:1 }}
+            style={{ background:"transparent", border:"1px solid var(--border2)", borderRadius:8, color:"var(--text2)", padding:"10px 14px", cursor:"pointer", fontSize:20, lineHeight:1, minWidth:44, minHeight:44, display:"flex", alignItems:"center", justifyContent:"center" }}
           >☰</button>}
           <UserAvatar user={user} size={28} />
           {!isMobile && <span style={{ fontSize:13, color:"var(--text2)", fontWeight:500, fontFamily:"'Outfit',sans-serif" }}>{user?.username}</span>}
@@ -4475,25 +4472,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Mobile bottom nav bar — quick access to most-used tabs */}
-      <div className="mob-bottom-nav">
-        {[
-          { id:"streamers",  icon:"📺" },
-          { id:"twitch",     icon:"💬" },
-          { id:"rewards",    icon:"🎁" },
-          { id:"settings",   icon:"⚙️" },
-          { id:"notiflog",   icon:"📋" },
-        ].map(t => (
-          <button key={t.id} onClick={() => setActiveTab(t.id)} style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3, background:"transparent", border:"none", cursor:"pointer", padding:"6px 10px", borderRadius:8, color: activeTab===t.id ? "var(--cyan)" : "var(--text3)", fontSize:20, lineHeight:1 }}>
-            <span>{t.icon}</span>
-            <span style={{ fontSize:9, fontFamily:"'JetBrains Mono',monospace", letterSpacing:0.5 }}>{t.id.toUpperCase().slice(0,4)}</span>
-          </button>
-        ))}
-        <button onClick={() => setNavDrawerOpen(true)} style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3, background:"transparent", border:"none", cursor:"pointer", padding:"6px 10px", borderRadius:8, color:"var(--text3)", fontSize:20, lineHeight:1 }}>
-          <span>☰</span>
-          <span style={{ fontSize:9, fontFamily:"'JetBrains Mono',monospace", letterSpacing:0.5 }}>MORE</span>
-        </button>
-      </div>
+
 
       </div>{/* /content wrapper */}
     </div>
