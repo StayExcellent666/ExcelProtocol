@@ -319,10 +319,16 @@ function SidebarParticles() {
   );
 }
 
+function NavIcon({ icon, size=16 }) {
+  if (typeof icon === "string" && icon.endsWith(".png"))
+    return <img src={icon} alt="" style={{ width:size, height:size, flexShrink:0, objectFit:"contain" }} />;
+  return <span style={{ fontSize:size-1, flexShrink:0 }}>{icon}</span>;
+}
+
 function NavItem({ icon, label, active, onClick, count }) {
   return (
     <button onClick={onClick} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:6, border:"none", background:active?"var(--cyan-dim)":"transparent", color:active?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13.5, fontWeight:active?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:active?"2px solid var(--cyan)":"2px solid transparent", position:"relative", zIndex:1, boxShadow:active?"inset 0 0 12px rgba(0,245,212,0.07)":"none", textShadow:active?"0 0 10px rgba(0,245,212,0.5)":"none" }}>
-      <span style={{ fontSize:15, flexShrink:0 }}>{icon}</span>
+      <NavIcon icon={icon} size={18} />
       <span style={{ flex:1 }}>{label}</span>
       {count!=null && <span style={{ fontSize:10, background:"var(--bg3)", color:"var(--text3)", padding:"1px 6px", borderRadius:10, fontFamily:"'JetBrains Mono',monospace" }}>{count}</span>}
     </button>
@@ -336,7 +342,7 @@ function NavGroup({ icon, label, activeTab, tabs, onSelect }) {
   return (
     <div style={{ position:"relative", zIndex:1 }}>
       <button onClick={() => setOpen(o => !o)} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:6, border:"none", background:isActive?"var(--cyan-dim)":"transparent", color:isActive?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13.5, fontWeight:isActive?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:isActive?"2px solid var(--cyan)":"2px solid transparent" }}>
-        <span style={{ fontSize:15, flexShrink:0 }}>{icon}</span>
+        <NavIcon icon={icon} size={18} />
         <span style={{ flex:1 }}>{label}</span>
         <span style={{ fontSize:11, color:"var(--cyan2)", display:"inline-block", transition:"transform 0.2s", transform:open?"rotate(180deg)":"rotate(0deg)", textShadow:"0 0 6px rgba(0,196,170,0.5)" }}>▼</span>
       </button>
@@ -344,7 +350,7 @@ function NavGroup({ icon, label, activeTab, tabs, onSelect }) {
         <div style={{ marginLeft:8, borderLeft:"1px solid var(--border)", paddingLeft:4, animation:"navExpand 0.15s ease" }}>
           {tabs.map(t => (
             <button key={t.id} onClick={() => onSelect(t.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 12px", borderRadius:6, border:"none", background:activeTab===t.id?"var(--cyan-dim)":"transparent", color:activeTab===t.id?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13, fontWeight:activeTab===t.id?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:activeTab===t.id?"2px solid var(--cyan)":"2px solid transparent" }}>
-              <span style={{ fontSize:14, flexShrink:0 }}>{t.icon}</span>
+              <NavIcon icon={t.icon} size={16} />
               <span>{t.label}</span>
             </button>
           ))}
@@ -4278,35 +4284,35 @@ export default function App() {
 
   const guild = guilds.find(g=>g.id===activeGuild)||guilds[0]||{ id:"", name:"..." };
   const notificationsTabs = [
-    { id:"streamers",      icon:"📺", label:"Streams"           },
-    { id:"notiflog",       icon:"📋", label:"Notification Log"  },
+    { id:"streamers",      icon:"/app/icons/streams.png", label:"Streams"           },
+    { id:"notiflog",       icon:"/app/icons/log.png", label:"Notification Log"  },
   ];
   const twitchTabs = [
-    { id:"twitch",         icon:"💬", label:"Chat Commands"     },
-    { id:"rewards",        icon:"🎁", label:"Channel Rewards"   },
+    { id:"twitch",         icon:"/app/icons/messagebubble.png", label:"Chat Commands"     },
+    { id:"rewards",        icon:"/app/icons/rewards.png", label:"Channel Rewards"   },
   ];
   const communityTabs = [
-    { id:"roles",          icon:"🎭", label:"Reaction Roles"    },
-    { id:"birthdays",      icon:"🎂", label:"Birthdays"         },
-    { id:"welcomegoodbye", icon:"👋", label:"Welcome & Goodbye" },
-    { id:"voicerooms",     icon:"🔊", label:"Voice Rooms"       },
+    { id:"roles",          icon:"/app/icons/reactionroles.png", label:"Reaction Roles"    },
+    { id:"birthdays",      icon:"/app/icons/birthday.png", label:"Birthdays"         },
+    { id:"welcomegoodbye", icon:"/app/icons/welcome.png", label:"Welcome & Goodbye" },
+    { id:"voicerooms",     icon:"/app/icons/voicerooms.png", label:"Voice Rooms"       },
   ];
   const moderationTabs = [
-    { id:"safety",         icon:"🛡️", label:"Safety"            },
-    { id:"cleanuprules",   icon:"🧹", label:"Cleanup Rules"     },
+    { id:"safety",         icon:"/app/icons/shield.png", label:"Safety"            },
+    { id:"cleanuprules",   icon:"/app/icons/cleanup.png", label:"Cleanup Rules"     },
   ];
   const serverConfigTabs = [
-    { id:"settings",       icon:"⚙️", label:"General Settings"  },
-    { id:"statstab",       icon:"📊", label:"Stats Channel"     },
+    { id:"settings",       icon:"/app/icons/gear.png", label:"General Settings"  },
+    { id:"statstab",       icon:"/app/icons/stats.png", label:"Stats Channel"     },
   ];
   const setupWizardTabs = [
-    { id:"setupwizard",    icon:"🪄", label:"Set Up Server"     },
+    { id:"setupwizard",    icon:"/app/icons/wizard.png", label:"Set Up Server"     },
   ];
   const isActuallyDev = user?.is_dev === true;
   const effectivelyDev = isActuallyDev && devViewActive;
   const devTabs = effectivelyDev ? [
-    { id:"globalstats",    icon:"🌐", label:"Global Stats"      },
-    { id:"dbtools",        icon:"🛠️", label:"DB Tools"          },
+    { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
+    { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
   ] : [];
   const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
 
@@ -4395,14 +4401,14 @@ export default function App() {
             </div>
           )}
           <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-          <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
-<NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={setActiveTab} />
-          <NavGroup icon="🟣" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
-          <NavGroup icon="👥" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={setActiveTab} />
-          <NavGroup icon="🛡️" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={setActiveTab} />
+          <NavGroup icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
+<NavGroup icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={setActiveTab} />
+          <NavGroup icon="/app/icons/messagebubble.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
+          <NavGroup icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={setActiveTab} />
+          <NavGroup icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={setActiveTab} />
           
-          <NavGroup icon="🪄" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={setActiveTab} />
-          <NavItem key="suggestions" icon="💡" label="Contact" active={activeTab==="suggestions"} onClick={()=>setActiveTab("suggestions")} count={null} />
+          <NavGroup icon="/app/icons/wizard.png" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={setActiveTab} />
+          <NavItem key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={()=>setActiveTab("suggestions")} count={null} />
           {devTabs.length > 0 && (
             <>
               <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>Dev Only</div>
@@ -4465,14 +4471,14 @@ export default function App() {
               </div>
             )}
             <div style={{ fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-            <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-<NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="🟣" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="👥" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="🛡️" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+<NavGroup icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="/app/icons/messagebubble.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             
-            <NavGroup icon="🪄" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavItem key="suggestions" icon="💡" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
+            <NavGroup icon="/app/icons/wizard.png" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavItem key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>
             </div>
