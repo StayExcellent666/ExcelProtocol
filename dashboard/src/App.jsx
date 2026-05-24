@@ -325,32 +325,38 @@ function NavIcon({ icon, size=16 }) {
   return <span style={{ fontSize:size-1, flexShrink:0 }}>{icon}</span>;
 }
 
-function NavItem({ icon, label, active, onClick, count }) {
+function NavItem({ icon, label, active, onClick, count, large }) {
+  const pad = large ? "11px 14px" : "8px 12px";
+  const fs = large ? 15 : 13.5;
   return (
-    <button onClick={onClick} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:6, border:"none", background:active?"var(--cyan-dim)":"transparent", color:active?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13.5, fontWeight:active?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:active?"2px solid var(--cyan)":"2px solid transparent", position:"relative", zIndex:1, boxShadow:active?"inset 0 0 12px rgba(0,245,212,0.07)":"none", textShadow:active?"0 0 10px rgba(0,245,212,0.5)":"none" }}>
-      <NavIcon icon={icon} size={20} />
+    <button onClick={onClick} style={{ display:"flex", alignItems:"center", gap:10, padding:pad, borderRadius:6, border:"none", background:active?"var(--cyan-dim)":"transparent", color:active?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:fs, fontWeight:active?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:active?"2px solid var(--cyan)":"2px solid transparent", position:"relative", zIndex:1, boxShadow:active?"inset 0 0 12px rgba(0,245,212,0.07)":"none", textShadow:active?"0 0 10px rgba(0,245,212,0.5)":"none" }}>
+      <NavIcon icon={icon} size={large ? 22 : 20} />
       <span style={{ flex:1 }}>{label}</span>
       {count!=null && <span style={{ fontSize:10, background:"var(--bg3)", color:"var(--text3)", padding:"1px 6px", borderRadius:10, fontFamily:"'JetBrains Mono',monospace" }}>{count}</span>}
     </button>
   );
 }
 
-function NavGroup({ icon, label, activeTab, tabs, onSelect }) {
+function NavGroup({ icon, label, activeTab, tabs, onSelect, large }) {
   const isActive = tabs.some(t => t.id === activeTab);
   const [open, setOpen] = useState(isActive);
+  const pad = large ? "11px 14px" : "8px 12px";
+  const fs = large ? 15 : 13.5;
+  const subPad = large ? "10px 14px" : "7px 12px";
+  const subFs = large ? 14 : 13;
   useEffect(() => { if (isActive) setOpen(true); }, [isActive]);
   return (
     <div style={{ position:"relative", zIndex:1 }}>
-      <button onClick={() => setOpen(o => !o)} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:6, border:"none", background:isActive?"var(--cyan-dim)":"transparent", color:isActive?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13.5, fontWeight:isActive?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:isActive?"2px solid var(--cyan)":"2px solid transparent" }}>
-        <NavIcon icon={icon} size={20} />
+      <button onClick={() => setOpen(o => !o)} style={{ display:"flex", alignItems:"center", gap:10, padding:pad, borderRadius:6, border:"none", background:isActive?"var(--cyan-dim)":"transparent", color:isActive?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:fs, fontWeight:isActive?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:isActive?"2px solid var(--cyan)":"2px solid transparent" }}>
+        <NavIcon icon={icon} size={large ? 22 : 20} />
         <span style={{ flex:1 }}>{label}</span>
         <span style={{ fontSize:11, color:"var(--cyan2)", display:"inline-block", transition:"transform 0.2s", transform:open?"rotate(180deg)":"rotate(0deg)", textShadow:"0 0 6px rgba(0,196,170,0.5)" }}>▼</span>
       </button>
       {open && (
         <div style={{ marginLeft:8, borderLeft:"1px solid var(--border)", paddingLeft:4, animation:"navExpand 0.15s ease" }}>
           {tabs.map(t => (
-            <button key={t.id} onClick={() => onSelect(t.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 12px", borderRadius:6, border:"none", background:activeTab===t.id?"var(--cyan-dim)":"transparent", color:activeTab===t.id?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13, fontWeight:activeTab===t.id?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:activeTab===t.id?"2px solid var(--cyan)":"2px solid transparent" }}>
-              <NavIcon icon={t.icon} size={18} />
+            <button key={t.id} onClick={() => onSelect(t.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:subPad, borderRadius:6, border:"none", background:activeTab===t.id?"var(--cyan-dim)":"transparent", color:activeTab===t.id?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:subFs, fontWeight:activeTab===t.id?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:activeTab===t.id?"2px solid var(--cyan)":"2px solid transparent" }}>
+              <NavIcon icon={t.icon} size={large ? 20 : 18} />
               <span>{t.label}</span>
             </button>
           ))}
@@ -4453,7 +4459,7 @@ export default function App() {
       {/* Mobile nav drawer */}
       {navDrawerOpen && (
         <div className="mob-nav-drawer" onClick={() => setNavDrawerOpen(false)}>
-          <div onClick={e => e.stopPropagation()} style={{ width:260, height:"100%", background:"linear-gradient(180deg, rgba(12,18,26,0.99) 0%, rgba(9,14,21,0.99) 100%)", borderRight:"1px solid rgba(0,245,212,0.15)", padding:"16px 10px", display:"flex", flexDirection:"column", gap:2, overflowY:"auto" }}>
+          <div onClick={e => e.stopPropagation()} style={{ width:280, height:"100%", background:"linear-gradient(180deg, rgba(12,18,26,0.99) 0%, rgba(9,14,21,0.99) 100%)", borderRight:"1px solid rgba(0,245,212,0.15)", padding:"16px 10px", display:"flex", flexDirection:"column", gap:2, overflowY:"auto" }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14, paddingBottom:12, borderBottom:"1px solid var(--border)" }}>
               <div style={{ display:"flex", alignItems:"center", gap:10 }}>
                 <UserAvatar user={user} size={32} />
@@ -4471,14 +4477,19 @@ export default function App() {
               </div>
             )}
             <div style={{ fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-            <NavGroup icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-<NavGroup icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="/app/icons/twitch.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup large icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+<NavGroup large icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup large icon="/app/icons/twitch.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup large icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup large icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             
-            <NavGroup icon="/app/icons/wizard.png" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavItem key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
+            <NavGroup large icon="/app/icons/wizard.png" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavItem large key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
+            {effectivelyDev && <>
+              <div style={{ fontSize:9, color:"var(--cyan)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Dev Only</div>
+              <NavItem large icon="/app/icons/globe.png" label="Global Stats" active={activeTab==="globalstats"} onClick={() => { setActiveTab("globalstats"); setNavDrawerOpen(false); }} />
+              <NavItem large icon="/app/icons/tools.png" label="DB Tools" active={activeTab==="dbtools"} onClick={() => { setActiveTab("dbtools"); setNavDrawerOpen(false); }} />
+            </>}
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>
             </div>
