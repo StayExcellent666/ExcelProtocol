@@ -32,6 +32,16 @@ TWITCH_CLIENT_SECRET  = os.getenv("TWITCH_CLIENT_SECRET", "")
 BOT_OWNER_ID          = os.getenv("BOT_OWNER_ID", "")
 DEV_TOKEN             = os.getenv("DEV_TOKEN", "")
 PORT                  = int(os.getenv("DASHBOARD_PORT", 8080))
+
+# Parse ADMIN_ID1, ADMIN_ID2, ... from env
+ADMIN_IDS: set[str] = set()
+_i = 1
+while True:
+    _v = os.getenv(f"ADMIN_ID{_i}", "")
+    if not _v:
+        break
+    ADMIN_IDS.add(str(_v).strip())
+    _i += 1
 DISCORD_API           = "https://discord.com/api/v10"
 TWITCH_REDIRECT_URI   = os.getenv("TWITCH_REDIRECT_URI", "https://excelprotocol.fly.dev/auth/twitch/callback")
 TWITCH_API            = "https://api.twitch.tv/helix"
@@ -433,8 +443,8 @@ def _prune_oauth_states(states: dict, ttl_seconds: int, now: float) -> int:
 
 def _session_can_access_guild(session: dict, guild_id: str) -> bool:
     """Check the session has access to the requested guild."""
-    if session.get("dev"):
-        return True  # Dev token has full access — only used server-side/internally
+    if session.get("dev") or session.get("admin"):
+        return True
     guilds = session.get("guilds", [])
     return any(str(g["id"]) == str(guild_id) for g in guilds)
 
@@ -455,6 +465,40 @@ async def auth_middleware(request: web.Request, handler):
 
     request["session"] = session
     return await handler(request)
+
+@web.middleware
+async def admin_audit_middleware(request: web.Request, handler):
+    """Log mutating actions taken by admins on guilds they don't own."""
+    response = await handler(request)
+    try:
+        if request.method in ("POST", "PATCH", "DELETE", "PUT"):
+            session = request.get("session")
+            if session and session.get("admin"):
+                guild_id = request.match_info.get("guild_id")
+                if guild_id:
+                    own_ids = {str(g["id"]) for g in session.get("guilds", [])}
+                    if guild_id not in own_ids:
+                        await db_execute(
+                            """INSERT INTO admin_audit_log
+                               (admin_id, admin_username, guild_id, method, endpoint, detail)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                            (
+                                session.get("user_id", ""),
+                                session.get("username", ""),
+                                guild_id,
+                                request.method,
+                                request.path,
+                                None,
+                            )
+                        )
+                        # Keep only last 100 rows
+                        await db_execute(
+                            """DELETE FROM admin_audit_log WHERE id NOT IN (
+                               SELECT id FROM admin_audit_log ORDER BY id DESC LIMIT 100)"""
+                        )
+    except Exception as e:
+        logger.warning(f"Admin audit log failed: {e}")
+    return response
 
 # ── Health ────────────────────────────────────────────────────────────────────
 async def health(request):
@@ -558,12 +602,14 @@ async def auth_callback(request):
     logger.info(f"Auth: user has {len(guilds)} guilds, {len(managed)} managed, bot in {len(bot_guild_ids)} guilds")
     session_token = secrets.token_hex(32)
     is_owner = BOT_OWNER_ID and str(user["id"]) == str(BOT_OWNER_ID)
+    is_admin = not is_owner and str(user["id"]) in ADMIN_IDS
     _sessions[session_token] = {
         "user_id":      user["id"],
         "username":     user["username"],
         "avatar":       user.get("avatar"),
         "guilds":       managed,
         "dev":          is_owner,
+        "admin":        is_admin,
         "_created_at":  datetime.now(timezone.utc).timestamp(),
     }
     response = web.HTTPFound("/app/")
@@ -575,8 +621,11 @@ async def auth_callback(request):
 
 async def auth_me(request):
     session = request["session"]
-    if session.get("dev"):
-        # Use the bot's actual guild list so all servers show up, even ones with no streamers yet
+    is_dev   = session.get("dev", False)
+    is_admin = session.get("admin", False)
+
+    if is_dev or is_admin:
+        # Full guild list from bot for dev/admin
         guilds = []
         if _bot_ref:
             for g in _bot_ref.guilds:
@@ -587,7 +636,6 @@ async def auth_me(request):
                     "approximate_member_count": g.member_count,
                 })
         else:
-            # Fallback to DB if bot ref not available
             rows = await db_fetch("SELECT DISTINCT guild_id FROM monitored_streamers")
             for r in rows:
                 info = await get_guild_info(str(r["guild_id"]))
@@ -598,13 +646,19 @@ async def auth_me(request):
                     "approximate_member_count": info.get("approximate_member_count"),
                 })
         guilds.sort(key=lambda g: g["name"].lower())
+        # Tag which guilds are the user's own vs admin-access
+        own_guild_ids = {g["id"] for g in session.get("guilds", [])}
+        for g in guilds:
+            g["admin_access"] = is_admin and g["id"] not in own_guild_ids
         return web.json_response({
             "user_id":  session.get("user_id"),
             "username": session.get("username"),
             "avatar":   session.get("avatar"),
             "guilds":   guilds,
-            "is_dev":   True,
+            "is_dev":   is_dev,
+            "is_admin": is_admin,
         })
+
     session_guilds = session.get("guilds", [])
     enriched = []
     for g in session_guilds:
@@ -612,14 +666,27 @@ async def auth_me(request):
         enriched.append({
             **g,
             "approximate_member_count": info.get("approximate_member_count"),
+            "admin_access": False,
         })
     return web.json_response({
         "user_id":  session["user_id"],
         "username": session["username"],
         "avatar":   session.get("avatar"),
         "guilds":   enriched,
-        "is_dev":   session.get("dev", False),
+        "is_dev":   False,
+        "is_admin": False,
     })
+
+async def admin_audit_log(request):
+    """Owner-only: return last 100 admin audit log entries."""
+    session = request["session"]
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Owner only")
+    rows = await db_fetch(
+        "SELECT id, admin_id, admin_username, guild_id, method, endpoint, detail, timestamp "
+        "FROM admin_audit_log ORDER BY id DESC LIMIT 100"
+    )
+    return web.json_response([dict(r) for r in rows])
 
 # ── Guilds ────────────────────────────────────────────────────────────────────
 async def get_guilds(request):
@@ -3701,7 +3768,7 @@ async def handle_companion_version(request: web.Request) -> web.Response:
 def create_dashboard_app(bot=None):
     global _bot_ref
     _bot_ref = bot
-    app = web.Application(middlewares=[error_logging_middleware, auth_middleware])
+    app = web.Application(middlewares=[error_logging_middleware, auth_middleware, admin_audit_middleware])
 
     app.router.add_get("/health",            health)
     app.router.add_get("/companion/version",             handle_companion_version)
@@ -3735,6 +3802,7 @@ def create_dashboard_app(bot=None):
     app.router.add_delete("/api/guild/{guild_id}/twitch/commands/{command_name}", delete_twitch_command)
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
     app.router.add_get("/api/me",        auth_me)
+    app.router.add_get("/api/admin/audit-log", admin_audit_log)
     app.router.add_get("/api/guilds",    get_guilds)
     app.router.add_get("/api/guild/{guild_id}", get_guild_summary)
 

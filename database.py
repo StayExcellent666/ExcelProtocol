@@ -733,6 +733,20 @@ class Database:
             )
         ''')
 
+        # Admin audit log -- actions taken by admins on servers they don't own
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS admin_audit_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id        TEXT NOT NULL,
+                admin_username  TEXT NOT NULL,
+                guild_id        TEXT NOT NULL,
+                method          TEXT NOT NULL,
+                endpoint        TEXT NOT NULL,
+                detail          TEXT,
+                timestamp       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")

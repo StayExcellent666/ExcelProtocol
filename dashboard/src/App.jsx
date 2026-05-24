@@ -4251,6 +4251,51 @@ function DbToolsTab() {
   );
 }
 
+// ── Admin Audit Log Tab ───────────────────────────────────────────────────────
+function AdminAuditLogTab() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    apiFetch("/api/admin/audit-log")
+      .then(setEntries)
+      .catch(e => console.error(e))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div>
+      <div style={{ marginBottom:16 }}>
+        <h2 style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:22, color:"var(--text)", margin:0, textShadow:"0 0 20px rgba(0,245,212,0.4)" }}>Admin Audit Log</h2>
+        <div style={{ fontSize:12, color:"var(--text3)", marginTop:4 }}>Last 100 admin actions on servers they don't own. Owner-only.</div>
+      </div>
+      {loading ? <Spinner /> : entries.length === 0 ? (
+        <div style={{ color:"var(--text3)", fontSize:13, padding:"40px 0", textAlign:"center" }}>No admin actions recorded yet.</div>
+      ) : (
+        <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+          {entries.map(e => (
+            <div key={e.id} style={{ ...C.card, padding:"10px 14px", display:"flex", alignItems:"flex-start", gap:12 }}>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4, flexWrap:"wrap" }}>
+                  <span style={{ fontSize:11, fontFamily:"'JetBrains Mono',monospace", color:"var(--cyan)", fontWeight:600 }}>{e.admin_username}</span>
+                  <span style={{ fontSize:10, padding:"1px 6px", borderRadius:4, fontFamily:"'JetBrains Mono',monospace", fontWeight:700,
+                    background: e.method==="DELETE" ? "rgba(255,77,109,0.15)" : e.method==="POST" ? "rgba(0,245,212,0.1)" : "rgba(245,180,50,0.1)",
+                    color: e.method==="DELETE" ? "var(--red)" : e.method==="POST" ? "var(--cyan)" : "#f5b432"
+                  }}>{e.method}</span>
+                  <span style={{ fontSize:11, color:"var(--text2)", fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-all" }}>{e.endpoint}</span>
+                </div>
+                <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                  Guild: {e.guild_id} · {new Date(e.timestamp).toLocaleString()}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [user, setUser] = useState(null);
@@ -4315,10 +4360,14 @@ export default function App() {
     { id:"setupwizard",    icon:"/app/icons/wizard.png", label:"Set Up Server"     },
   ];
   const isActuallyDev = user?.is_dev === true;
+  const isAdmin = user?.is_admin === true;
   const effectivelyDev = isActuallyDev && devViewActive;
   const devTabs = effectivelyDev ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
+    { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
+  ] : isAdmin ? [
+    { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
   ] : [];
   const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
 
@@ -4352,7 +4401,8 @@ export default function App() {
           </button>
           {dropdownOpen && guilds.length>1 && (
             <div style={{ position:"absolute", top:"calc(100% + 6px)", left:0, background:"linear-gradient(135deg, rgba(16,23,33,0.99) 0%, rgba(11,16,24,0.99) 100%)", border:"1px solid rgba(0,245,212,0.22)", borderRadius:10, padding:6, minWidth:220, zIndex:100, boxShadow:"0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,245,212,0.04), inset 0 1px 0 rgba(0,245,212,0.09)", maxHeight:"calc(100vh - 80px)", overflowY:"auto" }}>
-              {guilds.map(g=>(
+              {/* Own servers first */}
+              {guilds.filter(g => !g.admin_access).map(g=>(
                 <button key={g.id} onClick={()=>switchGuild(g.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:"8px 10px", borderRadius:7, border:"none", background:activeGuild===g.id?"var(--cyan-dim)":"transparent", color:activeGuild===g.id?"var(--cyan)":"var(--text)", cursor:"pointer", fontSize:13, fontFamily:"'Outfit',sans-serif", textAlign:"left" }}>
                   <GuildAvatar guild={g} size={24} />
                   <div style={{ flex:1 }}>
@@ -4362,6 +4412,21 @@ export default function App() {
                   {activeGuild===g.id&&<span style={{ color:"var(--cyan)", fontSize:12 }}>✓</span>}
                 </button>
               ))}
+              {/* Admin access section */}
+              {guilds.some(g => g.admin_access) && <>
+                <div style={{ fontSize:9, color:"rgba(245,180,50,0.8)", textTransform:"uppercase", letterSpacing:1.5, padding:"8px 10px 4px", fontFamily:"'JetBrains Mono',monospace", borderTop:"1px solid var(--border)", marginTop:4 }}>Admin Access</div>
+                {guilds.filter(g => g.admin_access).map(g=>(
+                  <button key={g.id} onClick={()=>switchGuild(g.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:"8px 10px", borderRadius:7, border:"none", background:activeGuild===g.id?"rgba(245,180,50,0.1)":"transparent", color:activeGuild===g.id?"#f5b432":"var(--text2)", cursor:"pointer", fontSize:13, fontFamily:"'Outfit',sans-serif", textAlign:"left" }}>
+                    <GuildAvatar guild={g} size={24} />
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:13, fontWeight:500, fontFamily:"'Outfit',sans-serif" }}>{g.name}</div>
+                      {g.approximate_member_count&&<div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>{g.approximate_member_count.toLocaleString()} members</div>}
+                    </div>
+                    <span style={{ fontSize:12 }}>🔑</span>
+                    {activeGuild===g.id&&<span style={{ color:"#f5b432", fontSize:12 }}>✓</span>}
+                  </button>
+                ))}
+              </>}
             </div>
           )}
         </div>
@@ -4376,6 +4441,11 @@ export default function App() {
             >
               {devViewActive ? "DEV VIEW" : "USER VIEW"}
             </button>
+          )}
+          {isAdmin && !isMobile && (
+            <div style={{ padding:"4px 10px", borderRadius:7, border:"1px solid rgba(245,180,50,0.4)", background:"rgba(245,180,50,0.1)", color:"#f5b432", fontSize:11, fontFamily:"'JetBrains Mono',monospace", fontWeight:600, letterSpacing:0.5 }}>
+              ADMIN
+            </div>
           )}
           {!isMobile && <div style={{ display:"flex", alignItems:"center", gap:6, padding:"3px 10px 3px 6px", borderRadius:20, border:"1px solid var(--border)", background:"var(--bg2)" }}>
             <div style={{ width:6, height:6, borderRadius:"50%", background:"var(--green)", animation:"pulse 2s ease infinite", boxShadow:"0 0 6px rgba(57,217,138,0.8), 0 0 12px rgba(57,217,138,0.4)" }} />
@@ -4447,8 +4517,9 @@ export default function App() {
               {activeTab==="notiflog"      && <NotifLogTab         guildId={activeGuild} />}
               {activeTab==="safety"        && <SafetyTab           guildId={activeGuild} />}
               {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
-              {activeTab==="globalstats"   && effectivelyDev && <GlobalStatsTab />}
+              {activeTab==="globalstats"   && (effectivelyDev || isAdmin) && <GlobalStatsTab />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
+              {activeTab==="auditlog"      && effectivelyDev && <AdminAuditLogTab />}
             </>
           )}
         </div>
