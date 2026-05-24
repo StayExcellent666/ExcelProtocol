@@ -646,10 +646,10 @@ async def auth_me(request):
                     "approximate_member_count": info.get("approximate_member_count"),
                 })
         guilds.sort(key=lambda g: g["name"].lower())
-        # Tag which guilds are the user's own vs admin-access
-        own_guild_ids = {g["id"] for g in session.get("guilds", [])}
+        # Tag which guilds are the user's own vs admin/dev-access
+        own_guild_ids = {str(g["id"]) for g in session.get("guilds", [])}
         for g in guilds:
-            g["admin_access"] = is_admin and g["id"] not in own_guild_ids
+            g["admin_access"] = g["id"] not in own_guild_ids
         return web.json_response({
             "user_id":  session.get("user_id"),
             "username": session.get("username"),
