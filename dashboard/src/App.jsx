@@ -328,7 +328,7 @@ function NavIcon({ icon, size=16 }) {
 function NavItem({ icon, label, active, onClick, count }) {
   return (
     <button onClick={onClick} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:6, border:"none", background:active?"var(--cyan-dim)":"transparent", color:active?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13.5, fontWeight:active?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:active?"2px solid var(--cyan)":"2px solid transparent", position:"relative", zIndex:1, boxShadow:active?"inset 0 0 12px rgba(0,245,212,0.07)":"none", textShadow:active?"0 0 10px rgba(0,245,212,0.5)":"none" }}>
-      <NavIcon icon={icon} size={18} />
+      <NavIcon icon={icon} size={20} />
       <span style={{ flex:1 }}>{label}</span>
       {count!=null && <span style={{ fontSize:10, background:"var(--bg3)", color:"var(--text3)", padding:"1px 6px", borderRadius:10, fontFamily:"'JetBrains Mono',monospace" }}>{count}</span>}
     </button>
@@ -342,7 +342,7 @@ function NavGroup({ icon, label, activeTab, tabs, onSelect }) {
   return (
     <div style={{ position:"relative", zIndex:1 }}>
       <button onClick={() => setOpen(o => !o)} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:6, border:"none", background:isActive?"var(--cyan-dim)":"transparent", color:isActive?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13.5, fontWeight:isActive?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:isActive?"2px solid var(--cyan)":"2px solid transparent" }}>
-        <NavIcon icon={icon} size={18} />
+        <NavIcon icon={icon} size={20} />
         <span style={{ flex:1 }}>{label}</span>
         <span style={{ fontSize:11, color:"var(--cyan2)", display:"inline-block", transition:"transform 0.2s", transform:open?"rotate(180deg)":"rotate(0deg)", textShadow:"0 0 6px rgba(0,196,170,0.5)" }}>▼</span>
       </button>
@@ -350,7 +350,7 @@ function NavGroup({ icon, label, activeTab, tabs, onSelect }) {
         <div style={{ marginLeft:8, borderLeft:"1px solid var(--border)", paddingLeft:4, animation:"navExpand 0.15s ease" }}>
           {tabs.map(t => (
             <button key={t.id} onClick={() => onSelect(t.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 12px", borderRadius:6, border:"none", background:activeTab===t.id?"var(--cyan-dim)":"transparent", color:activeTab===t.id?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13, fontWeight:activeTab===t.id?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:activeTab===t.id?"2px solid var(--cyan)":"2px solid transparent" }}>
-              <NavIcon icon={t.icon} size={16} />
+              <NavIcon icon={t.icon} size={18} />
               <span>{t.label}</span>
             </button>
           ))}
