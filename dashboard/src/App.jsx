@@ -4307,7 +4307,7 @@ export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [navDrawerOpen, setNavDrawerOpen] = useState(false);
   const isMobile = useIsMobile();
-  const [devViewActive, setDevViewActive] = useState(true); // dev can toggle off to see user view
+  const [viewMode, setViewMode] = useState("dev"); // "dev" | "admin" | "user"
 
   useEffect(()=>{
     // Switch to rewards tab if returning from Twitch OAuth
@@ -4361,12 +4361,13 @@ export default function App() {
   ];
   const isActuallyDev = user?.is_dev === true;
   const isAdmin = user?.is_admin === true;
-  const effectivelyDev = isActuallyDev && devViewActive;
+  const effectivelyDev   = isActuallyDev && viewMode === "dev";
+  const effectivelyAdmin = isActuallyDev && viewMode === "admin";
   const devTabs = effectivelyDev ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
     { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
-  ] : isAdmin ? [
+  ] : (effectivelyAdmin || isAdmin) ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
   ] : [];
   const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
@@ -4413,7 +4414,7 @@ export default function App() {
                 </button>
               ))}
               {/* Admin access section */}
-              {guilds.some(g => g.admin_access) && <>
+              {guilds.some(g => g.admin_access) && (effectivelyAdmin || isAdmin) && <>
                 <div style={{ fontSize:9, color:"rgba(245,180,50,0.8)", textTransform:"uppercase", letterSpacing:1.5, padding:"8px 10px 4px", fontFamily:"'JetBrains Mono',monospace", borderTop:"1px solid var(--border)", marginTop:4 }}>Admin Access</div>
                 {guilds.filter(g => g.admin_access).map(g=>(
                   <button key={g.id} onClick={()=>switchGuild(g.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:"8px 10px", borderRadius:7, border:"none", background:activeGuild===g.id?"rgba(245,180,50,0.1)":"transparent", color:activeGuild===g.id?"#f5b432":"var(--text2)", cursor:"pointer", fontSize:13, fontFamily:"'Outfit',sans-serif", textAlign:"left" }}>
@@ -4435,14 +4436,14 @@ export default function App() {
         <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:10 }}>
           {isActuallyDev && !isMobile && (
             <button
-              onClick={() => { setDevViewActive(v => !v); setActiveTab("settings"); }}
-              title={devViewActive ? "Switch to user view" : "Switch to dev view"}
-              style={{ padding:"4px 10px", borderRadius:7, border:`1px solid ${devViewActive ? "rgba(245,200,66,0.4)" : "var(--border)"}`, background: devViewActive ? "rgba(245,200,66,0.1)" : "transparent", color: devViewActive ? "#f5c842" : "var(--text3)", fontSize:11, cursor:"pointer", fontFamily:"'JetBrains Mono',monospace", fontWeight:600, letterSpacing:0.5 }}
+              onClick={() => { setViewMode(m => m==="dev"?"admin":m==="admin"?"user":"dev"); setActiveTab("settings"); }}
+              title="Cycle view: DEV → ADMIN → USER"
+              style={{ padding:"4px 10px", borderRadius:7, border:`1px solid ${viewMode==="dev" ? "rgba(245,200,66,0.4)" : viewMode==="admin" ? "rgba(245,180,50,0.4)" : "var(--border)"}`, background: viewMode==="dev" ? "rgba(245,200,66,0.1)" : viewMode==="admin" ? "rgba(245,180,50,0.1)" : "transparent", color: viewMode==="dev" ? "#f5c842" : viewMode==="admin" ? "#f5b432" : "var(--text3)", fontSize:11, cursor:"pointer", fontFamily:"'JetBrains Mono',monospace", fontWeight:600, letterSpacing:0.5 }}
             >
-              {devViewActive ? "DEV VIEW" : "USER VIEW"}
+              {viewMode==="dev" ? "DEV VIEW" : viewMode==="admin" ? "ADMIN VIEW" : "USER VIEW"}
             </button>
           )}
-          {isAdmin && !isMobile && (
+          {(isAdmin || effectivelyAdmin) && !isMobile && (
             <div style={{ padding:"4px 10px", borderRadius:7, border:"1px solid rgba(245,180,50,0.4)", background:"rgba(245,180,50,0.1)", color:"#f5b432", fontSize:11, fontFamily:"'JetBrains Mono',monospace", fontWeight:600, letterSpacing:0.5 }}>
               ADMIN
             </div>
@@ -4487,7 +4488,7 @@ export default function App() {
           <NavItem key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={()=>setActiveTab("suggestions")} count={null} />
           {devTabs.length > 0 && (
             <>
-              <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>Dev Only</div>
+              <div style={{ position:"relative", zIndex:1, fontSize:9, color: effectivelyAdmin ? "#f5b432" : "var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>{effectivelyAdmin ? "Admin Only" : "Dev Only"}</div>
               {devTabs.map(t=><NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={()=>setActiveTab(t.id)} count={null} />)}
             </>
           )}
@@ -4517,7 +4518,7 @@ export default function App() {
               {activeTab==="notiflog"      && <NotifLogTab         guildId={activeGuild} />}
               {activeTab==="safety"        && <SafetyTab           guildId={activeGuild} />}
               {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
-              {activeTab==="globalstats"   && (effectivelyDev || isAdmin) && <GlobalStatsTab />}
+              {activeTab==="globalstats"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <GlobalStatsTab />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
               {activeTab==="auditlog"      && effectivelyDev && <AdminAuditLogTab />}
             </>
