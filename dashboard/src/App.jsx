@@ -4288,14 +4288,14 @@ export default function App() {
     { id:"notiflog",       icon:"/app/icons/log.png", label:"Notification Log"  },
   ];
   const twitchTabs = [
-    { id:"twitch",         icon:"/app/icons/messagebubble.png", label:"Chat Commands"     },
+    { id:"twitch",         icon:"/app/icons/message.png", label:"Chat Commands"     },
     { id:"rewards",        icon:"/app/icons/rewards.png", label:"Channel Rewards"   },
   ];
   const communityTabs = [
     { id:"roles",          icon:"/app/icons/reactionroles.png", label:"Reaction Roles"    },
     { id:"birthdays",      icon:"/app/icons/birthday.png", label:"Birthdays"         },
     { id:"welcomegoodbye", icon:"/app/icons/welcome.png", label:"Welcome & Goodbye" },
-    { id:"voicerooms",     icon:"/app/icons/voicerooms.png", label:"Voice Rooms"       },
+    { id:"voicerooms",     icon:"/app/icons/vc.png", label:"Voice Rooms"       },
   ];
   const moderationTabs = [
     { id:"safety",         icon:"/app/icons/shield.png", label:"Safety"            },
@@ -4403,7 +4403,7 @@ export default function App() {
           <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
           <NavGroup icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
 <NavGroup icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={setActiveTab} />
-          <NavGroup icon="/app/icons/messagebubble.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
+          <NavGroup icon="/app/icons/twitch.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
           <NavGroup icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={setActiveTab} />
           <NavGroup icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={setActiveTab} />
           
@@ -4473,7 +4473,7 @@ export default function App() {
             <div style={{ fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
             <NavGroup icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
 <NavGroup icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="/app/icons/messagebubble.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup icon="/app/icons/twitch.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             
