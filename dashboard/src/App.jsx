@@ -4402,8 +4402,8 @@ export default function App() {
           </button>
           {dropdownOpen && guilds.length>1 && (
             <div style={{ position:"absolute", top:"calc(100% + 6px)", left:0, background:"linear-gradient(135deg, rgba(16,23,33,0.99) 0%, rgba(11,16,24,0.99) 100%)", border:"1px solid rgba(0,245,212,0.22)", borderRadius:10, padding:6, minWidth:220, zIndex:100, boxShadow:"0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,245,212,0.04), inset 0 1px 0 rgba(0,245,212,0.09)", maxHeight:"calc(100vh - 80px)", overflowY:"auto" }}>
-              {/* Own servers first */}
-              {guilds.filter(g => !g.admin_access).map(g=>(
+              {/* Own servers — always shown */}
+              {(effectivelyAdmin || isAdmin ? guilds.filter(g => !g.admin_access) : guilds).map(g=>(
                 <button key={g.id} onClick={()=>switchGuild(g.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:"8px 10px", borderRadius:7, border:"none", background:activeGuild===g.id?"var(--cyan-dim)":"transparent", color:activeGuild===g.id?"var(--cyan)":"var(--text)", cursor:"pointer", fontSize:13, fontFamily:"'Outfit',sans-serif", textAlign:"left" }}>
                   <GuildAvatar guild={g} size={24} />
                   <div style={{ flex:1 }}>
@@ -4443,7 +4443,7 @@ export default function App() {
               {viewMode==="dev" ? "DEV VIEW" : viewMode==="admin" ? "ADMIN VIEW" : "USER VIEW"}
             </button>
           )}
-          {(isAdmin || effectivelyAdmin) && !isMobile && (
+          {isAdmin && !isMobile && (
             <div style={{ padding:"4px 10px", borderRadius:7, border:"1px solid rgba(245,180,50,0.4)", background:"rgba(245,180,50,0.1)", color:"#f5b432", fontSize:11, fontFamily:"'JetBrains Mono',monospace", fontWeight:600, letterSpacing:0.5 }}>
               ADMIN
             </div>
