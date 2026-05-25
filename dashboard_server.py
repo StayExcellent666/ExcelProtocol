@@ -735,26 +735,24 @@ async def dev_music_stats(request):
     if not session.get("dev"):
         raise web.HTTPForbidden(reason="Dev only")
     import psutil
+    import music as music_module
     stats = {
         "cpu_percent": psutil.cpu_percent(interval=0.1),
         "memory_mb":   psutil.Process().memory_info().rss // 1024 // 1024,
         "guilds":      [],
     }
-    if _bot_ref:
-        music_cog = _bot_ref.cogs.get("MusicCog")
-        if music_cog:
-            for gid, player in music_cog.get_all_players().items():
-                guild = _bot_ref.get_guild(gid)
-                stats["guilds"].append({
-                    "guild_id":   gid,
-                    "guild_name": guild.name if guild else str(gid),
-                    "playing":    player.is_playing(),
-                    "paused":     player.is_paused(),
-                    "queue_len":  len(player.queue),
-                    "current":    player.current.title if player.current else None,
-                    "volume":     player.volume,
-                    "channel":    player.voice.channel.name if player.voice else None,
-                })
+    for gid, player in music_module.get_all_players().items():
+        guild = _bot_ref.get_guild(gid) if _bot_ref else None
+        stats["guilds"].append({
+            "guild_id":   gid,
+            "guild_name": guild.name if guild else str(gid),
+            "playing":    player.is_playing(),
+            "paused":     player.is_paused(),
+            "queue_len":  len(player.queue),
+            "current":    player.current.title if player.current else None,
+            "volume":     player.volume,
+            "channel":    player.voice.channel.name if player.voice else None,
+        })
     return web.json_response(stats)
 
 # ── Guilds ────────────────────────────────────────────────────────────────────

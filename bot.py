@@ -150,7 +150,14 @@ class TwitchNotifierBot(discord.Client):
             logger.error(f"Music cog failed to load: {e} - continuing normally")
 
         await self.tree.sync()
-        logger.info("Command tree synced")
+        logger.info("Command tree synced (global)")
+        # Also sync to each connected guild for instant propagation
+        for guild in self.guilds:
+            try:
+                await self.tree.sync(guild=guild)
+            except Exception:
+                pass
+        logger.info(f"Command tree synced to {len(self.guilds)} guild(s)")
     
     async def on_ready(self):
         """Called when bot successfully connects to Discord"""
