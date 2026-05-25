@@ -83,7 +83,6 @@ YTDL_OPTIONS = {
     "no_warnings":        True,
     "default_search":     "ytsearch",
     "source_address":     "0.0.0.0",
-    "extractor_args":     {"youtube": {"skip": ["dash", "hls"]}},
     "nocheckcertificate": True,
     **({"cookiefile": COOKIE_FILE} if _cookies_content else {}),
 }
