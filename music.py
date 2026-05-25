@@ -102,6 +102,8 @@ def get_ytdl_options(quality: str = "medium") -> dict:
         "source_address": "0.0.0.0",
     }
 
+MAX_CONCURRENT_PLAYERS = 2  # max guilds playing simultaneously to protect CPU
+
 FFMPEG_OPTIONS_FILE = {
     "before_options": "",
     "options":        "-vn -af aresample=48000 -ar 48000 -hide_banner -loglevel error",
@@ -110,7 +112,18 @@ FFMPEG_OPTIONS_STREAM = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
     "options":        "-vn -af aresample=48000 -ar 48000 -hide_banner -loglevel error",
 }
-FFMPEG_OPTIONS = FFMPEG_OPTIONS_FILE
+def get_download_options(quality: str = "medium", outtmpl: str = None) -> dict:
+    opts = {
+        **get_ytdl_options(quality),
+        "outtmpl":          outtmpl or "/tmp/%(id)s.%(ext)s",
+        "quiet":            True,
+        "postprocessors":   [{
+            "key":            "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "128",
+        }],
+    }
+    return opts
 
 async def resolve_query(query: str, quality: str = "medium") -> Optional[Track]:
     import yt_dlp
@@ -216,11 +229,10 @@ async def _predownload(player: GuildPlayer):
         with tempfile.NamedTemporaryFile(suffix=".%(ext)s", delete=False, dir="/tmp") as tmp:
             tmp_template = tmp.name.replace(".%(ext)s", "")
 
-        opts = {**get_ytdl_options(player.quality),
-                "outtmpl": tmp_template + ".%(ext)s",
-                "quiet": True}
+        opts = get_download_options(player.quality, tmp_template + ".%(ext)s")
 
         def _dl(url):
+            os.nice(10)  # lower priority so bot tasks preempt audio downloads
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
 
@@ -230,8 +242,12 @@ async def _predownload(player: GuildPlayer):
         import glob
         files = glob.glob(tmp_template + ".*")
         if files:
-            next_track._tmp_path = files[0]
-            logger.info(f"Pre-downloaded: {next_track.title} → {files[0]}")
+            final = [f for f in files if not f.endswith('.part') and not f.endswith('.ytdl')]
+            if final and os.path.getsize(final[0]) > 10240:
+                next_track._tmp_path = final[0]
+                logger.info(f"Pre-downloaded: {next_track.title} → {final[0]}")
+            else:
+                logger.warning(f"Pre-download file incomplete for: {next_track.title}")
     except Exception as e:
         logger.warning(f"Pre-download failed: {e}")
 
@@ -269,11 +285,10 @@ async def _advance(player: GuildPlayer):
                 with tempfile.NamedTemporaryFile(delete=False, dir="/tmp") as tmp:
                     tmp_template = tmp.name
 
-                opts = {**get_ytdl_options(player.quality),
-                        "outtmpl": tmp_template + ".%(ext)s",
-                        "quiet": True}
+                opts = get_download_options(player.quality, tmp_template + ".%(ext)s")
 
                 def _download(webpage):
+                    os.nice(10)
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         ydl.download([webpage])
 
@@ -281,8 +296,13 @@ async def _advance(player: GuildPlayer):
 
                 files = glob.glob(tmp_template + ".*")
                 if files:
-                    play_source = files[0]
-                    player.tmp_path = files[0]
+                    # Verify file is complete and not a fragment file
+                    final = [f for f in files if not f.endswith('.part') and not f.endswith('.ytdl')]
+                    if final and os.path.getsize(final[0]) > 10240:  # at least 10KB
+                        play_source = final[0]
+                        player.tmp_path = final[0]
+                    else:
+                        raise Exception("Downloaded file incomplete or too small")
                 else:
                     raise Exception("No output file found after download")
             except Exception as e:
@@ -557,6 +577,14 @@ async def setup(discord_bot):
             return
 
         player = get_player(interaction.guild_id)
+
+        # Check concurrent player cap
+        active = sum(1 for p in _players.values() if p.is_playing() or p.is_paused())
+        if active >= MAX_CONCURRENT_PLAYERS and not (player.voice and player.voice.is_connected()):
+            await interaction.response.send_message(
+                f"❌ Music is busy in {active} other server(s) right now. Try again shortly.",
+                ephemeral=True)
+            return
 
         if player.voice and player.voice.is_connected():
             if player.voice.channel.id == member.voice.channel.id:
