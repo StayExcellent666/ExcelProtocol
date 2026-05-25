@@ -1519,6 +1519,16 @@ function WelcomeSettings({ guildId, channels }) {
     );
   }
 
+  if (!cfg) {
+    return (
+      <div style={{ ...C.card, marginTop:16, padding:16 }}>
+        <div style={{ fontSize:13, color:"var(--red)", fontFamily:"'JetBrains Mono',monospace" }}>
+          {error || "Failed to load welcome settings."}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ ...C.card, marginTop:16, padding:18 }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
@@ -4400,13 +4410,15 @@ function MusicTab({ guildId, isDev, isAdmin }) {
       )}
 
       {/* Dev CPU stats */}
-      {isDev && stats && (
+      {isDev && (
         <div style={{ ...C.card }}>
           <div style={{ fontSize:13, fontWeight:600, color:"#f5c842", textTransform:"uppercase", letterSpacing:1, marginBottom:14 }}>
             ⚡ System Stats <span style={{ fontSize:10, color:"var(--text3)", fontWeight:400 }}>(refreshes every 5s)</span>
           </div>
           {statsErr ? (
             <div style={{ fontSize:12, color:"var(--red)" }}>Could not fetch stats.</div>
+          ) : !stats ? (
+            <div style={{ fontSize:12, color:"var(--text3)" }}>Loading…</div>
           ) : (
             <div style={{ display:"flex", gap:24, flexWrap:"wrap" }}>
               <div>

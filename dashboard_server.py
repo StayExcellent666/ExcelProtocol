@@ -1487,6 +1487,54 @@ async def delete_birthday(request):
     )
     return web.json_response({"ok": True})
 
+async def get_welcome_settings(request):
+    guild_id = request.match_info["guild_id"]
+    rows = await db_fetch(
+        "SELECT welcome_enabled, goodbye_enabled, welcome_channel_id, goodbye_channel_id, welcome_message, goodbye_message FROM welcome_settings WHERE guild_id=?",
+        (int(guild_id),)
+    )
+    if rows:
+        r = rows[0]
+        return web.json_response({
+            "welcome_enabled":    bool(r["welcome_enabled"]),
+            "goodbye_enabled":    bool(r["goodbye_enabled"]),
+            "welcome_channel_id": str(r["welcome_channel_id"]) if r["welcome_channel_id"] else None,
+            "goodbye_channel_id": str(r["goodbye_channel_id"]) if r["goodbye_channel_id"] else None,
+            "welcome_message":    r["welcome_message"],
+            "goodbye_message":    r["goodbye_message"],
+        })
+    return web.json_response({
+        "welcome_enabled": False, "goodbye_enabled": False,
+        "welcome_channel_id": None, "goodbye_channel_id": None,
+        "welcome_message": None, "goodbye_message": None,
+    })
+
+async def save_welcome_settings(request):
+    guild_id = request.match_info["guild_id"]
+    body     = await request.json()
+    await db_execute(
+        """INSERT INTO welcome_settings
+           (guild_id, welcome_enabled, goodbye_enabled, welcome_channel_id, goodbye_channel_id, welcome_message, goodbye_message)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(guild_id) DO UPDATE SET
+               welcome_enabled=excluded.welcome_enabled,
+               goodbye_enabled=excluded.goodbye_enabled,
+               welcome_channel_id=excluded.welcome_channel_id,
+               goodbye_channel_id=excluded.goodbye_channel_id,
+               welcome_message=excluded.welcome_message,
+               goodbye_message=excluded.goodbye_message""",
+        (
+            int(guild_id),
+            int(bool(body.get("welcome_enabled", False))),
+            int(bool(body.get("goodbye_enabled", False))),
+            int(body["welcome_channel_id"]) if body.get("welcome_channel_id") else None,
+            int(body["goodbye_channel_id"]) if body.get("goodbye_channel_id") else None,
+            body.get("welcome_message"),
+            body.get("goodbye_message"),
+        )
+    )
+    return web.json_response({"ok": True})
+
 # ── Server Settings ───────────────────────────────────────────────────────────
 async def get_server_settings(request):
     guild_id = request.match_info["guild_id"]
@@ -3897,6 +3945,8 @@ def create_dashboard_app(bot=None):
 
     app.router.add_get  ("/api/guild/{guild_id}/birthdays",              get_birthdays)
     app.router.add_post ("/api/guild/{guild_id}/birthdays",              add_birthday)
+    app.router.add_get  ("/api/guild/{guild_id}/welcome-settings",       get_welcome_settings)
+    app.router.add_post ("/api/guild/{guild_id}/welcome-settings",       save_welcome_settings)
     app.router.add_delete("/api/guild/{guild_id}/birthdays/{user_id}",  delete_birthday)
     app.router.add_get  ("/api/guild/{guild_id}/settings",              get_server_settings)
     app.router.add_patch("/api/guild/{guild_id}/settings",              patch_server_settings)
