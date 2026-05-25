@@ -47,6 +47,7 @@ class GuildPlayer:
         self.quality      = "medium"
         self.last_active  = time.time()
         self.source       = None
+        self.tmp_path     = None
         self._play_lock   = asyncio.Lock()
 
     def is_playing(self):
@@ -102,8 +103,8 @@ def get_ytdl_options(quality: str = "medium") -> dict:
     }
 
 FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options":        "-vn -af aresample=48000 -ar 48000",
+    "before_options": "",
+    "options":        "-vn -hide_banner -loglevel error",
 }
 
 async def resolve_query(query: str, quality: str = "medium") -> Optional[Track]:
@@ -198,6 +199,30 @@ def build_embed(player: GuildPlayer, guild: discord.Guild) -> discord.Embed:
     e.set_footer(text=f"{guild.name} • ExcelProtocol Music")
     return e
 
+async def _predownload(player: GuildPlayer):
+    """Download the next queued track to a temp file in the background."""
+    if not player.queue:
+        return
+    next_track = list(player.queue)[0]  # peek without removing
+    if getattr(next_track, "_tmp_path", None):
+        return  # already pre-downloaded
+    try:
+        import tempfile
+        refreshed = await resolve_query(next_track.webpage, player.quality)
+        stream_url = refreshed.url if refreshed else next_track.url
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        def _dl(url, path):
+            import urllib.request
+            urllib.request.urlretrieve(url, path)
+
+        await asyncio.get_event_loop().run_in_executor(None, _dl, stream_url, tmp_path)
+        next_track._tmp_path = tmp_path
+        logger.info(f"Pre-downloaded next track: {next_track.title}")
+    except Exception as e:
+        logger.warning(f"Pre-download failed: {e}")
+
 # ── Playback ───────────────────────────────────────────────────────────────────
 
 async def _advance(player: GuildPlayer):
@@ -218,10 +243,34 @@ async def _advance(player: GuildPlayer):
         player.current     = next_track
         player.last_active = time.time()
 
-        refreshed  = await resolve_query(next_track.webpage, player.quality)
-        stream_url = refreshed.url if refreshed else next_track.url
+        # Use pre-downloaded file if available
+        pre_path = getattr(next_track, "_tmp_path", None)
+        if pre_path and os.path.exists(pre_path):
+            play_source = pre_path
+            player.tmp_path = pre_path
+            logger.info(f"Using pre-downloaded file for: {next_track.title}")
+        else:
+            # Download now
+            import tempfile
+            refreshed  = await resolve_query(next_track.webpage, player.quality)
+            stream_url = refreshed.url if refreshed else next_track.url
+            tmp_path   = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                    tmp_path = tmp.name
 
-        source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+                def _download(url, path):
+                    import urllib.request
+                    urllib.request.urlretrieve(url, path)
+
+                await asyncio.get_event_loop().run_in_executor(None, _download, stream_url, tmp_path)
+                play_source = tmp_path
+                player.tmp_path = tmp_path
+            except Exception as e:
+                logger.warning(f"Download to temp failed ({e}), falling back to stream")
+                play_source = stream_url
+
+        source = discord.FFmpegPCMAudio(play_source, **FFMPEG_OPTIONS)
         source = discord.PCMVolumeTransformer(source, volume=player.volume)
         player.source = source
         logger.info(f"Playing at volume {player.volume:.2f} in guild {player.guild_id}")
@@ -229,11 +278,21 @@ async def _advance(player: GuildPlayer):
         def after(err):
             if err:
                 logger.warning(f"Playback error: {err}")
+            if player.tmp_path:
+                try:
+                    os.remove(player.tmp_path)
+                except Exception:
+                    pass
+                player.tmp_path = None
             player.last_active = time.time()
             asyncio.run_coroutine_threadsafe(_advance(player), _bot_ref.loop)
 
         player.voice.play(source, after=after)
         await _refresh_embed(player)
+
+        # Start pre-downloading next track in background
+        if player.queue:
+            asyncio.create_task(_predownload(player))
 
 async def _refresh_embed(player: GuildPlayer):
     if not player.control_msg or not _bot_ref:
@@ -259,6 +318,21 @@ async def _disconnect(player: GuildPlayer, guild: discord.Guild, reason: str = "
     player.voice   = None
     player.current = None
     player.source  = None
+    # Clean up current temp file
+    if player.tmp_path:
+        try:
+            os.remove(player.tmp_path)
+        except Exception:
+            pass
+        player.tmp_path = None
+    # Clean up any pre-downloaded queue files
+    for track in player.queue:
+        pre = getattr(track, "_tmp_path", None)
+        if pre:
+            try:
+                os.remove(pre)
+            except Exception:
+                pass
     player.queue.clear()
     player.paused  = False
     if player.control_msg:
