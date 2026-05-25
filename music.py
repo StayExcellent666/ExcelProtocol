@@ -225,29 +225,33 @@ async def _predownload(player: GuildPlayer):
     if getattr(next_track, "_tmp_path", None):
         return
     try:
-        import tempfile, yt_dlp
-        with tempfile.NamedTemporaryFile(suffix=".%(ext)s", delete=False, dir="/tmp") as tmp:
-            tmp_template = tmp.name.replace(".%(ext)s", "")
+        import tempfile, yt_dlp, glob
+        with tempfile.NamedTemporaryFile(delete=False, dir="/tmp") as tmp:
+            tmp_template = tmp.name
+        os.remove(tmp_template)  # remove placeholder
 
         opts = get_download_options(player.quality, tmp_template + ".%(ext)s")
 
         def _dl(url):
-            os.nice(10)  # lower priority so bot tasks preempt audio downloads
+            os.nice(10)
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
 
         await asyncio.get_event_loop().run_in_executor(None, _dl, next_track.webpage)
 
-        # Find the downloaded file
-        import glob
-        files = glob.glob(tmp_template + ".*")
-        if files:
-            final = [f for f in files if not f.endswith('.part') and not f.endswith('.ytdl')]
-            if final and os.path.getsize(final[0]) > 10240:
-                next_track._tmp_path = final[0]
-                logger.info(f"Pre-downloaded: {next_track.title} → {final[0]}")
+        mp3 = tmp_template + ".mp3"
+        if os.path.exists(mp3) and os.path.getsize(mp3) > 10240:
+            next_track._tmp_path = mp3
+            logger.info(f"Pre-downloaded: {next_track.title} → {mp3}")
+        else:
+            files = [f for f in glob.glob(tmp_template + ".*")
+                     if not f.endswith('.part') and not f.endswith('.ytdl')
+                     and os.path.getsize(f) > 10240]
+            if files:
+                next_track._tmp_path = files[0]
+                logger.info(f"Pre-downloaded: {next_track.title} → {files[0]}")
             else:
-                logger.warning(f"Pre-download file incomplete for: {next_track.title}")
+                logger.warning(f"Pre-download incomplete for: {next_track.title}")
     except Exception as e:
         logger.warning(f"Pre-download failed: {e}")
 
@@ -284,6 +288,7 @@ async def _advance(player: GuildPlayer):
             try:
                 with tempfile.NamedTemporaryFile(delete=False, dir="/tmp") as tmp:
                     tmp_template = tmp.name
+                os.remove(tmp_template)  # remove placeholder so glob only finds yt-dlp output
 
                 opts = get_download_options(player.quality, tmp_template + ".%(ext)s")
 
@@ -294,22 +299,28 @@ async def _advance(player: GuildPlayer):
 
                 await asyncio.get_event_loop().run_in_executor(None, _download, next_track.webpage)
 
-                files = glob.glob(tmp_template + ".*")
-                if files:
-                    # Verify file is complete and not a fragment file
-                    final = [f for f in files if not f.endswith('.part') and not f.endswith('.ytdl')]
-                    if final and os.path.getsize(final[0]) > 10240:  # at least 10KB
-                        play_source = final[0]
-                        player.tmp_path = final[0]
-                    else:
-                        raise Exception("Downloaded file incomplete or too small")
+                # Prefer .mp3 (post-processed output)
+                mp3 = tmp_template + ".mp3"
+                if os.path.exists(mp3) and os.path.getsize(mp3) > 10240:
+                    play_source = mp3
+                    player.tmp_path = mp3
                 else:
-                    raise Exception("No output file found after download")
+                    files = [f for f in glob.glob(tmp_template + ".*")
+                             if not f.endswith('.part') and not f.endswith('.ytdl')
+                             and os.path.getsize(f) > 10240]
+                    if files:
+                        play_source = files[0]
+                        player.tmp_path = files[0]
+                    else:
+                        raise Exception("No complete output file found after download")
             except Exception as e:
                 logger.warning(f"Download failed ({e}), falling back to stream")
                 refreshed   = await resolve_query(next_track.webpage, player.quality)
                 play_source = refreshed.url if refreshed else next_track.url
 
+        if player.tmp_path:
+            size = os.path.getsize(player.tmp_path)
+            logger.info(f"Playing file: {player.tmp_path} ({size/1024:.1f}KB)")
         ffmpeg_opts = FFMPEG_OPTIONS_FILE if player.tmp_path else FFMPEG_OPTIONS_STREAM
         source = discord.FFmpegPCMAudio(play_source, **ffmpeg_opts)
         source = discord.PCMVolumeTransformer(source, volume=player.volume)
