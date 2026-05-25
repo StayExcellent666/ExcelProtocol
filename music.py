@@ -102,10 +102,15 @@ def get_ytdl_options(quality: str = "medium") -> dict:
         "source_address": "0.0.0.0",
     }
 
-FFMPEG_OPTIONS = {
+FFMPEG_OPTIONS_FILE = {
     "before_options": "",
     "options":        "-vn -hide_banner -loglevel error",
 }
+FFMPEG_OPTIONS_STREAM = {
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options":        "-vn -hide_banner -loglevel error",
+}
+FFMPEG_OPTIONS = FFMPEG_OPTIONS_FILE  # default
 
 async def resolve_query(query: str, quality: str = "medium") -> Optional[Track]:
     import yt_dlp
@@ -203,23 +208,30 @@ async def _predownload(player: GuildPlayer):
     """Download the next queued track to a temp file in the background."""
     if not player.queue:
         return
-    next_track = list(player.queue)[0]  # peek without removing
+    next_track = list(player.queue)[0]
     if getattr(next_track, "_tmp_path", None):
-        return  # already pre-downloaded
+        return
     try:
-        import tempfile
-        refreshed = await resolve_query(next_track.webpage, player.quality)
-        stream_url = refreshed.url if refreshed else next_track.url
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            tmp_path = tmp.name
+        import tempfile, yt_dlp
+        with tempfile.NamedTemporaryFile(suffix=".%(ext)s", delete=False, dir="/tmp") as tmp:
+            tmp_template = tmp.name.replace(".%(ext)s", "")
 
-        def _dl(url, path):
-            import urllib.request
-            urllib.request.urlretrieve(url, path)
+        opts = {**get_ytdl_options(player.quality),
+                "outtmpl": tmp_template + ".%(ext)s",
+                "quiet": True}
 
-        await asyncio.get_event_loop().run_in_executor(None, _dl, stream_url, tmp_path)
-        next_track._tmp_path = tmp_path
-        logger.info(f"Pre-downloaded next track: {next_track.title}")
+        def _dl(url):
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+
+        await asyncio.get_event_loop().run_in_executor(None, _dl, next_track.webpage)
+
+        # Find the downloaded file
+        import glob
+        files = glob.glob(tmp_template + ".*")
+        if files:
+            next_track._tmp_path = files[0]
+            logger.info(f"Pre-downloaded: {next_track.title} → {files[0]}")
     except Exception as e:
         logger.warning(f"Pre-download failed: {e}")
 
@@ -250,27 +262,36 @@ async def _advance(player: GuildPlayer):
             player.tmp_path = pre_path
             logger.info(f"Using pre-downloaded file for: {next_track.title}")
         else:
-            # Download now
-            import tempfile
-            refreshed  = await resolve_query(next_track.webpage, player.quality)
-            stream_url = refreshed.url if refreshed else next_track.url
-            tmp_path   = None
+            # Download now using yt-dlp (handles auth headers correctly)
+            import tempfile, yt_dlp, glob
+            tmp_path = None
             try:
-                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-                    tmp_path = tmp.name
+                with tempfile.NamedTemporaryFile(delete=False, dir="/tmp") as tmp:
+                    tmp_template = tmp.name
 
-                def _download(url, path):
-                    import urllib.request
-                    urllib.request.urlretrieve(url, path)
+                opts = {**get_ytdl_options(player.quality),
+                        "outtmpl": tmp_template + ".%(ext)s",
+                        "quiet": True}
 
-                await asyncio.get_event_loop().run_in_executor(None, _download, stream_url, tmp_path)
-                play_source = tmp_path
-                player.tmp_path = tmp_path
+                def _download(webpage):
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        ydl.download([webpage])
+
+                await asyncio.get_event_loop().run_in_executor(None, _download, next_track.webpage)
+
+                files = glob.glob(tmp_template + ".*")
+                if files:
+                    play_source = files[0]
+                    player.tmp_path = files[0]
+                else:
+                    raise Exception("No output file found after download")
             except Exception as e:
-                logger.warning(f"Download to temp failed ({e}), falling back to stream")
-                play_source = stream_url
+                logger.warning(f"Download failed ({e}), falling back to stream")
+                refreshed   = await resolve_query(next_track.webpage, player.quality)
+                play_source = refreshed.url if refreshed else next_track.url
 
-        source = discord.FFmpegPCMAudio(play_source, **FFMPEG_OPTIONS)
+        ffmpeg_opts = FFMPEG_OPTIONS_FILE if player.tmp_path else FFMPEG_OPTIONS_STREAM
+        source = discord.FFmpegPCMAudio(play_source, **ffmpeg_opts)
         source = discord.PCMVolumeTransformer(source, volume=player.volume)
         player.source = source
         logger.info(f"Playing at volume {player.volume:.2f} in guild {player.guild_id}")
