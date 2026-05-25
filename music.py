@@ -45,6 +45,7 @@ class GuildPlayer:
         self.loop         = False
         self.volume       = 0.7
         self.last_active  = time.time()
+        self.source       = None
         self._play_lock   = asyncio.Lock()
 
     def is_playing(self):
@@ -90,7 +91,7 @@ YTDL_OPTIONS = {
 }
 
 FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 200M",
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
     "options":        "-vn",
 }
 
@@ -118,7 +119,7 @@ async def resolve_query(query: str) -> Optional[Track]:
         title     = info.get("title", "Unknown"),
         url       = info["url"],
         webpage   = info.get("webpage_url", query),
-        duration  = info.get("duration", 0) or 0,
+        duration  = int(info.get("duration", 0) or 0),
         requester = None,
         thumbnail = info.get("thumbnail", ""),
     )
@@ -157,7 +158,8 @@ async def _spotify_track_to_search(url: str) -> Optional[str]:
         logger.warning(f"Spotify track resolve failed: {e}")
         return None
 
-def fmt_duration(s: int) -> str:
+def fmt_duration(s) -> str:
+    s = int(s or 0)
     if not s: return "?"
     m, s = divmod(s, 60)
     h, m = divmod(m, 60)
@@ -208,6 +210,8 @@ async def _advance(player: GuildPlayer):
 
         source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
         source = discord.PCMVolumeTransformer(source, volume=player.volume)
+        player.source = source
+        logger.info(f"Playing at volume {player.volume:.2f} in guild {player.guild_id}")
 
         def after(err):
             if err:
