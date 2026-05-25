@@ -60,7 +60,19 @@ _bot_ref = None
 
 def get_player(guild_id: int) -> GuildPlayer:
     if guild_id not in _players:
-        _players[guild_id] = GuildPlayer(guild_id)
+        player = GuildPlayer(guild_id)
+        # Load default volume from DB
+        try:
+            if _bot_ref:
+                rows = _bot_ref.db.db_fetch(
+                    "SELECT default_volume FROM guild_music_settings WHERE guild_id=?",
+                    (guild_id,)
+                )
+                if rows:
+                    player.volume = rows[0]["default_volume"] / 100.0
+        except Exception:
+            pass
+        _players[guild_id] = player
     return _players[guild_id]
 
 def get_all_players() -> dict[int, GuildPlayer]:
@@ -78,7 +90,7 @@ YTDL_OPTIONS = {
 }
 
 FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 200M",
     "options":        "-vn",
 }
 
