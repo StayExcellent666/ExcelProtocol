@@ -21,14 +21,6 @@ SPOTIFY_CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 IDLE_TIMEOUT          = 300  # seconds
 
-# Write YouTube cookies from env to temp file at import time
-COOKIE_FILE = "/tmp/yt-cookies.txt"
-_cookies_content = os.getenv("YOUTUBE_COOKIES", "")
-if _cookies_content:
-    with open(COOKIE_FILE, "w") as _f:
-        _f.write(_cookies_content)
-    logger.info("YouTube cookies written to temp file")
-
 # ── Track ──────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -74,18 +66,15 @@ def get_player(guild_id: int) -> GuildPlayer:
 def get_all_players() -> dict[int, GuildPlayer]:
     return _players
 
-# ── yt-dlp helpers ─────────────────────────────────────────────────────────────
+# ── yt-dlp helpers (SoundCloud backend) ───────────────────────────────────────
 
 YTDL_OPTIONS = {
-    "format":             "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
-    "noplaylist":         True,
-    "quiet":              True,
-    "no_warnings":        True,
-    "default_search":     "ytsearch",
-    "source_address":     "0.0.0.0",
-    "nocheckcertificate": True,
-    "extractor_args":     {"youtube": {"player_client": ["web"]}},
-    **({"cookiefile": COOKIE_FILE} if _cookies_content else {}),
+    "format":         "bestaudio/best",
+    "noplaylist":     True,
+    "quiet":          True,
+    "no_warnings":    True,
+    "default_search": "scsearch",
+    "source_address": "0.0.0.0",
 }
 
 FFMPEG_OPTIONS = {
@@ -286,8 +275,8 @@ async def _idle_watchdog():
 
 class AddModal(discord.ui.Modal, title="Add to Queue"):
     query = discord.ui.TextInput(
-        label       = "Song / Spotify / YouTube link",
-        placeholder = "e.g. Never Gonna Give You Up  or  https://open.spotify.com/...",
+        label       = "Song / SoundCloud / Spotify link",
+        placeholder = "e.g. Never Gonna Give You Up  or  https://soundcloud.com/...  or  https://open.spotify.com/...",
         max_length  = 300,
     )
 
