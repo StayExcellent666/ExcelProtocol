@@ -44,6 +44,7 @@ class GuildPlayer:
         self.paused       = False
         self.loop         = False
         self.volume       = 0.7
+        self.quality      = "medium"
         self.last_active  = time.time()
         self.source       = None
         self._play_lock   = asyncio.Lock()
@@ -65,16 +66,17 @@ def get_player(guild_id: int) -> GuildPlayer:
         try:
             if _bot_ref:
                 rows = _bot_ref.db.db_fetch(
-                    "SELECT default_volume FROM guild_music_settings WHERE guild_id=?",
+                    "SELECT default_volume, quality FROM guild_music_settings WHERE guild_id=?",
                     (guild_id,)
                 )
                 if rows:
-                    player.volume = rows[0]["default_volume"] / 100.0
-                    logger.info(f"Loaded volume {player.volume:.2f} for guild {guild_id}")
+                    player.volume  = rows[0]["default_volume"] / 100.0
+                    player.quality = rows[0].get("quality", "medium")
+                    logger.info(f"Loaded volume={player.volume:.2f} quality={player.quality} for guild {guild_id}")
                 else:
-                    logger.info(f"No music settings found for guild {guild_id}, using default volume")
+                    logger.info(f"No music settings for guild {guild_id}, using defaults")
         except Exception as e:
-            logger.warning(f"Failed to load volume for guild {guild_id}: {e}")
+            logger.warning(f"Failed to load settings for guild {guild_id}: {e}")
         _players[guild_id] = player
     return _players[guild_id]
 
@@ -83,29 +85,38 @@ def get_all_players() -> dict[int, GuildPlayer]:
 
 # ── yt-dlp helpers (SoundCloud backend) ───────────────────────────────────────
 
-YTDL_OPTIONS = {
-    "format":         "bestaudio/best",
-    "noplaylist":     True,
-    "quiet":          True,
-    "no_warnings":    True,
-    "default_search": "scsearch",
-    "source_address": "0.0.0.0",
+QUALITY_FORMATS = {
+    "low":    "worstaudio/worst",
+    "medium": "bestaudio[abr<=128]/bestaudio/best",
+    "high":   "bestaudio/best",
 }
+
+def get_ytdl_options(quality: str = "medium") -> dict:
+    return {
+        "format":         QUALITY_FORMATS.get(quality, QUALITY_FORMATS["medium"]),
+        "noplaylist":     True,
+        "quiet":          True,
+        "no_warnings":    True,
+        "default_search": "scsearch",
+        "source_address": "0.0.0.0",
+    }
 
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
     "options":        "-vn",
 }
 
-async def resolve_query(query: str) -> Optional[Track]:
+async def resolve_query(query: str, quality: str = "medium") -> Optional[Track]:
     import yt_dlp
     loop = asyncio.get_event_loop()
 
     if "open.spotify.com/track" in query:
         query = await _spotify_track_to_search(query) or query
 
+    opts = get_ytdl_options(quality)
+
     def _extract(q):
-        with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(q, download=False)
             if "entries" in info:
                 info = info["entries"][0]
@@ -207,7 +218,7 @@ async def _advance(player: GuildPlayer):
         player.current     = next_track
         player.last_active = time.time()
 
-        refreshed  = await resolve_query(next_track.webpage)
+        refreshed  = await resolve_query(next_track.webpage, player.quality)
         stream_url = refreshed.url if refreshed else next_track.url
 
         source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
@@ -316,14 +327,14 @@ class AddModal(discord.ui.Modal, title="Add to Queue"):
                 return
             added = 0
             for s in searches[:50]:
-                track = await resolve_query(s)
+                track = await resolve_query(s, self.player.quality)
                 if track:
                     track.requester = interaction.user
                     self.player.queue.append(track)
                     added += 1
             await interaction.followup.send(f"✅ Added **{added}** tracks from playlist.", ephemeral=True)
         else:
-            track = await resolve_query(q)
+            track = await resolve_query(q, self.player.quality)
             if not track:
                 await interaction.followup.send("❌ Could not find that track.", ephemeral=True)
                 return
@@ -477,5 +488,38 @@ async def setup(discord_bot):
             return
         await _disconnect(player, interaction.guild)
         await interaction.response.send_message("👋 Disconnected.", ephemeral=True)
+
+    @discord_bot.tree.command(name="msettings", description="Adjust music volume and quality live")
+    @app_commands.describe(
+        volume="Volume 1-100 (default 70)",
+        quality="Audio quality: low, medium, or high",
+    )
+    @app_commands.choices(quality=[
+        app_commands.Choice(name="Low (less CPU)",  value="low"),
+        app_commands.Choice(name="Medium",           value="medium"),
+        app_commands.Choice(name="High (more CPU)",  value="high"),
+    ])
+    async def msettings(interaction: discord.Interaction, volume: Optional[int] = None, quality: Optional[str] = None):
+        player = _players.get(interaction.guild_id)
+        if not player or not player.voice:
+            await interaction.response.send_message("❌ Not currently playing in this server.", ephemeral=True)
+            return
+        changes = []
+        if volume is not None:
+            volume = max(1, min(100, volume))
+            player.volume = volume / 100.0
+            if player.source:
+                player.source.volume = player.volume
+            changes.append(f"Volume → **{volume}%**")
+        if quality is not None:
+            player.quality = quality
+            changes.append(f"Quality → **{quality}** (applies to next track)")
+        if not changes:
+            await interaction.response.send_message(
+                f"Current settings — Volume: **{int(player.volume*100)}%** | Quality: **{player.quality}**",
+                ephemeral=True)
+            return
+        await interaction.response.send_message(f"✅ Updated: {', '.join(changes)}", ephemeral=True)
+        await _refresh_embed(player)
 
     logger.info("Music commands registered")
