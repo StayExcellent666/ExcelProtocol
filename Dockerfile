@@ -56,6 +56,9 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Always use latest yt-dlp to avoid YouTube format breakage
+RUN pip install --no-cache-dir -U yt-dlp
+
 # Remove build dependencies to reduce image size
 RUN apt-get purge -y gcc && \
     apt-get autoremove -y && \
