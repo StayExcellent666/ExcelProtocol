@@ -41,6 +41,9 @@ RUN apt-get update && \
     libpng16-16 \
     libfreetype6 \
     fonts-dejavu-core \
+    ffmpeg \
+    libopus0 \
+    libopus-dev \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
@@ -59,7 +62,7 @@ RUN apt-get purge -y gcc && \
     apt-get clean
 
 # Copy only necessary Python files
-COPY utils.py bot.py database.py twitch_api.py config.py twitch_bot.py twitch_chat_cog.py reaction_roles.py setchannel_cog.py birthday_cog.py dashboard_server.py server_setup.py welcome_banner.py ./
+COPY utils.py bot.py database.py twitch_api.py config.py twitch_bot.py twitch_chat_cog.py reaction_roles.py setchannel_cog.py birthday_cog.py dashboard_server.py server_setup.py welcome_banner.py music.py ./
 
 # Banner template + (future) other static assets used by Python code.
 # welcome_banner.py resolves the template path relative to its own

@@ -747,6 +747,17 @@ class Database:
             )
         ''')
 
+        # Music settings per guild
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS guild_music_settings (
+                guild_id        INTEGER PRIMARY KEY,
+                music_enabled   INTEGER DEFAULT 0,
+                default_volume  INTEGER DEFAULT 70,
+                quality         TEXT    DEFAULT 'medium',
+                updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
@@ -2862,3 +2873,51 @@ class Database:
                        (json.dumps(roles), message_id))
         conn.commit()
         conn.close()
+
+    # ── Music ──────────────────────────────────────────────────────────────────
+
+    def get_music_settings(self, guild_id: int) -> dict:
+        conn   = self.get_connection()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM guild_music_settings WHERE guild_id = ?', (guild_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return dict(row)
+        return {"guild_id": guild_id, "music_enabled": 0, "default_volume": 70, "quality": "medium"}
+
+    def set_music_enabled(self, guild_id: int, enabled: bool):
+        conn   = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO guild_music_settings (guild_id, music_enabled, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET music_enabled=excluded.music_enabled, updated_at=CURRENT_TIMESTAMP
+        ''', (guild_id, int(enabled)))
+        conn.commit()
+        conn.close()
+
+    def set_music_settings(self, guild_id: int, volume: int = None, quality: str = None):
+        conn   = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO guild_music_settings (guild_id, default_volume, quality, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                default_volume = COALESCE(excluded.default_volume, default_volume),
+                quality = COALESCE(excluded.quality, quality),
+                updated_at = CURRENT_TIMESTAMP
+        ''', (guild_id, volume or 70, quality or "medium"))
+        conn.commit()
+        conn.close()
+
+    def db_fetch(self, query: str, params: tuple = ()) -> list:
+        """Synchronous fetch helper for use inside cogs."""
+        conn = self.get_connection()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
