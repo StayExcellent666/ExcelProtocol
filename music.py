@@ -160,17 +160,23 @@ async def resolve_spotify_playlist(url: str) -> list[str]:
     try:
         import spotipy
         from spotipy.oauth2 import SpotifyClientCredentials
+        if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+            logger.warning("Spotify credentials not set")
+            return []
         sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
             client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET))
-        results = sp.playlist_tracks(url)
+        # Extract playlist ID from URL
+        playlist_id = url.split("/playlist/")[1].split("?")[0]
+        results = sp.playlist_tracks(playlist_id)
         tracks = []
         while results:
             for item in results["items"]:
                 t = item.get("track")
-                if t:
+                if t and t.get("name"):
                     artists = ", ".join(a["name"] for a in t.get("artists", []))
                     tracks.append(f"{artists} - {t['name']}")
             results = sp.next(results) if results.get("next") else None
+        logger.info(f"Resolved Spotify playlist: {len(tracks)} tracks")
         return tracks
     except Exception as e:
         logger.warning(f"Spotify playlist resolve failed: {e}")
