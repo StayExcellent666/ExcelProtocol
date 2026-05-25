@@ -62,7 +62,6 @@ _bot_ref = None
 def get_player(guild_id: int) -> GuildPlayer:
     if guild_id not in _players:
         player = GuildPlayer(guild_id)
-        # Load default volume from DB
         try:
             if _bot_ref:
                 rows = _bot_ref.db.db_fetch(
@@ -71,8 +70,11 @@ def get_player(guild_id: int) -> GuildPlayer:
                 )
                 if rows:
                     player.volume = rows[0]["default_volume"] / 100.0
-        except Exception:
-            pass
+                    logger.info(f"Loaded volume {player.volume:.2f} for guild {guild_id}")
+                else:
+                    logger.info(f"No music settings found for guild {guild_id}, using default volume")
+        except Exception as e:
+            logger.warning(f"Failed to load volume for guild {guild_id}: {e}")
         _players[guild_id] = player
     return _players[guild_id]
 
@@ -245,6 +247,7 @@ async def _disconnect(player: GuildPlayer, guild: discord.Guild, reason: str = "
             pass
     player.voice   = None
     player.current = None
+    player.source  = None
     player.queue.clear()
     player.paused  = False
     if player.control_msg:
@@ -258,6 +261,8 @@ async def _disconnect(player: GuildPlayer, guild: discord.Guild, reason: str = "
         except Exception:
             pass
         player.control_msg = None
+    # Remove from cache so next /mjoin re-reads settings from DB
+    _players.pop(guild.id, None)
 
 async def _music_enabled(guild_id: int) -> bool:
     if not _bot_ref:
