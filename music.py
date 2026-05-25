@@ -77,15 +77,14 @@ def get_all_players() -> dict[int, GuildPlayer]:
 # ── yt-dlp helpers ─────────────────────────────────────────────────────────────
 
 YTDL_OPTIONS = {
-    "format":             "bestaudio/best/worstaudio",
+    "format":             "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist":         True,
-    "quiet":              True,
-    "no_warnings":        True,
+    "quiet":              False,
+    "verbose":            True,
+    "no_warnings":        False,
     "default_search":     "ytsearch",
     "source_address":     "0.0.0.0",
     "nocheckcertificate": True,
-    "ignoreerrors":       False,
-    "compat_opts":        set(),
     **({"cookiefile": COOKIE_FILE} if _cookies_content else {}),
 }
 
