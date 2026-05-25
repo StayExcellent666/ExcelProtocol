@@ -103,7 +103,7 @@ def get_ytdl_options(quality: str = "medium") -> dict:
 
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options":        "-vn",
+    "options":        "-vn -af aresample=48000 -ar 48000",
 }
 
 async def resolve_query(query: str, quality: str = "medium") -> Optional[Track]:
@@ -519,6 +519,15 @@ async def setup(discord_bot):
                 f"Current settings — Volume: **{int(player.volume*100)}%** | Quality: **{player.quality}**",
                 ephemeral=True)
             return
+        # Write back to DB so dashboard reflects changes
+        try:
+            discord_bot.db.set_music_settings(
+                interaction.guild_id,
+                volume=int(player.volume * 100),
+                quality=player.quality
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write music settings to DB: {e}")
         await interaction.response.send_message(f"✅ Updated: {', '.join(changes)}", ephemeral=True)
         await _refresh_embed(player)
 
