@@ -104,13 +104,13 @@ def get_ytdl_options(quality: str = "medium") -> dict:
 
 FFMPEG_OPTIONS_FILE = {
     "before_options": "",
-    "options":        "-vn -hide_banner -loglevel error",
+    "options":        "-vn -af aresample=48000 -ar 48000 -hide_banner -loglevel error",
 }
 FFMPEG_OPTIONS_STREAM = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options":        "-vn -hide_banner -loglevel error",
+    "options":        "-vn -af aresample=48000 -ar 48000 -hide_banner -loglevel error",
 }
-FFMPEG_OPTIONS = FFMPEG_OPTIONS_FILE  # default
+FFMPEG_OPTIONS = FFMPEG_OPTIONS_FILE
 
 async def resolve_query(query: str, quality: str = "medium") -> Optional[Track]:
     import yt_dlp
