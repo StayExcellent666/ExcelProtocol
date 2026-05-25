@@ -79,12 +79,12 @@ def get_all_players() -> dict[int, GuildPlayer]:
 YTDL_OPTIONS = {
     "format":             "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist":         True,
-    "quiet":              False,
-    "verbose":            True,
-    "no_warnings":        False,
+    "quiet":              True,
+    "no_warnings":        True,
     "default_search":     "ytsearch",
     "source_address":     "0.0.0.0",
     "nocheckcertificate": True,
+    "extractor_args":     {"youtube": {"player_client": ["web"]}},
     **({"cookiefile": COOKIE_FILE} if _cookies_content else {}),
 }
 
