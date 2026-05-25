@@ -157,30 +157,75 @@ async def resolve_query(query: str, quality: str = "medium") -> Optional[Track]:
     )
 
 async def resolve_spotify_playlist(url: str) -> list[str]:
+    """Scrape Spotify playlist page to get track names without requiring OAuth."""
     try:
-        import spotipy
-        from spotipy.oauth2 import SpotifyClientCredentials
-        if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-            logger.warning("Spotify credentials not set")
-            return []
-        sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-            client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET))
-        # Extract playlist ID from URL
+        import aiohttp, json, re
         playlist_id = url.split("/playlist/")[1].split("?")[0]
-        results = sp.playlist_tracks(playlist_id)
+        # Use Spotify's open.spotify.com page which embeds track data as JSON
+        embed_url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(embed_url, headers=headers) as resp:
+                if resp.status != 200:
+                    raise Exception(f"Spotify embed returned {resp.status}")
+                html = await resp.text()
+
+        # Extract JSON data embedded in the page
+        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.DOTALL)
+        if not match:
+            raise Exception("Could not find embedded JSON in Spotify page")
+
+        data = json.loads(match.group(1))
+        # Navigate the JSON structure to find tracks
         tracks = []
-        while results:
-            for item in results["items"]:
-                t = item.get("track")
-                if t and t.get("name"):
-                    artists = ", ".join(a["name"] for a in t.get("artists", []))
-                    tracks.append(f"{artists} - {t['name']}")
-            results = sp.next(results) if results.get("next") else None
-        logger.info(f"Resolved Spotify playlist: {len(tracks)} tracks")
+        try:
+            items = data["props"]["pageProps"]["state"]["data"]["entity"]["trackList"]
+            for item in items:
+                title   = item.get("title", "")
+                artists = ", ".join(a.get("name","") for a in item.get("subtitle", []) if isinstance(a, dict) and a.get("name"))
+                if not artists:
+                    artists = item.get("subtitle", "") if isinstance(item.get("subtitle"), str) else ""
+                if title:
+                    tracks.append(f"{artists} - {title}" if artists else title)
+        except (KeyError, TypeError):
+            # Try alternate structure
+            items = data["props"]["pageProps"]["state"]["data"]["entity"]["items"]
+            for item in items:
+                t = item.get("track", {})
+                title   = t.get("name", "")
+                artists = ", ".join(a.get("name","") for a in t.get("artists", {}).get("items", []))
+                if title:
+                    tracks.append(f"{artists} - {title}" if artists else title)
+
+        logger.info(f"Scraped Spotify playlist: {len(tracks)} tracks")
         return tracks
     except Exception as e:
-        logger.warning(f"Spotify playlist resolve failed: {e}")
-        return []
+        logger.warning(f"Spotify playlist scrape failed: {e}")
+        # Fall back to API attempt
+        try:
+            import spotipy
+            from spotipy.oauth2 import SpotifyClientCredentials
+            if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+                return []
+            sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+                client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET))
+            playlist_id = url.split("/playlist/")[1].split("?")[0]
+            results = sp.playlist_tracks(playlist_id)
+            tracks = []
+            while results:
+                for item in results["items"]:
+                    t = item.get("track")
+                    if t and t.get("name"):
+                        artists = ", ".join(a["name"] for a in t.get("artists", []))
+                        tracks.append(f"{artists} - {t['name']}")
+                results = sp.next(results) if results.get("next") else None
+            return tracks
+        except Exception as e2:
+            logger.warning(f"Spotify API fallback also failed: {e2}")
+            return []
 
 async def _spotify_track_to_search(url: str) -> Optional[str]:
     try:
