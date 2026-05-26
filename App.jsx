@@ -319,32 +319,44 @@ function SidebarParticles() {
   );
 }
 
-function NavItem({ icon, label, active, onClick, count }) {
+function NavIcon({ icon, size=16 }) {
+  if (typeof icon === "string" && icon.endsWith(".png"))
+    return <img src={icon} alt="" style={{ width:size, height:size, flexShrink:0, objectFit:"contain" }} />;
+  return <span style={{ fontSize:size-1, flexShrink:0 }}>{icon}</span>;
+}
+
+function NavItem({ icon, label, active, onClick, count, large }) {
+  const pad = large ? "11px 14px" : "8px 12px";
+  const fs = large ? 15 : 13.5;
   return (
-    <button onClick={onClick} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:6, border:"none", background:active?"var(--cyan-dim)":"transparent", color:active?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13.5, fontWeight:active?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:active?"2px solid var(--cyan)":"2px solid transparent", position:"relative", zIndex:1, boxShadow:active?"inset 0 0 12px rgba(0,245,212,0.07)":"none", textShadow:active?"0 0 10px rgba(0,245,212,0.5)":"none" }}>
-      <span style={{ fontSize:15, flexShrink:0 }}>{icon}</span>
+    <button onClick={onClick} style={{ display:"flex", alignItems:"center", gap:10, padding:pad, borderRadius:6, border:"none", background:active?"var(--cyan-dim)":"transparent", color:active?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:fs, fontWeight:active?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:active?"2px solid var(--cyan)":"2px solid transparent", position:"relative", zIndex:1, boxShadow:active?"inset 0 0 12px rgba(0,245,212,0.07)":"none", textShadow:active?"0 0 10px rgba(0,245,212,0.5)":"none" }}>
+      <NavIcon icon={icon} size={large ? 22 : 20} />
       <span style={{ flex:1 }}>{label}</span>
       {count!=null && <span style={{ fontSize:10, background:"var(--bg3)", color:"var(--text3)", padding:"1px 6px", borderRadius:10, fontFamily:"'JetBrains Mono',monospace" }}>{count}</span>}
     </button>
   );
 }
 
-function NavGroup({ icon, label, activeTab, tabs, onSelect }) {
+function NavGroup({ icon, label, activeTab, tabs, onSelect, large }) {
   const isActive = tabs.some(t => t.id === activeTab);
   const [open, setOpen] = useState(isActive);
+  const pad = large ? "11px 14px" : "8px 12px";
+  const fs = large ? 15 : 13.5;
+  const subPad = large ? "10px 14px" : "7px 12px";
+  const subFs = large ? 14 : 13;
   useEffect(() => { if (isActive) setOpen(true); }, [isActive]);
   return (
     <div style={{ position:"relative", zIndex:1 }}>
-      <button onClick={() => setOpen(o => !o)} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:6, border:"none", background:isActive?"var(--cyan-dim)":"transparent", color:isActive?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13.5, fontWeight:isActive?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:isActive?"2px solid var(--cyan)":"2px solid transparent" }}>
-        <span style={{ fontSize:15, flexShrink:0 }}>{icon}</span>
+      <button onClick={() => setOpen(o => !o)} style={{ display:"flex", alignItems:"center", gap:10, padding:pad, borderRadius:6, border:"none", background:isActive?"var(--cyan-dim)":"transparent", color:isActive?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:fs, fontWeight:isActive?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:isActive?"2px solid var(--cyan)":"2px solid transparent" }}>
+        <NavIcon icon={icon} size={large ? 22 : 20} />
         <span style={{ flex:1 }}>{label}</span>
         <span style={{ fontSize:11, color:"var(--cyan2)", display:"inline-block", transition:"transform 0.2s", transform:open?"rotate(180deg)":"rotate(0deg)", textShadow:"0 0 6px rgba(0,196,170,0.5)" }}>▼</span>
       </button>
       {open && (
         <div style={{ marginLeft:8, borderLeft:"1px solid var(--border)", paddingLeft:4, animation:"navExpand 0.15s ease" }}>
           {tabs.map(t => (
-            <button key={t.id} onClick={() => onSelect(t.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 12px", borderRadius:6, border:"none", background:activeTab===t.id?"var(--cyan-dim)":"transparent", color:activeTab===t.id?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:13, fontWeight:activeTab===t.id?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:activeTab===t.id?"2px solid var(--cyan)":"2px solid transparent" }}>
-              <span style={{ fontSize:14, flexShrink:0 }}>{t.icon}</span>
+            <button key={t.id} onClick={() => onSelect(t.id)} style={{ display:"flex", alignItems:"center", gap:10, padding:subPad, borderRadius:6, border:"none", background:activeTab===t.id?"var(--cyan-dim)":"transparent", color:activeTab===t.id?"var(--cyan)":"var(--text2)", cursor:"pointer", width:"100%", textAlign:"left", fontSize:subFs, fontWeight:activeTab===t.id?600:400, fontFamily:"'Outfit',sans-serif", borderLeft:activeTab===t.id?"2px solid var(--cyan)":"2px solid transparent" }}>
+              <NavIcon icon={t.icon} size={large ? 20 : 18} />
               <span>{t.label}</span>
             </button>
           ))}
@@ -1503,6 +1515,16 @@ function WelcomeSettings({ guildId, channels }) {
     return (
       <div style={{ ...C.card, marginTop:16, padding:16 }}>
         <div style={{ fontSize:13, color:"var(--text3)" }}>Loading welcome settings…</div>
+      </div>
+    );
+  }
+
+  if (!cfg) {
+    return (
+      <div style={{ ...C.card, marginTop:16, padding:16 }}>
+        <div style={{ fontSize:13, color:"var(--red)", fontFamily:"'JetBrains Mono',monospace" }}>
+          {error || "Failed to load welcome settings."}
+        </div>
       </div>
     );
   }
@@ -4239,6 +4261,253 @@ function DbToolsTab() {
   );
 }
 
+// ── Music Tab ─────────────────────────────────────────────────────────────────
+function MusicTab({ guildId, isDev, isAdmin }) {
+  const canManage = isDev || isAdmin;
+  const [settings, setSettings] = useState(null);
+  const [saving,   setSaving]   = useState(false);
+  const [stats,    setStats]    = useState(null);
+  const [queue,    setQueue]    = useState([]);
+  const [statsErr, setStatsErr] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const s = await apiFetch(`/api/guild/${guildId}/music/settings`);
+      setSettings(s);
+    } catch(e) { console.error(e); }
+  }, [guildId]);
+
+  const loadStats = useCallback(async () => {
+    if (!isDev) return;
+    try {
+      const s = await apiFetch("/api/dev/music-stats");
+      setStats(s);
+      setStatsErr(false);
+      const gPlayer = s.guilds?.find(g => String(g.guild_id) === String(guildId));
+      setQueue(gPlayer ? [] : []);
+    } catch(e) { setStatsErr(true); }
+  }, [isDev, guildId]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!isDev) return;
+    loadStats();
+    const t = setInterval(loadStats, 5000);
+    return () => clearInterval(t);
+  }, [loadStats, isDev]);
+
+  const toggle = async () => {
+    if (!canManage || !settings) return;
+    setSaving(true);
+    try {
+      const res = await apiFetch(`/api/guild/${guildId}/music/toggle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !settings.music_enabled }),
+      });
+      setSettings(s => ({ ...s, music_enabled: res.music_enabled }));
+    } finally { setSaving(false); }
+  };
+
+  const saveSettings = async () => {
+    if (!canManage || !settings) return;
+    setSaving(true);
+    try {
+      await apiFetch(`/api/guild/${guildId}/music/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ default_volume: settings.default_volume, quality: settings.quality }),
+      });
+    } finally { setSaving(false); }
+  };
+
+  const gPlayer = stats?.guilds?.find(g => String(g.guild_id) === String(guildId));
+
+  if (!settings) return <Spinner />;
+
+  return (
+    <div>
+      <div style={{ marginBottom:20 }}>
+        <h2 style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:22, color:"var(--text)", margin:0, textShadow:"0 0 20px rgba(0,245,212,0.4)" }}>Music</h2>
+        <div style={{ fontSize:12, color:"var(--text3)", marginTop:4 }}>Discord voice channel music player powered by YouTube & Spotify.</div>
+      </div>
+
+      {/* Enable/Disable */}
+      <div style={{ ...C.card, marginBottom:16 }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12 }}>
+          <div>
+            <div style={{ fontSize:14, fontWeight:600, color:"var(--text)", marginBottom:4 }}>Music Player</div>
+            <div style={{ fontSize:12, color:"var(--text3)" }}>
+              {settings.music_enabled ? "Enabled — members can use /mjoin" : "Disabled — /mjoin will be rejected"}
+            </div>
+          </div>
+          {canManage ? (
+            <button
+              onClick={toggle}
+              disabled={saving}
+              style={{ ...settings.music_enabled ? C.btnDanger : C.btnPrimary, minWidth:110, opacity:saving?0.6:1 }}
+            >
+              {saving ? "Saving…" : settings.music_enabled ? "Disable" : "Enable"}
+            </button>
+          ) : (
+            <div style={{ fontSize:12, color: settings.music_enabled ? "var(--cyan)" : "var(--text3)", padding:"6px 12px", borderRadius:6, border:"1px solid var(--border)" }}>
+              {settings.music_enabled ? "✓ Enabled" : "✗ Disabled"}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Settings — admin/dev only */}
+      {canManage && (
+        <div style={{ ...C.card, marginBottom:16 }}>
+          <div style={{ fontSize:13, fontWeight:600, color:"var(--cyan)", textTransform:"uppercase", letterSpacing:1, marginBottom:14 }}>Settings</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <div>
+              <div style={{ fontSize:11, color:"var(--text2)", textTransform:"uppercase", letterSpacing:1, marginBottom:6 }}>Default Volume: {settings.default_volume}%</div>
+              <input
+                type="range" min={10} max={100} step={5}
+                value={settings.default_volume}
+                onChange={e => setSettings(s => ({ ...s, default_volume: parseInt(e.target.value) }))}
+                style={{ width:"100%", accentColor:"var(--cyan)" }}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize:11, color:"var(--text2)", textTransform:"uppercase", letterSpacing:1, marginBottom:6 }}>Audio Quality</div>
+              <select
+                value={settings.quality}
+                onChange={e => setSettings(s => ({ ...s, quality: e.target.value }))}
+                style={{ ...C.select, width:"100%", maxWidth:200 }}
+              >
+                <option value="low">Low (64kbps — less CPU)</option>
+                <option value="medium">Medium (128kbps)</option>
+                <option value="high">High (192kbps — more CPU)</option>
+              </select>
+            </div>
+            <button onClick={saveSettings} disabled={saving} style={{ ...C.btnPrimary, alignSelf:"flex-start", opacity:saving?0.6:1 }}>
+              {saving ? "Saving…" : "Save Settings"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Now Playing / Queue — live */}
+      {settings.music_enabled && (
+        <div style={{ ...C.card, marginBottom:16 }}>
+          <div style={{ fontSize:13, fontWeight:600, color:"var(--cyan)", textTransform:"uppercase", letterSpacing:1, marginBottom:14 }}>Now Playing</div>
+          {gPlayer?.playing ? (
+            <div>
+              <div style={{ fontSize:14, fontWeight:600, color:"var(--text)", marginBottom:4 }}>🎵 {gPlayer.current}</div>
+              <div style={{ fontSize:12, color:"var(--text3)" }}>
+                Channel: {gPlayer.channel} · Volume: {Math.round(gPlayer.volume * 100)}% · Queue: {gPlayer.queue_len} track(s)
+              </div>
+            </div>
+          ) : gPlayer?.paused ? (
+            <div style={{ fontSize:13, color:"var(--text2)" }}>⏸ Paused — {gPlayer.current}</div>
+          ) : (
+            <div style={{ fontSize:13, color:"var(--text3)" }}>Nothing playing right now.</div>
+          )}
+        </div>
+      )}
+
+      {/* Dev CPU stats */}
+      {isDev && (
+        <div style={{ ...C.card }}>
+          <div style={{ fontSize:13, fontWeight:600, color:"#f5c842", textTransform:"uppercase", letterSpacing:1, marginBottom:14 }}>
+            ⚡ System Stats <span style={{ fontSize:10, color:"var(--text3)", fontWeight:400 }}>(refreshes every 5s)</span>
+          </div>
+          {statsErr ? (
+            <div style={{ fontSize:12, color:"var(--red)" }}>Could not fetch stats.</div>
+          ) : !stats ? (
+            <div style={{ fontSize:12, color:"var(--text3)" }}>Loading…</div>
+          ) : (
+            <div style={{ display:"flex", gap:24, flexWrap:"wrap" }}>
+              <div>
+                <div style={{ fontSize:11, color:"var(--text3)", marginBottom:4 }}>CPU</div>
+                <div style={{ fontSize:22, fontWeight:700, fontFamily:"'JetBrains Mono',monospace", color: stats.cpu_percent > 80 ? "var(--red)" : stats.cpu_percent > 50 ? "#f5b432" : "var(--cyan)" }}>
+                  {stats.cpu_percent?.toFixed(1)}%
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize:11, color:"var(--text3)", marginBottom:4 }}>Memory</div>
+                <div style={{ fontSize:22, fontWeight:700, fontFamily:"'JetBrains Mono',monospace", color:"var(--cyan)" }}>
+                  {stats.memory_mb} MB
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize:11, color:"var(--text3)", marginBottom:4 }}>Active Players</div>
+                <div style={{ fontSize:22, fontWeight:700, fontFamily:"'JetBrains Mono',monospace", color:"var(--cyan)" }}>
+                  {(stats.guilds || []).filter(g => g.playing || g.paused).length}
+                </div>
+              </div>
+            </div>
+          )}
+          {stats.guilds?.length > 0 && (
+            <div style={{ marginTop:14, display:"flex", flexDirection:"column", gap:6 }}>
+              {stats.guilds.map(g => (
+                <div key={g.guild_id} style={{ ...C.card, padding:"8px 12px", display:"flex", alignItems:"center", gap:12, background:"var(--bg2)" }}>
+                  <div style={{ fontSize:11, color: g.playing ? "var(--cyan)" : g.paused ? "#f5b432" : "var(--text3)", fontFamily:"'JetBrains Mono',monospace", minWidth:60 }}>
+                    {g.playing ? "▶ LIVE" : g.paused ? "⏸ PAUSE" : "⏹ IDLE"}
+                  </div>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:12, color:"var(--text)", fontWeight:500 }}>{g.guild_name}</div>
+                    {g.current && <div style={{ fontSize:11, color:"var(--text3)" }}>{g.current} · {g.channel}</div>}
+                  </div>
+                  <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>Q:{g.queue_len}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Admin Audit Log Tab ───────────────────────────────────────────────────────
+function AdminAuditLogTab() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    apiFetch("/api/admin/audit-log")
+      .then(setEntries)
+      .catch(e => console.error(e))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div>
+      <div style={{ marginBottom:16 }}>
+        <h2 style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:22, color:"var(--text)", margin:0, textShadow:"0 0 20px rgba(0,245,212,0.4)" }}>Admin Audit Log</h2>
+        <div style={{ fontSize:12, color:"var(--text3)", marginTop:4 }}>Last 100 admin actions on servers they don't own. Owner-only.</div>
+      </div>
+      {loading ? <Spinner /> : entries.length === 0 ? (
+        <div style={{ color:"var(--text3)", fontSize:13, padding:"40px 0", textAlign:"center" }}>No admin actions recorded yet.</div>
+      ) : (
+        <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+          {entries.map(e => (
+            <div key={e.id} style={{ ...C.card, padding:"10px 14px", display:"flex", alignItems:"flex-start", gap:12 }}>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4, flexWrap:"wrap" }}>
+                  <span style={{ fontSize:11, fontFamily:"'JetBrains Mono',monospace", color:"var(--cyan)", fontWeight:600 }}>{e.admin_username}</span>
+                  <span style={{ fontSize:10, padding:"1px 6px", borderRadius:4, fontFamily:"'JetBrains Mono',monospace", fontWeight:700,
+                    background: e.method==="DELETE" ? "rgba(255,77,109,0.15)" : e.method==="POST" ? "rgba(0,245,212,0.1)" : "rgba(245,180,50,0.1)",
+                    color: e.method==="DELETE" ? "var(--red)" : e.method==="POST" ? "var(--cyan)" : "#f5b432"
+                  }}>{e.method}</span>
+                  <span style={{ fontSize:11, color:"var(--text2)", fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-all" }}>{e.endpoint}</span>
+                </div>
+                <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                  Guild: {e.guild_id} · {new Date(e.timestamp).toLocaleString()}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [user, setUser] = useState(null);
@@ -4250,7 +4519,7 @@ export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [navDrawerOpen, setNavDrawerOpen] = useState(false);
   const isMobile = useIsMobile();
-  const [devViewActive, setDevViewActive] = useState(true); // dev can toggle off to see user view
+  const [viewMode, setViewMode] = useState("dev"); // "dev" | "admin" | "user"
 
   useEffect(()=>{
     // Switch to rewards tab if returning from Twitch OAuth
@@ -4261,6 +4530,7 @@ export default function App() {
     }
     // Cookie is sent automatically — just try /api/me to check if logged in
     apiFetch("/api/me").then(data=>{
+      if (!data || !data.guilds) return;
       setUser(data); const g = data.guilds||[]; setGuilds(g);
       if (g.length) { const saved = localStorage.getItem("ep_last_guild"); const match = g.find(x=>x.id===saved); setActiveGuild(match?match.id:g[0].id); }
       setLoggedIn(true);
@@ -4278,35 +4548,41 @@ export default function App() {
 
   const guild = guilds.find(g=>g.id===activeGuild)||guilds[0]||{ id:"", name:"..." };
   const notificationsTabs = [
-    { id:"streamers",      icon:"📺", label:"Streams"           },
-    { id:"notiflog",       icon:"📋", label:"Notification Log"  },
+    { id:"streamers",      icon:"/app/icons/streams.png", label:"Streams"           },
+    { id:"notiflog",       icon:"/app/icons/log.png", label:"Notification Log"  },
   ];
   const twitchTabs = [
-    { id:"twitch",         icon:"💬", label:"Chat Commands"     },
-    { id:"rewards",        icon:"🎁", label:"Channel Rewards"   },
+    { id:"twitch",         icon:"/app/icons/message.png", label:"Chat Commands"     },
+    { id:"rewards",        icon:"/app/icons/rewards.png", label:"Channel Rewards"   },
   ];
   const communityTabs = [
-    { id:"roles",          icon:"🎭", label:"Reaction Roles"    },
-    { id:"birthdays",      icon:"🎂", label:"Birthdays"         },
-    { id:"welcomegoodbye", icon:"👋", label:"Welcome & Goodbye" },
-    { id:"voicerooms",     icon:"🔊", label:"Voice Rooms"       },
+    { id:"roles",          icon:"/app/icons/reactionroles.png", label:"Reaction Roles"    },
+    { id:"birthdays",      icon:"/app/icons/birthday.png",      label:"Birthdays"         },
+    { id:"welcomegoodbye", icon:"/app/icons/welcome.png",       label:"Welcome & Goodbye" },
+    { id:"voicerooms",     icon:"/app/icons/vc.png",            label:"Voice Rooms"       },
+    { id:"music",          icon:"/app/icons/vc.png",            label:"Music"             },
   ];
   const moderationTabs = [
-    { id:"safety",         icon:"🛡️", label:"Safety"            },
-    { id:"cleanuprules",   icon:"🧹", label:"Cleanup Rules"     },
+    { id:"safety",         icon:"/app/icons/shield.png", label:"Safety"            },
+    { id:"cleanuprules",   icon:"/app/icons/cleanup.png", label:"Cleanup Rules"     },
   ];
   const serverConfigTabs = [
-    { id:"settings",       icon:"⚙️", label:"General Settings"  },
-    { id:"statstab",       icon:"📊", label:"Stats Channel"     },
+    { id:"settings",       icon:"/app/icons/gear.png", label:"General Settings"  },
+    { id:"statstab",       icon:"/app/icons/stats.png", label:"Stats Channel"     },
   ];
   const setupWizardTabs = [
-    { id:"setupwizard",    icon:"🪄", label:"Set Up Server"     },
+    { id:"setupwizard",    icon:"/app/icons/wizard.png", label:"Set Up Server"     },
   ];
   const isActuallyDev = user?.is_dev === true;
-  const effectivelyDev = isActuallyDev && devViewActive;
+  const isAdmin = user?.is_admin === true;
+  const effectivelyDev   = isActuallyDev && viewMode === "dev";
+  const effectivelyAdmin = isActuallyDev && viewMode === "admin";
   const devTabs = effectivelyDev ? [
-    { id:"globalstats",    icon:"🌐", label:"Global Stats"      },
-    { id:"dbtools",        icon:"🛠️", label:"DB Tools"          },
+    { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
+    { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
+    { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
+  ] : (effectivelyAdmin || isAdmin) ? [
+    { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
   ] : [];
   const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
 
@@ -4318,10 +4594,10 @@ export default function App() {
       <div style={{ position:"relative", zIndex:1, display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
 
       {/* Top Bar */}
-      <div style={{ height:52, background:"linear-gradient(180deg, rgba(14,20,28,0.99) 0%, rgba(10,15,22,0.99) 100%)", borderBottom:"1px solid rgba(0,245,212,0.15)", display:"flex", alignItems:"center", padding:"0 18px", gap:12, flexShrink:0, boxShadow:"0 1px 12px rgba(0,245,212,0.07), 0 2px 8px rgba(0,0,0,0.4)" }}>
+      <div style={{ height:52, background:"linear-gradient(180deg, rgba(14,20,28,0.99) 0%, rgba(10,15,22,0.99) 100%)", borderBottom:"1px solid rgba(0,245,212,0.15)", display:"flex", alignItems:"center", padding:"0 18px 0 10px", gap:12, flexShrink:0, boxShadow:"0 1px 12px rgba(0,245,212,0.07), 0 2px 8px rgba(0,0,0,0.4)" }}>
         {/* Logo */}
         <div style={{ display:"flex", alignItems:"center", gap:10, marginRight:8 }}>
-          <img src="/app/protocol.png" alt="ExcelProtocol" style={{ width:40, height:40, display:"block", flexShrink:0 }} />
+          <img src="/app/protocol.png" alt="ExcelProtocol" style={{ width:55, height:55, display:"block", flexShrink:0 }} />
           <div>
             <div style={{ fontWeight:800, fontSize:13, letterSpacing:0.5, color:"var(--text)", textShadow:"0 0 12px rgba(0,245,212,0.35)" }}>ExcelProtocol</div>
             <div style={{ fontSize:9, color:"var(--cyan2)", letterSpacing:1.5, fontFamily:"'JetBrains Mono',monospace", lineHeight:1, textShadow:"0 0 8px rgba(0,196,170,0.6)" }}>DASHBOARD</div>
@@ -4340,7 +4616,8 @@ export default function App() {
           </button>
           {dropdownOpen && guilds.length>1 && (
             <div style={{ position:"absolute", top:"calc(100% + 6px)", left:0, background:"linear-gradient(135deg, rgba(16,23,33,0.99) 0%, rgba(11,16,24,0.99) 100%)", border:"1px solid rgba(0,245,212,0.22)", borderRadius:10, padding:6, minWidth:220, zIndex:100, boxShadow:"0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,245,212,0.04), inset 0 1px 0 rgba(0,245,212,0.09)", maxHeight:"calc(100vh - 80px)", overflowY:"auto" }}>
-              {guilds.map(g=>(
+              {/* Own servers — always shown */}
+              {(effectivelyAdmin || isAdmin ? guilds.filter(g => !g.admin_access) : guilds).map(g=>(
                 <button key={g.id} onClick={()=>switchGuild(g.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:"8px 10px", borderRadius:7, border:"none", background:activeGuild===g.id?"var(--cyan-dim)":"transparent", color:activeGuild===g.id?"var(--cyan)":"var(--text)", cursor:"pointer", fontSize:13, fontFamily:"'Outfit',sans-serif", textAlign:"left" }}>
                   <GuildAvatar guild={g} size={24} />
                   <div style={{ flex:1 }}>
@@ -4350,6 +4627,21 @@ export default function App() {
                   {activeGuild===g.id&&<span style={{ color:"var(--cyan)", fontSize:12 }}>✓</span>}
                 </button>
               ))}
+              {/* Admin access section */}
+              {guilds.some(g => g.admin_access) && (effectivelyAdmin || isAdmin) && <>
+                <div style={{ fontSize:9, color:"rgba(245,180,50,0.8)", textTransform:"uppercase", letterSpacing:1.5, padding:"8px 10px 4px", fontFamily:"'JetBrains Mono',monospace", borderTop:"1px solid var(--border)", marginTop:4 }}>Admin Access</div>
+                {guilds.filter(g => g.admin_access).map(g=>(
+                  <button key={g.id} onClick={()=>switchGuild(g.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:"8px 10px", borderRadius:7, border:"none", background:activeGuild===g.id?"rgba(245,180,50,0.1)":"transparent", color:activeGuild===g.id?"#f5b432":"var(--text2)", cursor:"pointer", fontSize:13, fontFamily:"'Outfit',sans-serif", textAlign:"left" }}>
+                    <GuildAvatar guild={g} size={24} />
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:13, fontWeight:500, fontFamily:"'Outfit',sans-serif" }}>{g.name}</div>
+                      {g.approximate_member_count&&<div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>{g.approximate_member_count.toLocaleString()} members</div>}
+                    </div>
+                    <span style={{ fontSize:12 }}>🔑</span>
+                    {activeGuild===g.id&&<span style={{ color:"#f5b432", fontSize:12 }}>✓</span>}
+                  </button>
+                ))}
+              </>}
             </div>
           )}
         </div>
@@ -4358,12 +4650,17 @@ export default function App() {
         <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:10 }}>
           {isActuallyDev && !isMobile && (
             <button
-              onClick={() => { setDevViewActive(v => !v); setActiveTab("settings"); }}
-              title={devViewActive ? "Switch to user view" : "Switch to dev view"}
-              style={{ padding:"4px 10px", borderRadius:7, border:`1px solid ${devViewActive ? "rgba(245,200,66,0.4)" : "var(--border)"}`, background: devViewActive ? "rgba(245,200,66,0.1)" : "transparent", color: devViewActive ? "#f5c842" : "var(--text3)", fontSize:11, cursor:"pointer", fontFamily:"'JetBrains Mono',monospace", fontWeight:600, letterSpacing:0.5 }}
+              onClick={() => { setViewMode(m => m==="dev"?"admin":m==="admin"?"user":"dev"); setActiveTab("settings"); }}
+              title="Cycle view: DEV → ADMIN → USER"
+              style={{ padding:"4px 10px", borderRadius:7, border:`1px solid ${viewMode==="dev" ? "rgba(245,200,66,0.4)" : viewMode==="admin" ? "rgba(245,180,50,0.4)" : "var(--border)"}`, background: viewMode==="dev" ? "rgba(245,200,66,0.1)" : viewMode==="admin" ? "rgba(245,180,50,0.1)" : "transparent", color: viewMode==="dev" ? "#f5c842" : viewMode==="admin" ? "#f5b432" : "var(--text3)", fontSize:11, cursor:"pointer", fontFamily:"'JetBrains Mono',monospace", fontWeight:600, letterSpacing:0.5 }}
             >
-              {devViewActive ? "DEV VIEW" : "USER VIEW"}
+              {viewMode==="dev" ? "DEV VIEW" : viewMode==="admin" ? "ADMIN VIEW" : "USER VIEW"}
             </button>
+          )}
+          {isAdmin && !isMobile && (
+            <div style={{ padding:"4px 10px", borderRadius:7, border:"1px solid rgba(245,180,50,0.4)", background:"rgba(245,180,50,0.1)", color:"#f5b432", fontSize:11, fontFamily:"'JetBrains Mono',monospace", fontWeight:600, letterSpacing:0.5 }}>
+              ADMIN
+            </div>
           )}
           {!isMobile && <div style={{ display:"flex", alignItems:"center", gap:6, padding:"3px 10px 3px 6px", borderRadius:20, border:"1px solid var(--border)", background:"var(--bg2)" }}>
             <div style={{ width:6, height:6, borderRadius:"50%", background:"var(--green)", animation:"pulse 2s ease infinite", boxShadow:"0 0 6px rgba(57,217,138,0.8), 0 0 12px rgba(57,217,138,0.4)" }} />
@@ -4395,17 +4692,17 @@ export default function App() {
             </div>
           )}
           <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-          <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
-<NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={setActiveTab} />
-          <NavGroup icon="🟣" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
-          <NavGroup icon="👥" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={setActiveTab} />
-          <NavGroup icon="🛡️" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={setActiveTab} />
+          <NavGroup icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
+<NavGroup icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={setActiveTab} />
+          <NavGroup icon="/app/icons/twitch.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
+          <NavGroup icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={setActiveTab} />
+          <NavGroup icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={setActiveTab} />
           
-          <NavGroup icon="🪄" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={setActiveTab} />
-          <NavItem key="suggestions" icon="💡" label="Contact" active={activeTab==="suggestions"} onClick={()=>setActiveTab("suggestions")} count={null} />
+          <NavGroup icon="/app/icons/wizard.png" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={setActiveTab} />
+          <NavItem key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={()=>setActiveTab("suggestions")} count={null} />
           {devTabs.length > 0 && (
             <>
-              <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>Dev Only</div>
+              <div style={{ position:"relative", zIndex:1, fontSize:9, color: effectivelyAdmin ? "#f5b432" : "var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>{effectivelyAdmin ? "Admin Only" : "Dev Only"}</div>
               {devTabs.map(t=><NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={()=>setActiveTab(t.id)} count={null} />)}
             </>
           )}
@@ -4429,14 +4726,16 @@ export default function App() {
               {activeTab==="birthdays"     && <BirthdaysTab        guildId={activeGuild} />}
               {activeTab==="welcomegoodbye"&& <WelcomeGoodbyeTab   guildId={activeGuild} />}
               {activeTab==="voicerooms"    && <VoiceRoomsTab       guildId={activeGuild} />}
+              {activeTab==="music"         && <MusicTab            guildId={activeGuild} isDev={effectivelyDev} isAdmin={isAdmin||effectivelyAdmin} />}
               {activeTab==="cleanuprules"  && <CleanupRulesTab     guildId={activeGuild} />}
               {activeTab==="twitch"        && <TwitchTab           guildId={activeGuild} isDev={effectivelyDev} />}
               {activeTab==="rewards"       && <ChannelRewardsTab   guildId={activeGuild} />}
               {activeTab==="notiflog"      && <NotifLogTab         guildId={activeGuild} />}
               {activeTab==="safety"        && <SafetyTab           guildId={activeGuild} />}
               {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
-              {activeTab==="globalstats"   && effectivelyDev && <GlobalStatsTab />}
+              {activeTab==="globalstats"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <GlobalStatsTab />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
+              {activeTab==="auditlog"      && effectivelyDev && <AdminAuditLogTab />}
             </>
           )}
         </div>
@@ -4447,7 +4746,7 @@ export default function App() {
       {/* Mobile nav drawer */}
       {navDrawerOpen && (
         <div className="mob-nav-drawer" onClick={() => setNavDrawerOpen(false)}>
-          <div onClick={e => e.stopPropagation()} style={{ width:260, height:"100%", background:"linear-gradient(180deg, rgba(12,18,26,0.99) 0%, rgba(9,14,21,0.99) 100%)", borderRight:"1px solid rgba(0,245,212,0.15)", padding:"16px 10px", display:"flex", flexDirection:"column", gap:2, overflowY:"auto" }}>
+          <div onClick={e => e.stopPropagation()} style={{ width:280, height:"100%", background:"linear-gradient(180deg, rgba(12,18,26,0.99) 0%, rgba(9,14,21,0.99) 100%)", borderRight:"1px solid rgba(0,245,212,0.15)", padding:"16px 10px", display:"flex", flexDirection:"column", gap:2, overflowY:"auto" }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14, paddingBottom:12, borderBottom:"1px solid var(--border)" }}>
               <div style={{ display:"flex", alignItems:"center", gap:10 }}>
                 <UserAvatar user={user} size={32} />
@@ -4465,14 +4764,19 @@ export default function App() {
               </div>
             )}
             <div style={{ fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-            <NavGroup icon="⚙️" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-<NavGroup icon="📡" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="🟣" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="👥" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup icon="🛡️" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup large icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+<NavGroup large icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup large icon="/app/icons/twitch.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup large icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavGroup large icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             
-            <NavGroup icon="🪄" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavItem key="suggestions" icon="💡" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
+            <NavGroup large icon="/app/icons/wizard.png" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavItem large key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
+            {effectivelyDev && <>
+              <div style={{ fontSize:9, color:"var(--cyan)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Dev Only</div>
+              <NavItem large icon="/app/icons/globe.png" label="Global Stats" active={activeTab==="globalstats"} onClick={() => { setActiveTab("globalstats"); setNavDrawerOpen(false); }} />
+              <NavItem large icon="/app/icons/tools.png" label="DB Tools" active={activeTab==="dbtools"} onClick={() => { setActiveTab("dbtools"); setNavDrawerOpen(false); }} />
+            </>}
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>
             </div>
