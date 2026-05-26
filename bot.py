@@ -307,6 +307,11 @@ class TwitchNotifierBot(discord.Client):
             self.check_streamer_renames.start()
             logger.info("Streamer rename check loop started")
 
+        # Start daily kicked guild cleanup
+        if not self.cleanup_kicked_guilds.is_running():
+            self.cleanup_kicked_guilds.start()
+            logger.info("Kicked guild cleanup loop started")
+
         # Sync EventSub subscriptions on startup (async so it doesn't block ready).
         # The "Bot Started" log message is deferred to fire from
         # _initial_eventsub_sync after reconciliation, so the message can include
@@ -1063,6 +1068,8 @@ class TwitchNotifierBot(discord.Client):
     async def on_guild_join(self, guild):
         """DM the server owner with setup info when the bot is added."""
         logger.info(f"Bot joined guild: {guild.name} (ID: {guild.id})")
+        # Cancel any pending data wipe if this guild was previously kicked
+        self.db.unmark_guild_kicked(guild.id)
         await self.log_to_channel(
             "🟢", "Bot Added to Server",
             f"**{guild.name}** (`{guild.id}`) — {guild.member_count} members",
@@ -1101,10 +1108,15 @@ class TwitchNotifierBot(discord.Client):
             logger.error(f"Error sending welcome DM for {guild.name}: {e}")
 
     async def on_guild_remove(self, guild):
-        """Called when bot is removed from a server - clean up data"""
+        """Called when bot is removed from a server — start 7-day grace period before wiping data."""
         logger.info(f"Bot removed from guild: {guild.name} (ID: {guild.id})")
-        self.db.cleanup_guild(guild.id)
-        logger.info(f"Cleaned up all data for guild {guild.id}")
+        self.db.mark_guild_kicked(guild.id, guild.name)
+        await self.log_to_channel(
+            "🔴", "Bot Removed from Server",
+            f"**{guild.name}** (`{guild.id}`) — data will be wiped in 7 days if not re-invited.",
+            color=0xFF4444
+        )
+        logger.info(f"Guild {guild.id} marked for cleanup in 7 days")
 
     async def on_member_join(self, member: discord.Member):
         """Run safety filter on new joins, then post welcome banner if enabled."""
@@ -1943,6 +1955,35 @@ class TwitchNotifierBot(discord.Client):
 
     @check_streamer_renames.before_loop
     async def before_check_streamer_renames(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def cleanup_kicked_guilds(self):
+        """Daily task — wipe data for guilds kicked more than 7 days ago."""
+        try:
+            expired = self.db.get_expired_kicked_guilds(days=7)
+            for g in expired:
+                guild_id   = g["guild_id"]
+                guild_name = g["guild_name"]
+                # Double-check bot is still not in the guild
+                if self.get_guild(guild_id):
+                    # Bot is back in the guild — cancel the wipe
+                    self.db.unmark_guild_kicked(guild_id)
+                    logger.info(f"Cancelled data wipe for {guild_name} ({guild_id}) — bot is back")
+                    continue
+                self.db.cleanup_guild(guild_id)
+                self.db.unmark_guild_kicked(guild_id)
+                await self.log_to_channel(
+                    "🗑️", "Guild Data Wiped",
+                    f"**{guild_name}** (`{guild_id}`) — kicked >7 days ago, data purged.",
+                    color=0x888888
+                )
+                logger.info(f"Wiped data for kicked guild {guild_name} ({guild_id})")
+        except Exception as e:
+            logger.error(f"Kicked guild cleanup failed: {e}")
+
+    @cleanup_kicked_guilds.before_loop
+    async def before_cleanup_kicked_guilds(self):
         await self.wait_until_ready()
 
     async def alert_permission_issue(self, guild: discord.Guild, channel_id: int, issue: str):

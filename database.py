@@ -747,6 +747,15 @@ class Database:
             )
         ''')
 
+        # Track kicked guilds for 7-day grace period before data wipe
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS kicked_guilds (
+                guild_id   INTEGER PRIMARY KEY,
+                guild_name TEXT,
+                kicked_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         # Music settings per guild
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS guild_music_settings (
@@ -2921,3 +2930,37 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [dict(r) for r in rows]
+
+    def mark_guild_kicked(self, guild_id: int, guild_name: str):
+        """Record that the bot was kicked, starting the 7-day grace period."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO kicked_guilds (guild_id, guild_name, kicked_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                guild_name=excluded.guild_name,
+                kicked_at=CURRENT_TIMESTAMP
+        ''', (guild_id, guild_name))
+        conn.commit()
+        conn.close()
+
+    def unmark_guild_kicked(self, guild_id: int):
+        """Remove guild from kicked list (bot was re-invited)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM kicked_guilds WHERE guild_id = ?', (guild_id,))
+        conn.commit()
+        conn.close()
+
+    def get_expired_kicked_guilds(self, days: int = 7) -> list:
+        """Return guild IDs that were kicked more than `days` days ago."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT guild_id, guild_name FROM kicked_guilds WHERE kicked_at < datetime('now', ?)",
+            (f'-{days} days',)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"guild_id": r[0], "guild_name": r[1]} for r in rows]
