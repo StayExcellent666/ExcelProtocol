@@ -251,7 +251,6 @@ TEMPLATES = {
                 "channels": [
                     ("💬-general", "text"),
                     ("🖼-images-and-vibes", "text"),
-                    ("🎵-music", "text"),
                 ],
             },
             {
@@ -319,7 +318,6 @@ TEMPLATES = {
                     ("pets", "text"),
                     ("gaming", "text"),
                     ("food", "text"),
-                    ("music", "text"),
                     ("art", "text"),
                     ("selfies", "text"),
                 ],

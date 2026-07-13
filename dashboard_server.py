@@ -688,72 +688,6 @@ async def admin_audit_log(request):
     )
     return web.json_response([dict(r) for r in rows])
 
-# ── Music endpoints ────────────────────────────────────────────────────────────
-
-async def get_music_settings(request):
-    guild_id = request.match_info["guild_id"]
-    rows = await db_fetch("SELECT * FROM guild_music_settings WHERE guild_id=?", (guild_id,))
-    if rows:
-        return web.json_response(dict(rows[0]))
-    return web.json_response({"guild_id": guild_id, "music_enabled": 0, "default_volume": 70, "quality": "medium"})
-
-async def toggle_music(request):
-    session  = request["session"]
-    if not (session.get("dev") or session.get("admin")):
-        raise web.HTTPForbidden(reason="Admin or dev only")
-    guild_id = request.match_info["guild_id"]
-    body     = await request.json()
-    enabled  = bool(body.get("enabled", False))
-    await db_execute('''
-        INSERT INTO guild_music_settings (guild_id, music_enabled, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(guild_id) DO UPDATE SET music_enabled=excluded.music_enabled, updated_at=CURRENT_TIMESTAMP
-    ''', (guild_id, int(enabled)))
-    return web.json_response({"ok": True, "music_enabled": int(enabled)})
-
-async def update_music_settings(request):
-    session  = request["session"]
-    if not (session.get("dev") or session.get("admin")):
-        raise web.HTTPForbidden(reason="Admin or dev only")
-    guild_id = request.match_info["guild_id"]
-    body     = await request.json()
-    volume   = int(body.get("default_volume", 70))
-    quality  = body.get("quality", "medium")
-    await db_execute('''
-        INSERT INTO guild_music_settings (guild_id, default_volume, quality, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(guild_id) DO UPDATE SET
-            default_volume=excluded.default_volume,
-            quality=excluded.quality,
-            updated_at=CURRENT_TIMESTAMP
-    ''', (guild_id, volume, quality))
-    return web.json_response({"ok": True})
-
-async def dev_music_stats(request):
-    """Dev-only: return per-guild music player stats for CPU/health monitoring."""
-    session = request["session"]
-    if not session.get("dev"):
-        raise web.HTTPForbidden(reason="Dev only")
-    import psutil
-    import music as music_module
-    stats = {
-        "cpu_percent": psutil.cpu_percent(interval=0.1),
-        "memory_mb":   psutil.Process().memory_info().rss // 1024 // 1024,
-        "guilds":      [],
-    }
-    for gid, player in music_module.get_all_players().items():
-        guild = _bot_ref.get_guild(gid) if _bot_ref else None
-        stats["guilds"].append({
-            "guild_id":   gid,
-            "guild_name": guild.name if guild else str(gid),
-            "playing":    player.is_playing(),
-            "paused":     player.is_paused(),
-            "queue_len":  len(player.queue),
-            "current":    player.current.title if player.current else None,
-            "volume":     player.volume,
-            "channel":    player.voice.channel.name if player.voice else None,
-        })
-    return web.json_response(stats)
 
 # ── Guilds ────────────────────────────────────────────────────────────────────
 async def get_guilds(request):
@@ -3918,10 +3852,6 @@ def create_dashboard_app(bot=None):
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
     app.router.add_get("/api/me",        auth_me)
     app.router.add_get("/api/admin/audit-log", admin_audit_log)
-    app.router.add_get ("/api/guild/{guild_id}/music/settings",  get_music_settings)
-    app.router.add_post("/api/guild/{guild_id}/music/toggle",    toggle_music)
-    app.router.add_post("/api/guild/{guild_id}/music/settings",  update_music_settings)
-    app.router.add_get ("/api/dev/music-stats",                  dev_music_stats)
     app.router.add_get("/api/guilds",    get_guilds)
     app.router.add_get("/api/guild/{guild_id}", get_guild_summary)
 

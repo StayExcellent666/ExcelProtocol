@@ -142,13 +142,6 @@ class TwitchNotifierBot(discord.Client):
         except Exception as e:
             logger.error(f"Birthday cog failed to load: {e} - continuing normally")
 
-        try:
-            import music
-            await music.setup(self)
-            logger.info("Music cog loaded")
-        except Exception as e:
-            logger.error(f"Music cog failed to load: {e} - continuing normally")
-
         await self.tree.sync()
         logger.info("Command tree synced (global)")
         # Also sync to each connected guild for instant propagation
