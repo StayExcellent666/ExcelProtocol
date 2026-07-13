@@ -10,6 +10,7 @@ Enriches data with Discord + Twitch API calls.
 import os
 import asyncio
 import json
+import re
 import secrets
 import aiosqlite
 import aiohttp as http_client
@@ -2897,10 +2898,8 @@ async def delete_stat_channel(request):
 
 # ── Dev: Global Stats ─────────────────────────────────────────────────────────
 async def get_global_stats(request):
-    """Dev-only: global stats across all servers."""
-    session = request["session"]
-    if not session.get("dev"):
-        raise web.HTTPForbidden(reason="Dev access required")
+    """Owner/admin overview and global leaderboards across all servers."""
+    _require_dev_or_admin(request)
 
     servers        = await db_fetch("SELECT COUNT(DISTINCT guild_id) AS c FROM server_settings")
     streamer_rows  = await db_fetch("SELECT COUNT(*) AS c FROM monitored_streamers")
@@ -2943,6 +2942,18 @@ async def get_global_stats(request):
     except Exception:
         pass
 
+    # Use the exact same query path as /globalleaderboard so Discord and the
+    # dashboard cannot disagree about rankings or blacklist behaviour.
+    leaderboards = {"consistency": [], "hours": [], "longest": []}
+    if _bot_ref:
+        try:
+            leaderboards = await asyncio.to_thread(lambda: {
+                sort: _bot_ref.db.get_global_leaderboard(limit=15, sort_by=sort)
+                for sort in ("consistency", "hours", "longest")
+            })
+        except Exception as e:
+            logger.warning(f"Could not load global leaderboards: {e}")
+
     return web.json_response({
         "total_servers":       servers[0]["c"] if servers else 0,
         "total_streamer_rows": streamer_rows[0]["c"] if streamer_rows else 0,
@@ -2954,10 +2965,103 @@ async def get_global_stats(request):
         "eventsub_count":      eventsub_count,
         "top_streamers":       top_streamers,
         "servers_by_count":    enriched_servers,
+        "global_leaderboard_consistency": leaderboards["consistency"],
+        "global_leaderboard_hours":       leaderboards["hours"],
+        "global_leaderboard_longest":     leaderboards["longest"],
     })
 
 
 # ── Dev: DB Tools ─────────────────────────────────────────────────────────────
+def _require_dev_or_admin(request):
+    """Restrict internal maintenance endpoints to configured owners/admins."""
+    session = request["session"]
+    if not (session.get("dev") or session.get("admin")):
+        raise web.HTTPForbidden(reason="Owner or admin access required")
+
+
+def _normalise_twitch_login(raw: str) -> str:
+    name = (raw or "").strip().lower().lstrip("@")
+    if not re.fullmatch(r"[a-z0-9_]{1,25}", name):
+        raise web.HTTPBadRequest(reason="Invalid Twitch streamer name")
+    return name
+
+
+async def get_leaderboard_blacklist(request):
+    _require_dev_or_admin(request)
+    rows = await db_fetch(
+        "SELECT streamer_name, reason, added_at "
+        "FROM leaderboard_blacklist ORDER BY added_at DESC"
+    )
+    return web.json_response({"blacklist": rows})
+
+
+async def add_leaderboard_blacklist(request):
+    _require_dev_or_admin(request)
+    body = await request.json()
+    streamer_name = _normalise_twitch_login(body.get("streamer_name"))
+    reason = body.get("reason")
+    if reason is not None:
+        reason = str(reason).strip() or None
+        if reason and len(reason) > 500:
+            raise web.HTTPBadRequest(reason="Reason must be 500 characters or fewer")
+    await db_execute(
+        """INSERT INTO leaderboard_blacklist (streamer_name, reason)
+           VALUES (?, ?)
+           ON CONFLICT(streamer_name) DO UPDATE SET reason=excluded.reason""",
+        (streamer_name, reason),
+    )
+    return web.json_response({"ok": True, "streamer_name": streamer_name})
+
+
+async def delete_leaderboard_blacklist(request):
+    _require_dev_or_admin(request)
+    streamer_name = _normalise_twitch_login(request.match_info["streamer_name"])
+    await db_execute(
+        "DELETE FROM leaderboard_blacklist WHERE streamer_name = ?",
+        (streamer_name,),
+    )
+    return web.json_response({"ok": True})
+
+
+async def get_dev_stream_events(request):
+    _require_dev_or_admin(request)
+    streamer = request.query.get("streamer", "").strip().lower()
+    month = request.query.get("month", "").strip()
+    if month and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+        raise web.HTTPBadRequest(reason="month must use YYYY-MM format")
+    try:
+        limit = int(request.query.get("limit", "100"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="limit must be an integer")
+    limit = max(1, min(limit, 500))
+
+    conditions = [
+        "strftime('%Y-%m', went_live_at) = ?" if month
+        else "strftime('%Y-%m', went_live_at) = strftime('%Y-%m', 'now')"
+    ]
+    params = [month] if month else []
+    if streamer:
+        conditions.append("LOWER(streamer_name) LIKE ?")
+        params.append(f"%{streamer}%")
+    params.append(limit)
+
+    rows = await db_fetch(
+        f"""SELECT id, streamer_name, went_live_at, ended_at,
+                   CASE WHEN ended_at IS NOT NULL
+                        THEN ROUND((julianday(ended_at) - julianday(went_live_at)) * 24, 2)
+                        ELSE NULL END AS hours,
+                   CASE WHEN ended_at IS NOT NULL THEN 'closed'
+                        WHEN went_live_at > datetime('now', '-48 hours') THEN 'live'
+                        ELSE 'orphan' END AS status
+            FROM global_stream_events
+            WHERE {' AND '.join(conditions)}
+            ORDER BY went_live_at DESC
+            LIMIT ?""",
+        tuple(params),
+    )
+    return web.json_response({"events": rows})
+
+
 async def db_tools_status(request):
     """Dev-only: show orphaned records and fixable issues."""
     session = request["session"]
@@ -3890,6 +3994,10 @@ def create_dashboard_app(bot=None):
     app.router.add_post ("/api/guild/{guild_id}/permission-issues/{channel_id}/fix", fix_permissions)
     app.router.add_get  ("/api/guild/{guild_id}/unresolvable-streamers", get_unresolvable_streamers)
     app.router.add_get  ("/api/dev/global-stats",   get_global_stats)
+    app.router.add_get   ("/api/dev/leaderboard-blacklist",                 get_leaderboard_blacklist)
+    app.router.add_post  ("/api/dev/leaderboard-blacklist",                 add_leaderboard_blacklist)
+    app.router.add_delete("/api/dev/leaderboard-blacklist/{streamer_name}", delete_leaderboard_blacklist)
+    app.router.add_get   ("/api/dev/stream-events",                         get_dev_stream_events)
     app.router.add_get  ("/api/dev/db-tools",       db_tools_status)
     app.router.add_post ("/api/dev/db-tools",       db_tools_action)
     app.router.add_get   ("/api/guild/{guild_id}/stat-channels",            get_stat_channels)

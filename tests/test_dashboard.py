@@ -7,6 +7,7 @@ Covers:
 """
 import hmac as _hmac
 import hashlib as _hashlib
+import pytest
 
 # Import after conftest sets env vars
 import dashboard_server
@@ -155,3 +156,82 @@ class TestSessionCanAccessGuild:
     def test_missing_guilds_field_denies(self):
         session = {}  # no guilds key at all
         assert dashboard_server._session_can_access_guild(session, "100") is False
+
+
+class TestDevDashboardRoutes:
+    """The developer panels must have matching backend endpoints."""
+
+    def test_blacklist_and_stream_event_routes_registered(self):
+        app = dashboard_server.create_dashboard_app()
+        routes = {
+            (route.method, route.resource.canonical)
+            for route in app.router.routes()
+        }
+        assert ("GET", "/api/dev/leaderboard-blacklist") in routes
+        assert ("POST", "/api/dev/leaderboard-blacklist") in routes
+        assert ("DELETE", "/api/dev/leaderboard-blacklist/{streamer_name}") in routes
+        assert ("GET", "/api/dev/stream-events") in routes
+
+    def test_twitch_login_normalisation(self):
+        assert dashboard_server._normalise_twitch_login(" @Some_Streamer ") == "some_streamer"
+
+    def test_invalid_twitch_login_rejected(self):
+        import pytest
+        from aiohttp import web
+        with pytest.raises(web.HTTPBadRequest):
+            dashboard_server._normalise_twitch_login("not a twitch login")
+
+    def test_owner_and_admin_are_authorised(self):
+        dashboard_server._require_dev_or_admin({"session": {"dev": True}})
+        dashboard_server._require_dev_or_admin({"session": {"admin": True}})
+
+    def test_regular_user_is_denied(self):
+        import pytest
+        from aiohttp import web
+        with pytest.raises(web.HTTPForbidden):
+            dashboard_server._require_dev_or_admin({"session": {}})
+
+    @pytest.mark.asyncio
+    async def test_admin_global_stats_includes_all_leaderboards(self, monkeypatch):
+        import json
+
+        class FakeDatabase:
+            def __init__(self):
+                self.sorts = []
+
+            def get_global_leaderboard(self, limit, sort_by):
+                self.sorts.append((limit, sort_by))
+                return [{"streamer_name": sort_by, "total_streams": 1,
+                         "server_count": 1, "hours_streamed": 2.0,
+                         "longest_hours": 2.0}]
+
+        class FakeTwitch:
+            async def get_subscriptions(self):
+                return []
+
+        class FakeBot:
+            def __init__(self):
+                self.db = FakeDatabase()
+                self.twitch = FakeTwitch()
+                self.live_streamers = set()
+
+        async def fake_db_fetch(query, params=()):
+            if query.lstrip().startswith("SELECT COUNT"):
+                return [{"c": 0}]
+            return []
+
+        fake_bot = FakeBot()
+        monkeypatch.setattr(dashboard_server, "_bot_ref", fake_bot)
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_db_fetch)
+
+        response = await dashboard_server.get_global_stats(
+            {"session": {"admin": True}}
+        )
+        payload = json.loads(response.text)
+
+        assert payload["global_leaderboard_consistency"][0]["streamer_name"] == "consistency"
+        assert payload["global_leaderboard_hours"][0]["streamer_name"] == "hours"
+        assert payload["global_leaderboard_longest"][0]["streamer_name"] == "longest"
+        assert fake_bot.db.sorts == [
+            (15, "consistency"), (15, "hours"), (15, "longest")
+        ]
