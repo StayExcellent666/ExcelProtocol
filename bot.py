@@ -181,11 +181,11 @@ class TwitchNotifierBot(discord.Client):
             cursor = conn.cursor()
 
             # Query 1: every distinct streamer with any notification on file
-            # — this is the cleanup-tracking set. Filtered to last 7 days so
-            # we don't carry forward truly ancient entries either.
+            # — this is the cleanup-tracking set. No age filter: any undeleted
+            # notification means we need to track this streamer for cleanup,
+            # regardless of how old the notification is.
             cursor.execute(
-                "SELECT DISTINCT streamer_name FROM notification_messages "
-                "WHERE sent_at > datetime('now', '-7 days')"
+                "SELECT DISTINCT streamer_name FROM notification_messages"
             )
             for (name,) in cursor.fetchall():
                 self.live_streamers.add(name.lower())
@@ -500,6 +500,8 @@ class TwitchNotifierBot(discord.Client):
                     logger.info(f"Reconcile: {login} no longer live, cleaning up stale state")
                     self.live_streamers.discard(login)
                     self._stream_starts.pop(login, None)
+                    # Delete stale notification messages
+                    await self.delete_offline_notifications(login)
                     # Do NOT mark_stream_ended — we don't know when they actually
                     # ended, so leaving the row as NULL is more honest than
                     # writing a wrong timestamp. Per-decision A.
@@ -2460,6 +2462,7 @@ class TwitchNotifierBot(discord.Client):
                     self.db.mark_stream_ended(login, ended_at=now)
                     self.live_streamers.discard(login)
                     self._stream_starts.pop(login, None)
+                    await self.delete_offline_notifications(login)
 
                     # Record for dashboard observability (cap at 50 entries)
                     self._recent_orphan_closures.append({
