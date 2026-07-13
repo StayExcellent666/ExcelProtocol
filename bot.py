@@ -16,7 +16,7 @@ from database import Database
 from twitch_api import TwitchAPI
 from utils import utcnow, sanitise_streamer_name, parse_twitch_iso, MILESTONE_DEFS, compute_hours_live, should_fire_milestone, is_already_offline_processed, classify_reconcile_action
 from config import DISCORD_TOKEN, CHECK_INTERVAL_SECONDS, BOT_OWNER_ID, LOG_CHANNEL_ID
-from config import TWITCH_BOT_USERNAME, TWITCH_BOT_TOKEN
+from config import TWITCH_BOT_USERNAME, TWITCH_BOT_TOKEN, TWITCH_REFRESH_TOKEN
 import server_setup
 
 # Compiled once at module load — used by on_member_join's safety filter
@@ -311,6 +311,11 @@ class TwitchNotifierBot(discord.Client):
         if not self.cleanup_kicked_guilds.is_running():
             self.cleanup_kicked_guilds.start()
             logger.info("Kicked guild cleanup loop started")
+
+        # Start Twitch bot token refresh (if refresh token available)
+        if TWITCH_REFRESH_TOKEN and not self.refresh_twitch_bot_token.is_running():
+            self.refresh_twitch_bot_token.start()
+            logger.info("Twitch bot token refresh loop started")
 
         # Sync EventSub subscriptions on startup (async so it doesn't block ready).
         # The "Bot Started" log message is deferred to fire from
@@ -1986,6 +1991,60 @@ class TwitchNotifierBot(discord.Client):
 
     @cleanup_kicked_guilds.before_loop
     async def before_cleanup_kicked_guilds(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(hours=24)
+    async def refresh_twitch_bot_token(self):
+        """Refresh the Twitch chat bot OAuth token daily using the refresh token."""
+        try:
+            from config import TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
+            import aiohttp, os
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://id.twitch.tv/oauth2/token",
+                    params={
+                        "grant_type":    "refresh_token",
+                        "refresh_token": TWITCH_REFRESH_TOKEN,
+                        "client_id":     TWITCH_CLIENT_ID,
+                        "client_secret": TWITCH_CLIENT_SECRET,
+                    }
+                ) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        logger.error(f"Twitch token refresh failed: {resp.status} {text}")
+                        return
+                    data = await resp.json()
+
+            new_token = data.get("access_token")
+            new_refresh = data.get("refresh_token")
+            if not new_token:
+                logger.error("Twitch token refresh: no access_token in response")
+                return
+
+            # Update the running chat bot's token
+            if self.twitch_chat_bot:
+                self.twitch_chat_bot._connection.token = new_token
+                logger.info("Twitch bot token refreshed successfully")
+
+            # Update Fly secret so it persists across restarts
+            if new_refresh:
+                proc = await asyncio.create_subprocess_exec(
+                    "fly", "secrets", "set",
+                    f"TWITCH_BOT_TOKEN={new_token}",
+                    f"TWITCH_REFRESH_TOKEN={new_refresh}",
+                    "-a", "excelprotocol",
+                    "--stage",  # stage only, don't trigger a redeploy
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+                logger.info("Fly secrets updated with new Twitch tokens")
+
+        except Exception as e:
+            logger.error(f"Twitch token refresh error: {e}", exc_info=True)
+
+    @refresh_twitch_bot_token.before_loop
+    async def before_refresh_twitch_bot_token(self):
         await self.wait_until_ready()
 
     async def alert_permission_issue(self, guild: discord.Guild, channel_id: int, issue: str):

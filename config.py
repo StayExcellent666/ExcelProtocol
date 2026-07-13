@@ -20,7 +20,8 @@ LOG_CHANNEL_ID = 1491514504788316260  # Bot log channel
 # Create a separate Twitch account for the bot, then get its OAuth token at:
 # https://twitchapps.com/tmi/
 TWITCH_BOT_USERNAME = os.getenv('TWITCH_BOT_USERNAME')   # e.g. "ExcelProtocolBot"
-TWITCH_BOT_TOKEN = os.getenv('TWITCH_BOT_TOKEN')         # oauth:xxxxxxxxxxxxxxxxxxxxxxxxx
+TWITCH_BOT_TOKEN    = os.getenv('TWITCH_BOT_TOKEN')         # oauth:xxxxxxxxxxxxxxxxxxxxxxxxx
+TWITCH_REFRESH_TOKEN = os.getenv('TWITCH_REFRESH_TOKEN', '')
 
 # Validate required environment variables
 if not DISCORD_TOKEN:
