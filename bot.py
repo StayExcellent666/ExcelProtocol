@@ -2287,29 +2287,32 @@ class TwitchNotifierBot(discord.Client):
             
             for server_data in monitoring_servers:
                 guild_id = server_data['guild_id']
-                
-                # Check if auto-delete is enabled for this server
-                if not self.db.get_auto_delete(guild_id):
-                    continue
-                
-                # Get all notification messages for this streamer
-                messages = self.db.get_notification_messages(guild_id, streamer_name)
-                
-                for msg_data in messages:
-                    try:
-                        channel = self.get_channel(msg_data['channel_id'])
-                        if channel:
-                            message = await channel.fetch_message(msg_data['message_id'])
-                            await message.delete()
-                            logger.info(f"Deleted notification {msg_data['message_id']} for {streamer_name}")
-                    except discord.NotFound:
-                        logger.warning(f"Message {msg_data['message_id']} not found (already deleted?)")
-                    except discord.Forbidden:
-                        logger.error(f"No permission to delete message {msg_data['message_id']}")
-                    except Exception as e:
-                        logger.error(f"Error deleting message: {e}")
-                
-                # Clean up database records
+
+                # The rows in notification_messages are live-state tracking,
+                # not permanent history.  When auto-delete is disabled the
+                # Discord messages stay visible, but the tracking rows must
+                # still be cleared after the stream ends.  Otherwise on every
+                # restart on_ready restores the streamer as live and startup
+                # reconciliation repeatedly "cleans up" the same stale row.
+                if self.db.get_auto_delete(guild_id):
+                    messages = self.db.get_notification_messages(guild_id, streamer_name)
+
+                    for msg_data in messages:
+                        try:
+                            channel = self.get_channel(msg_data['channel_id'])
+                            if channel:
+                                message = await channel.fetch_message(msg_data['message_id'])
+                                await message.delete()
+                                logger.info(f"Deleted notification {msg_data['message_id']} for {streamer_name}")
+                        except discord.NotFound:
+                            logger.warning(f"Message {msg_data['message_id']} not found (already deleted?)")
+                        except discord.Forbidden:
+                            logger.error(f"No permission to delete message {msg_data['message_id']}")
+                        except Exception as e:
+                            logger.error(f"Error deleting message: {e}")
+
+                # Always clear internal live-state tracking. Auto-delete only
+                # controls whether the corresponding Discord message is removed.
                 self.db.delete_notification_messages(guild_id, streamer_name)
         
         except Exception as e:
@@ -2526,7 +2529,8 @@ class TwitchNotifierBot(discord.Client):
                         self._recent_orphan_closures = self._recent_orphan_closures[-50:]
 
                     closed_count += 1
-                    logger.info(f"Health poll: closed orphan for {login} (was live ~{hours_live}h)")
+                    duration = f"~{hours_live}h" if hours_live is not None else "unknown duration"
+                    logger.info(f"Health poll: closed orphan for {login} (was live for {duration})")
                 except Exception as e:
                     logger.error(f"Failed to close orphan for {login}: {e}")
 
