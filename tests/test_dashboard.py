@@ -171,6 +171,7 @@ class TestDevDashboardRoutes:
         assert ("POST", "/api/dev/leaderboard-blacklist") in routes
         assert ("DELETE", "/api/dev/leaderboard-blacklist/{streamer_name}") in routes
         assert ("GET", "/api/dev/stream-events") in routes
+        assert ("GET", "/api/dev/health-check") in routes
 
     def test_twitch_login_normalisation(self):
         assert dashboard_server._normalise_twitch_login(" @Some_Streamer ") == "some_streamer"
@@ -235,3 +236,63 @@ class TestDevDashboardRoutes:
         assert fake_bot.db.sorts == [
             (15, "consistency"), (15, "hours"), (15, "longest")
         ]
+
+    @pytest.mark.asyncio
+    async def test_admin_health_check_returns_read_only_snapshot(self, monkeypatch):
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        class FakeLoop:
+            current_loop = 3
+            _last_iteration = datetime.now(timezone.utc) - timedelta(minutes=5)
+            next_iteration = datetime.now(timezone.utc) + timedelta(minutes=10)
+            def is_running(self): return True
+            def failed(self): return False
+
+        class FakeBot:
+            def __init__(self):
+                self.start_time = datetime.now(timezone.utc) - timedelta(hours=2)
+                self.latency = 0.042
+                self.guilds = [object(), object()]
+                self.live_streamers = {"one"}
+                self._recent_orphan_closures = []
+                self._eventsub_sync_stats = {"expected": 4, "actual": 4, "failed": 0}
+                self._eventsub_last_success_at = datetime.now(timezone.utc)
+                self._last_reconcile_at = datetime.now(timezone.utc)
+                self._last_reconcile_counts = {"cleanup": 1, "no_action": 1}
+                for name in (
+                    "check_streams", "check_milestones", "cleanup_channels",
+                    "monthly_leaderboard_cleanup", "poll_live_streamers_health",
+                    "rotate_status", "refresh_broadcaster_tokens", "check_permissions",
+                    "update_stat_channels", "check_streamer_renames", "cleanup_kicked_guilds",
+                ):
+                    setattr(self, name, FakeLoop())
+            def is_ready(self): return True
+            def is_closed(self): return False
+
+        async def fake_db_fetch(query, params=()):
+            if "permission_issues" in query or "status != 'sent'" in query:
+                return [{"c": 0}]
+            if "COUNT(DISTINCT streamer_name)" in query:
+                return [{"c": 2}]
+            if "global_stream_events" in query:
+                return [{"c": 1}]
+            return [{"c": 3}]
+
+        monkeypatch.setattr(dashboard_server, "_bot_ref", FakeBot())
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_db_fetch)
+        response = await dashboard_server.get_operations_health(
+            {"session": {"admin": True}}
+        )
+        payload = json.loads(response.text)
+        assert payload["status"] == "healthy"
+        assert payload["bot"]["ready"] is True
+        assert payload["eventsub"]["actual"] == 4
+        assert payload["streaming"]["unique_streamers"] == 2
+        assert len(payload["tasks"]) == 11
+
+    @pytest.mark.asyncio
+    async def test_health_check_rejects_regular_user(self):
+        from aiohttp import web
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.get_operations_health({"session": {}})

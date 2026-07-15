@@ -11,6 +11,8 @@ import logging
 import psutil
 import os
 import re
+import time
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 from database import Database
 from twitch_api import TwitchAPI
@@ -28,6 +30,37 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def health_tracked(name: str):
+    """Record timing and uncaught errors without changing loop behaviour."""
+    def decorator(func):
+        @wraps(func)
+        async def wrapped(self, *args, **kwargs):
+            started_at = utcnow()
+            started_clock = time.perf_counter()
+            state = self._task_health.setdefault(name, {})
+            state.update({"started_at": started_at, "running": True})
+            try:
+                result = await func(self, *args, **kwargs)
+            except Exception as exc:
+                state.update({
+                    "running": False,
+                    "last_completed_at": utcnow(),
+                    "duration_ms": round((time.perf_counter() - started_clock) * 1000, 1),
+                    "last_error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                })
+                raise
+            state.update({
+                "running": False,
+                "last_completed_at": utcnow(),
+                "last_success_at": utcnow(),
+                "duration_ms": round((time.perf_counter() - started_clock) * 1000, 1),
+                "last_error": None,
+            })
+            return result
+        return wrapped
+    return decorator
 
 class TwitchNotifierBot(discord.Client):
     def __init__(self):
@@ -66,6 +99,16 @@ class TwitchNotifierBot(discord.Client):
         # incidents are visible (SBmel had 4 instead of 2, double-firing every
         # online/offline). Reset to 0 each sync.
         self._last_pruned_subscriptions: int = 0
+
+        # Operational health telemetry. These values are intentionally kept
+        # in memory: they describe this process and reset cleanly on deploy.
+        self._eventsub_last_started_at = None
+        self._eventsub_last_success_at = None
+        self._eventsub_last_error = None
+        self._eventsub_sync_stats: dict = {}
+        self._last_reconcile_at = None
+        self._last_reconcile_error = None
+        self._task_health: dict[str, dict] = {}
 
         # In-memory progress store for the Set Up Server wizard. Keyed by
         # setup_id (uuid string); value is a dict with `status` ('pending' |
@@ -365,6 +408,7 @@ class TwitchNotifierBot(discord.Client):
         try:
             await self._reconcile_live_state()
         except Exception as e:
+            self._last_reconcile_error = f"{type(e).__name__}: {str(e)[:300]}"
             logger.error(f"Startup reconciliation failed: {e}", exc_info=True)
             await self.log_to_channel(
                 "⚠️", "Reconciliation Failed",
@@ -451,8 +495,11 @@ class TwitchNotifierBot(discord.Client):
         ONE batched API call per ~100 streamers. Not a recurring poll —
         just a startup self-heal.
         """
+        self._last_reconcile_error = None
         streamers = self.db.get_all_streamers()
         if not streamers:
+            self._last_reconcile_counts = {'notify': 0, 'absorb': 0, 'cleanup': 0, 'no_action': 0}
+            self._last_reconcile_at = utcnow()
             return
 
         # Deduplicate streamer names (same name across multiple guilds = one entry)
@@ -509,6 +556,7 @@ class TwitchNotifierBot(discord.Client):
         # Save the reconciliation counts on `self` so the caller (_initial_eventsub_sync)
         # can include them in the Bot Started log message.
         self._last_reconcile_counts = counts
+        self._last_reconcile_at = utcnow()
         if counts['notify'] or counts['absorb'] or counts['cleanup']:
             logger.info(
                 f"Reconciliation complete — notify={counts['notify']} "
@@ -1400,6 +1448,7 @@ class TwitchNotifierBot(discord.Client):
     # ── EventSub Stream Notifications ────────────────────────────────────────
 
     @tasks.loop(minutes=30)
+    @health_tracked("check_streams")
     async def check_streams(self):
         """Keep EventSub subscriptions healthy — re-register any missing ones every 30 min."""
         try:
@@ -1432,8 +1481,14 @@ class TwitchNotifierBot(discord.Client):
             logger.debug("EventSub sync already in progress, skipping")
             return
         self._eventsub_syncing = True
+        self._eventsub_last_started_at = utcnow()
         try:
             await self.__do_eventsub_sync(alert_on_mismatch)
+            self._eventsub_last_success_at = utcnow()
+            self._eventsub_last_error = None
+        except Exception as e:
+            self._eventsub_last_error = f"{type(e).__name__}: {str(e)[:300]}"
+            raise
         finally:
             self._eventsub_syncing = False
 
@@ -1624,6 +1679,20 @@ class TwitchNotifierBot(discord.Client):
                     f"Twitch may have revoked subscriptions. Next 30-min sync will attempt to re-register."
                 )
 
+        # Cached for the dashboard Health Check page. Avoids making a fresh
+        # Twitch API request whenever an owner or admin opens the page.
+        resolvable_count = len(unique_logins) - len(unresolvable)
+        expected = resolvable_count * 2
+        actual = len([s for s in existing if s.get("type") in ("stream.online", "stream.offline")]) + registered
+        self._eventsub_sync_stats = {
+            "expected": expected,
+            "actual": actual,
+            "registered": registered,
+            "failed": failed,
+            "unresolvable": len(unresolvable),
+            "pruned": pruned_count,
+        }
+
     async def _assign_live_role(self, guild_id: int, streamer_name: str, add: bool):
         """Assign or remove the live role for a streamer's linked Discord member."""
         try:
@@ -1797,6 +1866,7 @@ class TwitchNotifierBot(discord.Client):
     MILESTONES = MILESTONE_DEFS
 
     @tasks.loop(minutes=5)
+    @health_tracked("check_milestones")
     async def check_milestones(self):
         """Check 5h/10h stream milestones using locally cached start times."""
         try:
@@ -1889,6 +1959,7 @@ class TwitchNotifierBot(discord.Client):
         await self.wait_until_ready()
 
     @tasks.loop(hours=24)
+    @health_tracked("check_streamer_renames")
     async def check_streamer_renames(self):
         """Daily task — resolve all stored user IDs to current logins and update any renames."""
         try:
@@ -1958,6 +2029,7 @@ class TwitchNotifierBot(discord.Client):
         await self.wait_until_ready()
 
     @tasks.loop(hours=24)
+    @health_tracked("cleanup_kicked_guilds")
     async def cleanup_kicked_guilds(self):
         """Daily task — wipe data for guilds kicked more than 7 days ago."""
         try:
@@ -1987,6 +2059,7 @@ class TwitchNotifierBot(discord.Client):
         await self.wait_until_ready()
 
     @tasks.loop(hours=24)
+    @health_tracked("refresh_twitch_bot_token")
     async def refresh_twitch_bot_token(self):
         """Refresh the Twitch chat bot OAuth token daily using the refresh token."""
         try:
@@ -2406,6 +2479,7 @@ class TwitchNotifierBot(discord.Client):
             logger.error(f"Failed to send to log channel: {e}")
     
     @tasks.loop(hours=1)
+    @health_tracked("cleanup_channels")
     async def cleanup_channels(self):
         """Periodically clean up configured channels"""
         try:
@@ -2453,6 +2527,7 @@ class TwitchNotifierBot(discord.Client):
         await self.wait_until_ready()
 
     @tasks.loop(hours=24)
+    @health_tracked("monthly_leaderboard_cleanup")
     async def monthly_leaderboard_cleanup(self):
         """Check daily if it is the first of the month and clean old stream events"""
         try:
@@ -2470,6 +2545,7 @@ class TwitchNotifierBot(discord.Client):
         await self.wait_until_ready()
 
     @tasks.loop(minutes=15)
+    @health_tracked("poll_live_streamers_health")
     async def poll_live_streamers_health(self):
         """Light polling: confirm every streamer in live_streamers is still
         actually live according to Twitch. Catches missed offline events
@@ -2546,6 +2622,7 @@ class TwitchNotifierBot(discord.Client):
         await asyncio.sleep(60)
 
     @tasks.loop(seconds=20)
+    @health_tracked("rotate_status")
     async def rotate_status(self):
         """Rotate bot status messages"""
         statuses = [
@@ -2567,6 +2644,7 @@ class TwitchNotifierBot(discord.Client):
         await self.wait_until_ready()
 
     @tasks.loop(hours=3)
+    @health_tracked("refresh_broadcaster_tokens")
     async def refresh_broadcaster_tokens(self):
         """Proactively refresh all broadcaster OAuth tokens every 3 hours."""
         import aiohttp
@@ -2635,6 +2713,7 @@ class TwitchNotifierBot(discord.Client):
     }
 
     @tasks.loop(minutes=10)
+    @health_tracked("check_permissions")
     async def check_permissions(self):
         """Periodically check bot permissions in all configured notification channels."""
         try:
@@ -2692,6 +2771,7 @@ class TwitchNotifierBot(discord.Client):
     # ── Stat Channel Update Loop ──────────────────────────────────────────────
 
     @tasks.loop(minutes=15)
+    @health_tracked("update_stat_channels")
     async def update_stat_channels(self):
         """Update voice channel names with live member counts every 15 minutes."""
         try:

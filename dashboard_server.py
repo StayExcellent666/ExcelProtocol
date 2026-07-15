@@ -2971,6 +2971,172 @@ async def get_global_stats(request):
     })
 
 
+def _health_iso(value):
+    """Serialize task-loop datetimes without leaking implementation details."""
+    if value is None:
+        return None
+    try:
+        return value.astimezone(timezone.utc).isoformat()
+    except (AttributeError, ValueError):
+        return None
+
+
+def _task_loop_health(bot, attr_name: str, label: str) -> dict:
+    """Return a stable, JSON-safe view of a discord.ext.tasks.Loop."""
+    loop = getattr(bot, attr_name, None)
+    if loop is None:
+        return {
+            "name": attr_name, "label": label, "running": False,
+            "failed": True, "current_loop": 0, "last_run": None,
+            "next_run": None,
+        }
+    try:
+        failed = bool(loop.failed())
+    except Exception:
+        failed = False
+    telemetry = dict(getattr(bot, "_task_health", {}).get(attr_name, {}))
+    return {
+        "name": attr_name,
+        "label": label,
+        "running": bool(loop.is_running()),
+        "failed": failed,
+        "current_loop": int(getattr(loop, "current_loop", 0) or 0),
+        "last_run": _health_iso(telemetry.get("last_completed_at") or getattr(loop, "_last_iteration", None)),
+        "last_success": _health_iso(telemetry.get("last_success_at")),
+        "next_run": _health_iso(getattr(loop, "next_iteration", None)),
+        "duration_ms": telemetry.get("duration_ms"),
+        "last_error": telemetry.get("last_error"),
+    }
+
+
+async def get_operations_health(request):
+    """Read-only operational health snapshot for owners and configured admins."""
+    _require_dev_or_admin(request)
+
+    bot = _bot_ref
+    if bot is None:
+        return web.json_response({
+            "status": "critical",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "bot": {"ready": False, "closed": True, "uptime_seconds": 0},
+            "tasks": [],
+            "signals": ["Bot instance is unavailable to the dashboard."],
+        })
+
+    task_defs = (
+        ("check_streams", "EventSub subscription sync"),
+        ("check_milestones", "Stream milestone checks"),
+        ("cleanup_channels", "Channel cleanup"),
+        ("monthly_leaderboard_cleanup", "Leaderboard retention cleanup"),
+        ("poll_live_streamers_health", "Live-stream health poll"),
+        ("rotate_status", "Discord status rotation"),
+        ("refresh_broadcaster_tokens", "Broadcaster token refresh"),
+        ("check_permissions", "Discord permission checks"),
+        ("update_stat_channels", "Stats channel updates"),
+        ("check_streamer_renames", "Streamer rename checks"),
+        ("cleanup_kicked_guilds", "Kicked-server data cleanup"),
+    )
+    tasks_health = [_task_loop_health(bot, name, label) for name, label in task_defs]
+
+    permission_rows = await db_fetch("SELECT COUNT(*) AS c FROM permission_issues")
+    failed_notifications = await db_fetch("""
+        SELECT COUNT(*) AS c FROM notification_log
+        WHERE sent_at >= datetime('now', '-24 hours') AND status != 'sent'
+    """)
+    tracked_rows = await db_fetch("SELECT COUNT(*) AS c FROM monitored_streamers")
+    unique_rows = await db_fetch("SELECT COUNT(DISTINCT streamer_name) AS c FROM monitored_streamers")
+    open_events = await db_fetch("""
+        SELECT COUNT(*) AS c FROM global_stream_events
+        WHERE ended_at IS NULL
+    """)
+
+    now = datetime.now(timezone.utc)
+    start_time = getattr(bot, "start_time", now)
+    try:
+        uptime_seconds = max(0, int((now - start_time).total_seconds()))
+    except (TypeError, ValueError):
+        uptime_seconds = 0
+
+    signals = []
+    if not bot.is_ready():
+        signals.append("Discord connection is not ready.")
+    stopped = [t["label"] for t in tasks_health if not t["running"]]
+    failed = [t["label"] for t in tasks_health if t["failed"]]
+    if stopped:
+        signals.append(f"{len(stopped)} background task(s) are not running.")
+    if failed:
+        signals.append(f"{len(failed)} background task(s) report a failure.")
+
+    permission_count = permission_rows[0]["c"] if permission_rows else 0
+    notification_failure_count = failed_notifications[0]["c"] if failed_notifications else 0
+    open_event_count = open_events[0]["c"] if open_events else 0
+    live_memory_count = len(getattr(bot, "live_streamers", set()))
+    eventsub_stats = dict(getattr(bot, "_eventsub_sync_stats", {}) or {})
+    if permission_count:
+        signals.append(f"{permission_count} Discord channel permission issue(s) detected.")
+    if notification_failure_count:
+        signals.append(f"{notification_failure_count} notification failure(s) recorded in the last 24 hours.")
+    if getattr(bot, "_eventsub_last_error", None):
+        signals.append("The most recent EventSub sync failed.")
+    if getattr(bot, "_last_reconcile_error", None):
+        signals.append("The most recent startup reconciliation failed.")
+    if open_event_count != live_memory_count:
+        signals.append(
+            f"Live-state mismatch: {live_memory_count} in memory, "
+            f"{open_event_count} open database event row(s)."
+        )
+    eventsub_missing = max(0, int(eventsub_stats.get("expected", 0)) - int(eventsub_stats.get("actual", 0)))
+    if eventsub_missing:
+        signals.append(f"{eventsub_missing} expected EventSub subscription(s) are missing.")
+
+    if not bot.is_ready() or failed:
+        status = "critical"
+    elif stopped or permission_count or notification_failure_count or getattr(bot, "_eventsub_last_error", None) or getattr(bot, "_last_reconcile_error", None) or open_event_count != live_memory_count or eventsub_missing:
+        status = "warning"
+    else:
+        status = "healthy"
+
+    eventsub = eventsub_stats
+    eventsub.update({
+        "syncing": bool(getattr(bot, "_eventsub_syncing", False)),
+        "last_started_at": _health_iso(getattr(bot, "_eventsub_last_started_at", None)),
+        "last_success_at": _health_iso(getattr(bot, "_eventsub_last_success_at", None)),
+        "last_error": getattr(bot, "_eventsub_last_error", None),
+    })
+
+    return web.json_response({
+        "status": status,
+        "checked_at": now.isoformat(),
+        "bot": {
+            "ready": bool(bot.is_ready()),
+            "closed": bool(bot.is_closed()),
+            "latency_ms": round(float(getattr(bot, "latency", 0)) * 1000, 1),
+            "uptime_seconds": uptime_seconds,
+            "guild_count": len(getattr(bot, "guilds", [])),
+        },
+        "streaming": {
+            "tracked_rows": tracked_rows[0]["c"] if tracked_rows else 0,
+            "unique_streamers": unique_rows[0]["c"] if unique_rows else 0,
+            "live_in_memory": live_memory_count,
+            "open_event_rows": open_event_count,
+            "recent_orphan_closures": list(getattr(bot, "_recent_orphan_closures", [])[-20:]),
+        },
+        "eventsub": eventsub,
+        "reconciliation": {
+            "last_completed_at": _health_iso(getattr(bot, "_last_reconcile_at", None)),
+            "last_error": getattr(bot, "_last_reconcile_error", None),
+            "counts": dict(getattr(bot, "_last_reconcile_counts", {}) or {}),
+        },
+        "database": {
+            "accessible": True,
+            "permission_issues": permission_count,
+            "notification_failures_24h": notification_failure_count,
+        },
+        "tasks": tasks_health,
+        "signals": signals,
+    })
+
+
 # ── Dev: DB Tools ─────────────────────────────────────────────────────────────
 def _require_dev_or_admin(request):
     """Restrict internal maintenance endpoints to configured owners/admins."""
@@ -3994,6 +4160,7 @@ def create_dashboard_app(bot=None):
     app.router.add_post ("/api/guild/{guild_id}/permission-issues/{channel_id}/fix", fix_permissions)
     app.router.add_get  ("/api/guild/{guild_id}/unresolvable-streamers", get_unresolvable_streamers)
     app.router.add_get  ("/api/dev/global-stats",   get_global_stats)
+    app.router.add_get  ("/api/dev/health-check",  get_operations_health)
     app.router.add_get   ("/api/dev/leaderboard-blacklist",                 get_leaderboard_blacklist)
     app.router.add_post  ("/api/dev/leaderboard-blacklist",                 add_leaderboard_blacklist)
     app.router.add_delete("/api/dev/leaderboard-blacklist/{streamer_name}", delete_leaderboard_blacklist)

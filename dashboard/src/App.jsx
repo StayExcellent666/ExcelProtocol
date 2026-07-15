@@ -4261,6 +4261,129 @@ function DbToolsTab() {
   );
 }
 
+function HealthCheckTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const refresh = () => {
+    setLoading(true);
+    setError("");
+    apiFetch("/api/dev/health-check")
+      .then(setData)
+      .catch(e => setError(e.message || String(e)))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => {
+    let active = true;
+    apiFetch("/api/dev/health-check")
+      .then(result => { if (active) setData(result); })
+      .catch(e => { if (active) setError(e.message || String(e)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const when = value => value ? new Date(value).toLocaleString() : "Not yet";
+  const duration = seconds => {
+    const s = Math.max(0, Number(seconds) || 0);
+    const days = Math.floor(s / 86400);
+    const hours = Math.floor((s % 86400) / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    return [days && `${days}d`, hours && `${hours}h`, `${mins}m`].filter(Boolean).join(" ");
+  };
+  const statusColor = data?.status === "healthy" ? "var(--green)" : data?.status === "warning" ? "var(--yellow)" : "var(--red)";
+  const metric = (label, value, accent="var(--cyan)") => (
+    <div style={{ ...C.card, padding:"14px 16px", minWidth:0 }}>
+      <div style={{ fontSize:10, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1, fontFamily:"'JetBrains Mono',monospace" }}>{label}</div>
+      <div style={{ fontSize:21, color:accent, fontWeight:800, marginTop:5, fontFamily:"'Orbitron',sans-serif" }}>{value}</div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, marginBottom:16 }}>
+        <div>
+          <h2 style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:22, color:"var(--text)", margin:0, textShadow:"0 0 20px rgba(0,245,212,0.4)" }}>Health Check</h2>
+          <div style={{ fontSize:12, color:"var(--text3)", marginTop:4 }}>Read-only operational status for the bot, Twitch delivery, database, and background jobs.</div>
+        </div>
+        <button onClick={refresh} disabled={loading} style={C.btnSecondary}>{loading ? "Checking…" : "↻ Refresh"}</button>
+      </div>
+
+      {loading && !data ? <Spinner /> : error ? <div style={{ ...C.card, color:"var(--red)" }}>Error: {error}</div> : data && <>
+        <div style={{ ...C.card, padding:"16px 18px", marginBottom:12, borderColor:statusColor, boxShadow:`0 0 20px ${statusColor}18` }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+            <span style={{ width:10, height:10, borderRadius:"50%", background:statusColor, boxShadow:`0 0 12px ${statusColor}` }} />
+            <span style={{ color:statusColor, fontFamily:"'Orbitron',sans-serif", fontWeight:800, textTransform:"uppercase" }}>{data.status}</span>
+            <span style={{ color:"var(--text3)", fontSize:11, fontFamily:"'JetBrains Mono',monospace" }}>Checked {when(data.checked_at)}</span>
+          </div>
+          {data.signals?.length > 0 && <div style={{ marginTop:10, display:"grid", gap:5 }}>
+            {data.signals.map((signal, i) => <div key={i} style={{ color:"var(--text2)", fontSize:12 }}>• {signal}</div>)}
+          </div>}
+        </div>
+
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:10, marginBottom:14 }}>
+          {metric("Uptime", duration(data.bot?.uptime_seconds), "var(--green)")}
+          {metric("Discord latency", `${data.bot?.latency_ms ?? 0} ms`, data.bot?.ready ? "var(--green)" : "var(--red)")}
+          {metric("Servers", data.bot?.guild_count ?? 0)}
+          {metric("Live streamers", data.streaming?.live_in_memory ?? 0)}
+          {metric("Tracked streamers", data.streaming?.unique_streamers ?? 0)}
+          {metric("Permission issues", data.database?.permission_issues ?? 0, data.database?.permission_issues ? "var(--yellow)" : "var(--green)")}
+        </div>
+
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:12, marginBottom:14 }}>
+          <div style={{ ...C.card, padding:16 }}>
+            <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14, marginBottom:10 }}>Twitch EventSub</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:12 }}>
+              <span style={{ color:"var(--text3)" }}>Subscriptions</span><span style={{ color:"var(--cyan)", textAlign:"right" }}>{data.eventsub?.actual ?? "—"} / {data.eventsub?.expected ?? "—"}</span>
+              <span style={{ color:"var(--text3)" }}>Last success</span><span style={{ color:"var(--text2)", textAlign:"right" }}>{when(data.eventsub?.last_success_at)}</span>
+              <span style={{ color:"var(--text3)" }}>Registration failures</span><span style={{ color:data.eventsub?.failed ? "var(--red)" : "var(--green)", textAlign:"right" }}>{data.eventsub?.failed ?? 0}</span>
+              <span style={{ color:"var(--text3)" }}>Unresolvable accounts</span><span style={{ color:data.eventsub?.unresolvable ? "var(--yellow)" : "var(--green)", textAlign:"right" }}>{data.eventsub?.unresolvable ?? 0}</span>
+            </div>
+            {data.eventsub?.last_error && <div style={{ color:"var(--red)", fontSize:11, marginTop:10, fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-word" }}>{data.eventsub.last_error}</div>}
+          </div>
+          <div style={{ ...C.card, padding:16 }}>
+            <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14, marginBottom:10 }}>Startup Reconciliation</div>
+            <div style={{ color:"var(--text3)", fontSize:11, marginBottom:10 }}>Last completed: {when(data.reconciliation?.last_completed_at)}</div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:8 }}>
+              {[['Notified','notify'],['Absorbed','absorb'],['Cleaned','cleanup'],['Unchanged','no_action']].map(([label,key]) => (
+                <div key={key} style={{ background:"var(--bg)", border:"1px solid var(--border)", borderRadius:8, padding:9, textAlign:"center" }}>
+                  <div style={{ color:"var(--cyan)", fontWeight:800, fontSize:17 }}>{data.reconciliation?.counts?.[key] ?? 0}</div>
+                  <div style={{ color:"var(--text3)", fontSize:9 }}>{label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ ...C.card, padding:16, marginBottom:14 }}>
+          <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14, marginBottom:10 }}>Background Jobs</div>
+          <div style={{ display:"grid", gap:6 }}>
+            {data.tasks?.map(task => {
+              const ok = task.running && !task.failed;
+              return <div key={task.name} style={{ display:"grid", gridTemplateColumns:"minmax(170px, 1.4fr) 80px minmax(140px, 1fr) minmax(140px, 1fr)", gap:10, alignItems:"center", padding:"8px 10px", borderRadius:7, background:"var(--bg)", fontSize:11 }}>
+                <span style={{ color:"var(--text2)" }}>{task.label}</span>
+                <span style={{ color:ok ? "var(--green)" : "var(--red)", fontFamily:"'JetBrains Mono',monospace" }}>{ok ? "RUNNING" : task.failed ? "FAILED" : "STOPPED"}</span>
+                <span style={{ color:"var(--text3)" }}>Last: {when(task.last_success || task.last_run)}{task.duration_ms != null ? ` · ${task.duration_ms}ms` : ""}</span>
+                <span style={{ color:task.last_error ? "var(--red)" : "var(--text3)" }}>{task.last_error ? task.last_error : `Next: ${when(task.next_run)}`}</span>
+              </div>;
+            })}
+          </div>
+        </div>
+
+        <div style={{ ...C.card, padding:16 }}>
+          <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14 }}>Recent Orphan Closures</div>
+          <div style={{ color:"var(--text3)", fontSize:11, margin:"4px 0 10px" }}>Most recent streams closed by the 15-minute safety poll after a missed offline event.</div>
+          {!data.streaming?.recent_orphan_closures?.length ? <div style={{ color:"var(--green)", fontSize:12 }}>No orphan closures recorded since this deployment.</div> :
+            <div style={{ display:"grid", gap:5 }}>{[...data.streaming.recent_orphan_closures].reverse().map((item, i) =>
+              <div key={`${item.streamer_name}-${i}`} style={{ display:"flex", justifyContent:"space-between", gap:12, padding:"7px 9px", background:"var(--bg)", borderRadius:6, fontSize:11, fontFamily:"'JetBrains Mono',monospace" }}>
+                <span style={{ color:"var(--text2)" }}>{item.streamer_name}</span><span style={{ color:"var(--text3)" }}>{item.closed_at}{item.hours_live_at_close != null ? ` · ${item.hours_live_at_close}h` : ""}</span>
+              </div>)}</div>}
+        </div>
+      </>}
+    </div>
+  );
+}
+
 function AdminAuditLogTab() {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -4374,10 +4497,12 @@ export default function App() {
   const effectivelyAdmin = isActuallyDev && viewMode === "admin";
   const devTabs = effectivelyDev ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
+    { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
     { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
   ] : (effectivelyAdmin || isAdmin) ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
+    { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
   ] : [];
   const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
 
@@ -4528,6 +4653,7 @@ export default function App() {
               {activeTab==="safety"        && <SafetyTab           guildId={activeGuild} />}
               {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
               {activeTab==="globalstats"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <GlobalStatsTab />}
+              {activeTab==="healthcheck"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <HealthCheckTab />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
               {activeTab==="auditlog"      && effectivelyDev && <AdminAuditLogTab />}
             </>
