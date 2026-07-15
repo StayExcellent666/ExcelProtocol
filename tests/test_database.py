@@ -1251,3 +1251,34 @@ class TestTwitchBotCredentials:
         import pytest
         with pytest.raises(ValueError):
             db.set_twitch_bot_credentials("access-only", "")
+
+
+class TestNotificationTrackingCleanup:
+    def test_removes_only_rows_without_matching_monitored_streamer(self, db):
+        db.add_streamer(guild_id=100, streamer_name="kept", channel_id=500)
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO notification_messages "
+            "(guild_id, streamer_name, channel_id, message_id) VALUES (?, ?, ?, ?)",
+            (100, "kept", 500, 1),
+        )
+        conn.execute(
+            "INSERT INTO notification_messages "
+            "(guild_id, streamer_name, channel_id, message_id) VALUES (?, ?, ?, ?)",
+            (100, "removed", 500, 2),
+        )
+        conn.execute(
+            "INSERT INTO notification_messages "
+            "(guild_id, streamer_name, channel_id, message_id) VALUES (?, ?, ?, ?)",
+            (999, "kept", 500, 3),
+        )
+        conn.commit()
+        conn.close()
+
+        assert db.cleanup_orphaned_notification_messages() == 2
+        conn = db.get_connection()
+        rows = conn.execute(
+            "SELECT guild_id, streamer_name FROM notification_messages"
+        ).fetchall()
+        conn.close()
+        assert rows == [(100, "kept")]

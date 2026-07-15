@@ -158,7 +158,7 @@ class TwitchNotifierBot(discord.Client):
             for refresh_token in candidates:
                 async with session.post(
                     "https://id.twitch.tv/oauth2/token",
-                    params={
+                    data={
                         "grant_type": "refresh_token",
                         "refresh_token": refresh_token,
                         "client_id": TWITCH_CLIENT_ID,
@@ -280,6 +280,13 @@ class TwitchNotifierBot(discord.Client):
         STREAM_START_MAX_AGE_HOURS = 12
 
         try:
+            removed_tracking_rows = self.db.cleanup_orphaned_notification_messages()
+            if removed_tracking_rows:
+                logger.info(
+                    f"Removed {removed_tracking_rows} orphaned notification tracking row(s) "
+                    f"for streamers no longer monitored"
+                )
+
             conn = self.db.get_connection()
             cursor = conn.cursor()
 
@@ -1768,7 +1775,7 @@ class TwitchNotifierBot(discord.Client):
             )
 
         if alert_on_mismatch:
-            resolvable_count = len(unique_logins) - len(unresolvable)
+            resolvable_count = len(monitored_user_ids)
             expected = resolvable_count * 2
             actual = len([s for s in existing if s.get("type") in ("stream.online", "stream.offline")]) + registered
             missing = expected - actual
@@ -1788,7 +1795,7 @@ class TwitchNotifierBot(discord.Client):
 
         # Cached for the dashboard Health Check page. Avoids making a fresh
         # Twitch API request whenever an owner or admin opens the page.
-        resolvable_count = len(unique_logins) - len(unresolvable)
+        resolvable_count = len(monitored_user_ids)
         expected = resolvable_count * 2
         actual = len([s for s in existing if s.get("type") in ("stream.online", "stream.offline")]) + registered
         self._eventsub_sync_stats = {

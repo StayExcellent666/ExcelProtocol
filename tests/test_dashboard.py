@@ -327,9 +327,13 @@ class TestOperationalSafetyRegressions:
                 return {"access_token": "new-access", "refresh_token": "new-refresh"}
 
         class FakeSession:
+            last_kwargs = None
             async def __aenter__(self): return self
             async def __aexit__(self, *args): return False
-            def post(self, *args, **kwargs): return FakeResponse()
+            def post(self, *args, **kwargs):
+                self.last_kwargs = kwargs
+                FakeSession.last_kwargs = kwargs
+                return FakeResponse()
 
         class FakeDb:
             saved = None
@@ -359,6 +363,8 @@ class TestOperationalSafetyRegressions:
         assert fake._twitch_refresh_token == "new-refresh"
         assert fake.twitch_chat_bot._connection._token == "new-access"
         assert fake._twitch_token_last_error is None
+        assert "data" in FakeSession.last_kwargs
+        assert "params" not in FakeSession.last_kwargs
 
     @pytest.mark.asyncio
     async def test_eventsub_sync_prunes_only_unmonitored_stream_subscriptions(self):
@@ -374,7 +380,10 @@ class TestOperationalSafetyRegressions:
 
         class FakeDb:
             def get_all_streamers(self):
-                return [{"streamer_name": "alice", "guild_id": 10, "twitch_user_id": "1"}]
+                return [
+                    {"streamer_name": "alice", "guild_id": 10, "twitch_user_id": "1"},
+                    {"streamer_name": "old_alice_login", "guild_id": 11, "twitch_user_id": "1"},
+                ]
             def clear_unresolvable_streamers(self): pass
 
         class FakeTwitch:

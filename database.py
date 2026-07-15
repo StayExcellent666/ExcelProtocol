@@ -1763,6 +1763,23 @@ class Database:
         deleted = cursor.rowcount
         conn.commit()
         conn.close()
+
+    def cleanup_orphaned_notification_messages(self) -> int:
+        """Remove live-state rows whose guild/streamer is no longer monitored."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            DELETE FROM notification_messages
+            WHERE NOT EXISTS (
+                SELECT 1 FROM monitored_streamers
+                WHERE monitored_streamers.guild_id = notification_messages.guild_id
+                  AND LOWER(monitored_streamers.streamer_name) = LOWER(notification_messages.streamer_name)
+            )
+        ''')
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return max(0, deleted)
         
         logger.debug(f"Deleted {deleted} notification records for {streamer_name} in guild {guild_id}")
     

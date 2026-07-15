@@ -4336,7 +4336,7 @@ function HealthCheckTab() {
               <span style={{ color:"var(--text3)" }}>Chat token auto-refresh</span><span style={{ color:data.twitch_chat_token?.automatic_refresh_configured ? "var(--green)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat_token?.automatic_refresh_configured ? "Configured" : "Not configured"}</span>
               <span style={{ color:"var(--text3)" }}>Last token refresh</span><span style={{ color:"var(--text2)", textAlign:"right" }}>{when(data.twitch_chat_token?.last_success_at)}</span>
             </div>
-            <div style={{ color:"var(--text3)", fontSize:10, marginTop:9, fontFamily:"'JetBrains Mono',monospace" }}>Expected = two per tracked streamer: one online and one offline subscription.</div>
+            <div style={{ color:"var(--text3)", fontSize:10, marginTop:9, fontFamily:"'JetBrains Mono',monospace" }}>Expected = two per unique Twitch broadcaster: one online and one offline subscription.</div>
             {data.eventsub?.last_error && <div style={{ color:"var(--red)", fontSize:11, marginTop:10, fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-word" }}>{data.eventsub.last_error}</div>}
             {data.twitch_chat_token?.last_error && <div style={{ color:"var(--red)", fontSize:11, marginTop:10, fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-word" }}>{data.twitch_chat_token.last_error}</div>}
           </div>
