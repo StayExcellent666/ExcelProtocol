@@ -1932,6 +1932,35 @@ async def twitch_broadcaster_login(request):
     })
     raise web.HTTPFound(f"https://id.twitch.tv/oauth2/authorize?{params}")
 
+
+async def twitch_bot_login(request):
+    """Start owner-only OAuth for the Twitch chat bot account."""
+    session = get_session(request)
+    if not session:
+        raise web.HTTPFound("/auth/login")
+    if not session.get("dev"):
+        raise web.HTTPForbidden(reason="Bot owner access required")
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        raise web.HTTPInternalServerError(reason="Twitch application credentials are not configured")
+
+    state = secrets.token_hex(16)
+    _twitch_oauth_states[state] = {
+        "purpose": "chat_bot",
+        "session_token": request.cookies.get("ep_session", ""),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+    }
+
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        "client_id": TWITCH_CLIENT_ID,
+        "redirect_uri": TWITCH_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "chat:read chat:edit",
+        "state": state,
+        "force_verify": "true",
+    })
+    raise web.HTTPFound(f"https://id.twitch.tv/oauth2/authorize?{params}")
+
 async def twitch_broadcaster_callback(request):
     """Handle Twitch OAuth callback — exchange code for tokens."""
     code  = request.rel_url.query.get("code")
@@ -1956,10 +1985,15 @@ async def twitch_broadcaster_callback(request):
     if state_data["session_token"] != session_token:
         raise web.HTTPForbidden(reason="Session mismatch — please log in again and retry")
 
+    session = _sessions.get(session_token, {})
+    if state_data.get("purpose") == "chat_bot":
+        if not session.get("dev"):
+            raise web.HTTPForbidden(reason="Bot owner access required")
+        return await _complete_twitch_bot_oauth(code)
+
     guild_id = state_data["guild_id"]
 
     # Verify the session still has access to this guild
-    session = _sessions.get(session_token, {})
     if not _session_can_access_guild(session, guild_id):
         raise web.HTTPForbidden(reason="You no longer have access to this guild")
 
@@ -2023,6 +2057,62 @@ async def twitch_broadcaster_callback(request):
     await _register_eventsub(user["id"])
 
     raise web.HTTPFound(f"/app/?twitch_connected=1")
+
+
+async def _complete_twitch_bot_oauth(code: str):
+    """Exchange and persist an owner-authorized Twitch chat credential pair."""
+    sess = get_http_session()
+    async with sess.post("https://id.twitch.tv/oauth2/token", data={
+        "client_id": TWITCH_CLIENT_ID,
+        "client_secret": TWITCH_CLIENT_SECRET,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": TWITCH_REDIRECT_URI,
+    }) as resp:
+        token_data = await resp.json(content_type=None)
+        if resp.status != 200:
+            message = token_data.get("message", "token exchange failed") if isinstance(token_data, dict) else "token exchange failed"
+            logger.warning("Twitch chat bot OAuth exchange failed: HTTP %s: %s", resp.status, message)
+            raise web.HTTPBadGateway(reason=f"Twitch authorization failed: {message}")
+
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    scopes = set(token_data.get("scope") or [])
+    if not access_token or not refresh_token:
+        raise web.HTTPBadGateway(reason="Twitch did not return a renewable token pair")
+    if not {"chat:read", "chat:edit"}.issubset(scopes):
+        raise web.HTTPBadRequest(reason="Twitch authorization is missing chat:read or chat:edit")
+
+    async with sess.get(
+        f"{TWITCH_API}/users",
+        headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}"},
+    ) as user_resp:
+        user_data = await user_resp.json(content_type=None)
+        user = user_data.get("data", [None])[0] if isinstance(user_data, dict) and user_data.get("data") else None
+    if not user:
+        raise web.HTTPBadGateway(reason="Twitch did not return the authorized account")
+
+    expected_login = os.getenv("TWITCH_BOT_USERNAME", "").strip().lower()
+    actual_login = str(user.get("login", "")).lower()
+    if expected_login and actual_login != expected_login:
+        raise web.HTTPBadRequest(
+            reason=f"Authorized @{actual_login}, but the configured bot account is @{expected_login}"
+        )
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="The bot is not ready; please try again")
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None, lambda: _bot_ref.db.set_twitch_bot_credentials(access_token, refresh_token)
+    )
+    _bot_ref._twitch_bot_token = access_token
+    _bot_ref._twitch_refresh_token = refresh_token
+    _bot_ref._twitch_token_last_success_at = datetime.now(timezone.utc)
+    _bot_ref._twitch_token_last_error = None
+    if getattr(_bot_ref, "twitch_chat_bot", None):
+        _bot_ref.twitch_chat_bot._connection._token = access_token
+    logger.info("Owner connected Twitch chat bot account @%s and persisted renewable credentials", actual_login)
+    raise web.HTTPFound("/app/?twitch_bot_connected=1")
 
 async def twitch_broadcaster_disconnect(request):
     """Remove stored broadcaster token for a guild."""
@@ -3119,6 +3209,8 @@ async def get_operations_health(request):
         },
         "eventsub": eventsub,
         "twitch_chat_token": {
+            "owner_can_connect": bool(request["session"].get("dev")),
+            "account": os.getenv("TWITCH_BOT_USERNAME", ""),
             "automatic_refresh_configured": bool(getattr(bot, "_twitch_refresh_token", None)),
             "last_success_at": _health_iso(getattr(bot, "_twitch_token_last_success_at", None)),
             "last_error": getattr(bot, "_twitch_token_last_error", None),
@@ -4100,6 +4192,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get ("/auth/callback", auth_callback)
     app.router.add_post("/auth/logout",   auth_logout)
     app.router.add_get("/auth/twitch/login/{guild_id}",  twitch_broadcaster_login)
+    app.router.add_get("/auth/twitch/bot/login",         twitch_bot_login)
     app.router.add_get("/auth/twitch/callback",          twitch_broadcaster_callback)
     app.router.add_delete("/api/guild/{guild_id}/broadcaster",              twitch_broadcaster_disconnect)
     app.router.add_get   ("/api/guild/{guild_id}/broadcaster",              get_broadcaster_info)

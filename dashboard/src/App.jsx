@@ -4327,13 +4327,17 @@ function HealthCheckTab() {
 
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:12, marginBottom:14 }}>
           <div style={{ ...C.card, padding:16 }}>
-            <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14, marginBottom:10 }}>Twitch Connectivity</div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:12, marginBottom:10 }}>
+              <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14 }}>Twitch Connectivity</div>
+              {data.twitch_chat_token?.owner_can_connect && <a href="/auth/twitch/bot/login" style={{ ...C.btnSecondary, textDecoration:"none", fontSize:10, padding:"7px 10px" }}>Connect Twitch Bot</a>}
+            </div>
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:12 }}>
               <span style={{ color:"var(--text3)" }}>Active / expected subscriptions</span><span style={{ color:"var(--cyan)", textAlign:"right" }}>{data.eventsub?.actual ?? "—"} / {data.eventsub?.expected ?? "—"}</span>
               <span style={{ color:"var(--text3)" }}>Last success</span><span style={{ color:"var(--text2)", textAlign:"right" }}>{when(data.eventsub?.last_success_at)}</span>
               <span style={{ color:"var(--text3)" }}>Registration failures</span><span style={{ color:data.eventsub?.failed ? "var(--red)" : "var(--green)", textAlign:"right" }}>{data.eventsub?.failed ?? 0}</span>
               <span style={{ color:"var(--text3)" }}>Unresolvable accounts</span><span style={{ color:data.eventsub?.unresolvable ? "var(--yellow)" : "var(--green)", textAlign:"right" }}>{data.eventsub?.unresolvable ?? 0}</span>
               <span style={{ color:"var(--text3)" }}>Chat token auto-refresh</span><span style={{ color:data.twitch_chat_token?.automatic_refresh_configured ? "var(--green)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat_token?.automatic_refresh_configured ? "Configured" : "Not configured"}</span>
+              <span style={{ color:"var(--text3)" }}>Bot account</span><span style={{ color:"var(--text2)", textAlign:"right" }}>@{data.twitch_chat_token?.account || "not configured"}</span>
               <span style={{ color:"var(--text3)" }}>Last token refresh</span><span style={{ color:"var(--text2)", textAlign:"right" }}>{when(data.twitch_chat_token?.last_success_at)}</span>
             </div>
             <div style={{ color:"var(--text3)", fontSize:10, marginTop:9, fontFamily:"'JetBrains Mono',monospace" }}>Expected = two per unique Twitch broadcaster: one online and one offline subscription.</div>
@@ -4445,6 +4449,10 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     if (params.get("twitch_connected")) {
       setActiveTab("rewards");
+      window.history.replaceState({}, "", "/app/");
+    }
+    if (params.get("twitch_bot_connected")) {
+      setActiveTab("healthcheck");
       window.history.replaceState({}, "", "/app/");
     }
     // Cookie is sent automatically — just try /api/me to check if logged in

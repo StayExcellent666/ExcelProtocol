@@ -172,6 +172,7 @@ class TestDevDashboardRoutes:
         assert ("DELETE", "/api/dev/leaderboard-blacklist/{streamer_name}") in routes
         assert ("GET", "/api/dev/stream-events") in routes
         assert ("GET", "/api/dev/health-check") in routes
+        assert ("GET", "/auth/twitch/bot/login") in routes
 
     def test_twitch_login_normalisation(self):
         assert dashboard_server._normalise_twitch_login(" @Some_Streamer ") == "some_streamer"
@@ -191,6 +192,13 @@ class TestDevDashboardRoutes:
         from aiohttp import web
         with pytest.raises(web.HTTPForbidden):
             dashboard_server._require_dev_or_admin({"session": {}})
+
+    @pytest.mark.asyncio
+    async def test_twitch_bot_login_is_owner_only(self, monkeypatch):
+        from aiohttp import web
+        monkeypatch.setattr(dashboard_server, "get_session", lambda request: {"admin": True})
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.twitch_bot_login({"cookies": {}})
 
     @pytest.mark.asyncio
     async def test_admin_global_stats_includes_all_leaderboards(self, monkeypatch):
