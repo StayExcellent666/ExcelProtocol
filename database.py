@@ -747,6 +747,18 @@ class Database:
             )
         ''')
 
+        # Latest rotated credentials for the Twitch chat bot. Fly secrets are
+        # the bootstrap/fallback values; rotations live on the persistent
+        # volume so the app never needs to mutate its own deployment config.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS twitch_bot_credentials (
+                id             INTEGER PRIMARY KEY CHECK (id = 1),
+                access_token   TEXT NOT NULL,
+                refresh_token  TEXT NOT NULL,
+                updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         # Track kicked guilds for 7-day grace period before data wipe
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS kicked_guilds (
@@ -756,6 +768,41 @@ class Database:
             )
         ''')
 
+        conn.commit()
+        conn.close()
+
+    def get_twitch_bot_credentials(self) -> Optional[Dict]:
+        """Return the most recently persisted Twitch chat credentials."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT access_token, refresh_token, updated_at
+            FROM twitch_bot_credentials WHERE id = 1
+        ''')
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            'access_token': row[0],
+            'refresh_token': row[1],
+            'updated_at': row[2],
+        }
+
+    def set_twitch_bot_credentials(self, access_token: str, refresh_token: str):
+        """Atomically persist a rotated Twitch chat credential pair."""
+        if not access_token or not refresh_token:
+            raise ValueError("Both Twitch bot tokens are required")
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO twitch_bot_credentials (id, access_token, refresh_token, updated_at)
+            VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                access_token = excluded.access_token,
+                refresh_token = excluded.refresh_token,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (access_token, refresh_token))
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")

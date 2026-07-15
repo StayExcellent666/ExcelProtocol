@@ -2901,10 +2901,8 @@ async def get_global_stats(request):
     """Owner/admin overview and global leaderboards across all servers."""
     _require_dev_or_admin(request)
 
-    servers        = await db_fetch("SELECT COUNT(DISTINCT guild_id) AS c FROM server_settings")
     streamer_rows  = await db_fetch("SELECT COUNT(*) AS c FROM monitored_streamers")
     unique_str     = await db_fetch("SELECT COUNT(DISTINCT streamer_name) AS c FROM monitored_streamers")
-    notif_msgs     = await db_fetch("SELECT COUNT(*) AS c FROM notification_messages")
     last_24h       = await db_fetch("""
         SELECT COUNT(*) AS c FROM notification_log
         WHERE sent_at >= datetime('now', '-24 hours') AND status = 'sent'
@@ -2933,15 +2931,6 @@ async def get_global_stats(request):
     live_count = len(_bot_ref.live_streamers) if _bot_ref else 0
     live_list  = sorted(_bot_ref.live_streamers) if _bot_ref else []
 
-    # EventSub subscription count
-    eventsub_count = 0
-    try:
-        if _bot_ref:
-            subs = await _bot_ref.twitch.get_subscriptions()
-            eventsub_count = len([s for s in subs if s.get("type") in ("stream.online", "stream.offline")])
-    except Exception:
-        pass
-
     # Use the exact same query path as /globalleaderboard so Discord and the
     # dashboard cannot disagree about rankings or blacklist behaviour.
     leaderboards = {"consistency": [], "hours": [], "longest": []}
@@ -2955,14 +2944,11 @@ async def get_global_stats(request):
             logger.warning(f"Could not load global leaderboards: {e}")
 
     return web.json_response({
-        "total_servers":       servers[0]["c"] if servers else 0,
         "total_streamer_rows": streamer_rows[0]["c"] if streamer_rows else 0,
         "unique_streamers":    unique_str[0]["c"] if unique_str else 0,
-        "active_notifications": notif_msgs[0]["c"] if notif_msgs else 0,
         "notifications_24h":   last_24h[0]["c"] if last_24h else 0,
         "live_count":          live_count,
         "live_streamers":      live_list,
-        "eventsub_count":      eventsub_count,
         "top_streamers":       top_streamers,
         "servers_by_count":    enriched_servers,
         "global_leaderboard_consistency": leaderboards["consistency"],
@@ -3023,7 +3009,7 @@ async def get_operations_health(request):
             "signals": ["Bot instance is unavailable to the dashboard."],
         })
 
-    task_defs = (
+    task_defs = [
         ("check_streams", "EventSub subscription sync"),
         ("check_milestones", "Stream milestone checks"),
         ("cleanup_channels", "Channel cleanup"),
@@ -3035,7 +3021,9 @@ async def get_operations_health(request):
         ("update_stat_channels", "Stats channel updates"),
         ("check_streamer_renames", "Streamer rename checks"),
         ("cleanup_kicked_guilds", "Kicked-server data cleanup"),
-    )
+    ]
+    if getattr(bot, "_twitch_refresh_token", None):
+        task_defs.append(("refresh_twitch_bot_token", "Twitch chat token refresh"))
     tasks_health = [_task_loop_health(bot, name, label) for name, label in task_defs]
 
     permission_rows = await db_fetch("SELECT COUNT(*) AS c FROM permission_issues")
@@ -3045,10 +3033,12 @@ async def get_operations_health(request):
     """)
     tracked_rows = await db_fetch("SELECT COUNT(*) AS c FROM monitored_streamers")
     unique_rows = await db_fetch("SELECT COUNT(DISTINCT streamer_name) AS c FROM monitored_streamers")
-    open_events = await db_fetch("""
-        SELECT COUNT(*) AS c FROM global_stream_events
-        WHERE ended_at IS NULL
-    """)
+    tracked_live_rows = await db_fetch(
+        "SELECT COUNT(DISTINCT streamer_name) AS c FROM notification_messages"
+    )
+    active_notification_rows = await db_fetch(
+        "SELECT COUNT(*) AS c FROM notification_messages"
+    )
 
     now = datetime.now(timezone.utc)
     start_time = getattr(bot, "start_time", now)
@@ -3069,7 +3059,7 @@ async def get_operations_health(request):
 
     permission_count = permission_rows[0]["c"] if permission_rows else 0
     notification_failure_count = failed_notifications[0]["c"] if failed_notifications else 0
-    open_event_count = open_events[0]["c"] if open_events else 0
+    tracked_live_count = tracked_live_rows[0]["c"] if tracked_live_rows else 0
     live_memory_count = len(getattr(bot, "live_streamers", set()))
     eventsub_stats = dict(getattr(bot, "_eventsub_sync_stats", {}) or {})
     if permission_count:
@@ -3080,18 +3070,23 @@ async def get_operations_health(request):
         signals.append("The most recent EventSub sync failed.")
     if getattr(bot, "_last_reconcile_error", None):
         signals.append("The most recent startup reconciliation failed.")
-    if open_event_count != live_memory_count:
+    if getattr(bot, "_twitch_token_last_error", None):
+        signals.append("The most recent Twitch chat token refresh failed.")
+    if tracked_live_count != live_memory_count:
         signals.append(
             f"Live-state mismatch: {live_memory_count} in memory, "
-            f"{open_event_count} open database event row(s)."
+            f"{tracked_live_count} tracked in the database."
         )
     eventsub_missing = max(0, int(eventsub_stats.get("expected", 0)) - int(eventsub_stats.get("actual", 0)))
+    eventsub_excess = max(0, int(eventsub_stats.get("actual", 0)) - int(eventsub_stats.get("expected", 0)))
     if eventsub_missing:
         signals.append(f"{eventsub_missing} expected EventSub subscription(s) are missing.")
+    if eventsub_excess:
+        signals.append(f"{eventsub_excess} obsolete or excess EventSub subscription(s) remain.")
 
     if not bot.is_ready() or failed:
         status = "critical"
-    elif stopped or permission_count or notification_failure_count or getattr(bot, "_eventsub_last_error", None) or getattr(bot, "_last_reconcile_error", None) or open_event_count != live_memory_count or eventsub_missing:
+    elif stopped or permission_count or notification_failure_count or getattr(bot, "_eventsub_last_error", None) or getattr(bot, "_last_reconcile_error", None) or getattr(bot, "_twitch_token_last_error", None) or tracked_live_count != live_memory_count or eventsub_missing or eventsub_excess:
         status = "warning"
     else:
         status = "healthy"
@@ -3118,10 +3113,16 @@ async def get_operations_health(request):
             "tracked_rows": tracked_rows[0]["c"] if tracked_rows else 0,
             "unique_streamers": unique_rows[0]["c"] if unique_rows else 0,
             "live_in_memory": live_memory_count,
-            "open_event_rows": open_event_count,
+            "tracked_live_rows": tracked_live_count,
+            "active_notification_ids": active_notification_rows[0]["c"] if active_notification_rows else 0,
             "recent_orphan_closures": list(getattr(bot, "_recent_orphan_closures", [])[-20:]),
         },
         "eventsub": eventsub,
+        "twitch_chat_token": {
+            "automatic_refresh_configured": bool(getattr(bot, "_twitch_refresh_token", None)),
+            "last_success_at": _health_iso(getattr(bot, "_twitch_token_last_success_at", None)),
+            "last_error": getattr(bot, "_twitch_token_last_error", None),
+        },
         "reconciliation": {
             "last_completed_at": _health_iso(getattr(bot, "_last_reconcile_at", None)),
             "last_error": getattr(bot, "_last_reconcile_error", None),

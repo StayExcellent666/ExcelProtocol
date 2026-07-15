@@ -3114,13 +3114,9 @@ function GlobalStatsTab() {
     <div>
       <PageHeader title="Global Stats" subtitle="Live overview across all servers" />
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12, marginBottom:20 }}>
-        <StatCard title="Servers" value={stats?.total_servers} />
         <StatCard title="Streamer Rows" value={stats?.total_streamer_rows} />
         <StatCard title="Unique Streamers" value={stats?.unique_streamers} />
-        <StatCard title="Active Notif IDs" value={stats?.active_notifications} />
         <StatCard title="Notifs (24h)" value={stats?.notifications_24h} color="var(--green)" />
-        <StatCard title="Currently Live" value={stats?.live_count} color="var(--green)" />
-        <StatCard title="EventSub Subs" value={stats?.eventsub_count} color="var(--yellow)" />
       </div>
 
       {stats?.live_streamers?.length > 0 && (
@@ -4325,21 +4321,24 @@ function HealthCheckTab() {
           {metric("Uptime", duration(data.bot?.uptime_seconds), "var(--green)")}
           {metric("Discord latency", `${data.bot?.latency_ms ?? 0} ms`, data.bot?.ready ? "var(--green)" : "var(--red)")}
           {metric("Servers", data.bot?.guild_count ?? 0)}
-          {metric("Live streamers", data.streaming?.live_in_memory ?? 0)}
-          {metric("Tracked streamers", data.streaming?.unique_streamers ?? 0)}
+          {metric("Active notif IDs", data.streaming?.active_notification_ids ?? 0)}
           {metric("Permission issues", data.database?.permission_issues ?? 0, data.database?.permission_issues ? "var(--yellow)" : "var(--green)")}
         </div>
 
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:12, marginBottom:14 }}>
           <div style={{ ...C.card, padding:16 }}>
-            <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14, marginBottom:10 }}>Twitch EventSub</div>
+            <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14, marginBottom:10 }}>Twitch Connectivity</div>
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:12 }}>
-              <span style={{ color:"var(--text3)" }}>Subscriptions</span><span style={{ color:"var(--cyan)", textAlign:"right" }}>{data.eventsub?.actual ?? "—"} / {data.eventsub?.expected ?? "—"}</span>
+              <span style={{ color:"var(--text3)" }}>Active / expected subscriptions</span><span style={{ color:"var(--cyan)", textAlign:"right" }}>{data.eventsub?.actual ?? "—"} / {data.eventsub?.expected ?? "—"}</span>
               <span style={{ color:"var(--text3)" }}>Last success</span><span style={{ color:"var(--text2)", textAlign:"right" }}>{when(data.eventsub?.last_success_at)}</span>
               <span style={{ color:"var(--text3)" }}>Registration failures</span><span style={{ color:data.eventsub?.failed ? "var(--red)" : "var(--green)", textAlign:"right" }}>{data.eventsub?.failed ?? 0}</span>
               <span style={{ color:"var(--text3)" }}>Unresolvable accounts</span><span style={{ color:data.eventsub?.unresolvable ? "var(--yellow)" : "var(--green)", textAlign:"right" }}>{data.eventsub?.unresolvable ?? 0}</span>
+              <span style={{ color:"var(--text3)" }}>Chat token auto-refresh</span><span style={{ color:data.twitch_chat_token?.automatic_refresh_configured ? "var(--green)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat_token?.automatic_refresh_configured ? "Configured" : "Not configured"}</span>
+              <span style={{ color:"var(--text3)" }}>Last token refresh</span><span style={{ color:"var(--text2)", textAlign:"right" }}>{when(data.twitch_chat_token?.last_success_at)}</span>
             </div>
+            <div style={{ color:"var(--text3)", fontSize:10, marginTop:9, fontFamily:"'JetBrains Mono',monospace" }}>Expected = two per tracked streamer: one online and one offline subscription.</div>
             {data.eventsub?.last_error && <div style={{ color:"var(--red)", fontSize:11, marginTop:10, fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-word" }}>{data.eventsub.last_error}</div>}
+            {data.twitch_chat_token?.last_error && <div style={{ color:"var(--red)", fontSize:11, marginTop:10, fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-word" }}>{data.twitch_chat_token.last_error}</div>}
           </div>
           <div style={{ ...C.card, padding:16 }}>
             <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14, marginBottom:10 }}>Startup Reconciliation</div>

@@ -273,10 +273,10 @@ class TestDevDashboardRoutes:
         async def fake_db_fetch(query, params=()):
             if "permission_issues" in query or "status != 'sent'" in query:
                 return [{"c": 0}]
+            if "notification_messages" in query:
+                return [{"c": 1}]
             if "COUNT(DISTINCT streamer_name)" in query:
                 return [{"c": 2}]
-            if "global_stream_events" in query:
-                return [{"c": 1}]
             return [{"c": 3}]
 
         monkeypatch.setattr(dashboard_server, "_bot_ref", FakeBot())
@@ -296,3 +296,109 @@ class TestDevDashboardRoutes:
         from aiohttp import web
         with pytest.raises(web.HTTPForbidden):
             await dashboard_server.get_operations_health({"session": {}})
+
+
+class TestOperationalSafetyRegressions:
+    def test_health_poll_waits_for_reconciliation_event(self):
+        import inspect
+        import bot
+        source = inspect.getsource(bot.TwitchNotifierBot.before_poll_live_streamers_health)
+        assert "_reconciliation_complete.wait()" in source
+        assert "asyncio.sleep(60)" not in source
+
+    def test_token_refresh_never_invokes_fly_cli(self):
+        import inspect
+        import bot
+        source = inspect.getsource(bot.TwitchNotifierBot._refresh_twitch_chat_credentials)
+        assert "set_twitch_bot_credentials" in source
+        assert "create_subprocess_exec" not in source
+        assert "secrets set" not in source.lower()
+
+    @pytest.mark.asyncio
+    async def test_token_refresh_persists_rotated_pair_and_updates_connection(self, monkeypatch):
+        import aiohttp
+        import bot
+
+        class FakeResponse:
+            status = 200
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            async def json(self):
+                return {"access_token": "new-access", "refresh_token": "new-refresh"}
+
+        class FakeSession:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return False
+            def post(self, *args, **kwargs): return FakeResponse()
+
+        class FakeDb:
+            saved = None
+            def set_twitch_bot_credentials(self, access, refresh):
+                self.saved = (access, refresh)
+
+        class FakeConnection:
+            _token = "old-access"
+
+        class FakeChatBot:
+            _connection = FakeConnection()
+
+        class FakeSelf:
+            _twitch_refresh_token = "old-refresh"
+            _twitch_bot_token = "old-access"
+            _twitch_token_last_success_at = None
+            _twitch_token_last_error = "previous error"
+            twitch_chat_bot = FakeChatBot()
+            db = FakeDb()
+
+        monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+        fake = FakeSelf()
+        await bot.TwitchNotifierBot._refresh_twitch_chat_credentials(fake)
+
+        assert fake.db.saved == ("new-access", "new-refresh")
+        assert fake._twitch_bot_token == "new-access"
+        assert fake._twitch_refresh_token == "new-refresh"
+        assert fake.twitch_chat_bot._connection._token == "new-access"
+        assert fake._twitch_token_last_error is None
+
+    @pytest.mark.asyncio
+    async def test_eventsub_sync_prunes_only_unmonitored_stream_subscriptions(self):
+        import bot
+
+        subscriptions = [
+            {"id": "keep-online", "type": "stream.online", "condition": {"broadcaster_user_id": "1"}},
+            {"id": "keep-offline", "type": "stream.offline", "condition": {"broadcaster_user_id": "1"}},
+            {"id": "old-online", "type": "stream.online", "condition": {"broadcaster_user_id": "2"}},
+            {"id": "old-offline", "type": "stream.offline", "condition": {"broadcaster_user_id": "2"}},
+            {"id": "keep-reward", "type": "channel.channel_points_custom_reward_redemption.add", "condition": {"broadcaster_user_id": "2"}},
+        ]
+
+        class FakeDb:
+            def get_all_streamers(self):
+                return [{"streamer_name": "alice", "guild_id": 10, "twitch_user_id": "1"}]
+            def clear_unresolvable_streamers(self): pass
+
+        class FakeTwitch:
+            deleted = []
+            async def get_subscriptions(self): return list(subscriptions)
+            async def delete_subscription(self, sub_id):
+                self.deleted.append(sub_id)
+                return True
+            async def register_stream_subscription(self, *args):
+                raise AssertionError("existing monitored subscriptions should be retained")
+
+        class FakeBot:
+            db = FakeDb()
+            twitch = FakeTwitch()
+            _last_pruned_subscriptions = 0
+            _eventsub_sync_stats = {}
+            def get_guild(self, guild_id): return None
+            async def _eventsub_config(self): return ("https://example.test/callback", "secret")
+
+        fake = FakeBot()
+        await bot.TwitchNotifierBot._TwitchNotifierBot__do_eventsub_sync(fake, alert_on_mismatch=False)
+
+        assert set(fake.twitch.deleted) == {"old-online", "old-offline"}
+        assert "keep-reward" not in fake.twitch.deleted
+        assert fake._last_pruned_subscriptions == 2
+        assert fake._eventsub_sync_stats["actual"] == 2
+        assert fake._eventsub_sync_stats["expected"] == 2

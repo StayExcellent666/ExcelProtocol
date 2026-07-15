@@ -74,6 +74,15 @@ class TwitchNotifierBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.db = Database()
         self.twitch = TwitchAPI()
+
+        # Fly secrets bootstrap the chat bot. Rotated credentials are loaded
+        # from the persistent SQLite volume so refreshes survive deployments
+        # without the app changing its own Fly configuration.
+        stored_twitch_credentials = self.db.get_twitch_bot_credentials() or {}
+        self._twitch_bot_token = stored_twitch_credentials.get('access_token') or TWITCH_BOT_TOKEN
+        self._twitch_refresh_token = stored_twitch_credentials.get('refresh_token') or TWITCH_REFRESH_TOKEN
+        self._twitch_token_last_success_at = None
+        self._twitch_token_last_error = None
         
         # Track which streamers are currently live to avoid duplicate notifications
         self.live_streamers = set()
@@ -109,6 +118,7 @@ class TwitchNotifierBot(discord.Client):
         self._last_reconcile_at = None
         self._last_reconcile_error = None
         self._task_health: dict[str, dict] = {}
+        self._reconciliation_complete = asyncio.Event()
 
         # In-memory progress store for the Set Up Server wizard. Keyed by
         # setup_id (uuid string); value is a dict with `status` ('pending' |
@@ -128,12 +138,69 @@ class TwitchNotifierBot(discord.Client):
         self.error_alerts_sent = {}  # {error_key: timestamp}
         self.alert_cooldown = 3600  # Don't spam same error within 1 hour
     
+    async def _refresh_twitch_chat_credentials(self):
+        """Refresh and persist Twitch chat credentials without touching Fly."""
+        from config import TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
+        import aiohttp
+
+        # The database value is normally newest. The environment value remains
+        # a recovery path if an owner manually replaces a broken token.
+        candidates = []
+        for token in (self._twitch_refresh_token, TWITCH_REFRESH_TOKEN):
+            if token and token not in candidates:
+                candidates.append(token)
+        if not candidates:
+            raise RuntimeError("TWITCH_REFRESH_TOKEN is not configured")
+
+        failures = []
+        data = None
+        async with aiohttp.ClientSession() as session:
+            for refresh_token in candidates:
+                async with session.post(
+                    "https://id.twitch.tv/oauth2/token",
+                    params={
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token,
+                        "client_id": TWITCH_CLIENT_ID,
+                        "client_secret": TWITCH_CLIENT_SECRET,
+                    },
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        break
+                    failures.append(f"HTTP {resp.status}")
+
+        if not data:
+            raise RuntimeError(f"Twitch token refresh failed ({', '.join(failures)})")
+        new_token = data.get("access_token")
+        new_refresh = data.get("refresh_token")
+        if not new_token or not new_refresh:
+            raise RuntimeError("Twitch token refresh response was missing credentials")
+
+        # Persist the pair before publishing it to the running client. Twitch
+        # refresh tokens rotate, so the two values must always move together.
+        self.db.set_twitch_bot_credentials(new_token, new_refresh)
+        self._twitch_bot_token = new_token
+        self._twitch_refresh_token = new_refresh
+        if self.twitch_chat_bot:
+            self.twitch_chat_bot._connection._token = new_token
+        self._twitch_token_last_success_at = utcnow()
+        self._twitch_token_last_error = None
+        logger.info("Twitch bot token refreshed and persisted successfully")
+
     async def setup_hook(self):
         """Called when bot is starting up"""
         # Load Twitch chat bot — wrapped in try/except so any failure here
         # never takes down the Discord bot
         self.twitch_chat_bot = None
-        if TWITCH_BOT_USERNAME and TWITCH_BOT_TOKEN:
+        if TWITCH_BOT_USERNAME and self._twitch_refresh_token:
+            try:
+                await self._refresh_twitch_chat_credentials()
+            except Exception as e:
+                self._twitch_token_last_error = f"{type(e).__name__}: {str(e)[:300]}"
+                logger.error(f"Twitch bot startup token refresh failed: {e}")
+
+        if TWITCH_BOT_USERNAME and self._twitch_bot_token:
             try:
                 from twitch_bot import TwitchChatBot
                 import twitch_chat_cog
@@ -148,7 +215,7 @@ class TwitchNotifierBot(discord.Client):
                 else:
                     bot_id = bot_user['id']
                     self.twitch_chat_bot = TwitchChatBot(
-                        token=TWITCH_BOT_TOKEN,
+                        token=self._twitch_bot_token,
                         initial_channels=registered_channels,
                         db=self.db,
                         twitch_api=self.twitch
@@ -349,7 +416,7 @@ class TwitchNotifierBot(discord.Client):
             logger.info("Kicked guild cleanup loop started")
 
         # Start Twitch bot token refresh (if refresh token available)
-        if TWITCH_REFRESH_TOKEN and not self.refresh_twitch_bot_token.is_running():
+        if self._twitch_refresh_token and not self.refresh_twitch_bot_token.is_running():
             self.refresh_twitch_bot_token.start()
             logger.info("Twitch bot token refresh loop started")
 
@@ -357,6 +424,7 @@ class TwitchNotifierBot(discord.Client):
         # The "Bot Started" log message is deferred to fire from
         # _initial_eventsub_sync after reconciliation, so the message can include
         # accurate live-count / EventSub-subscription-count stats.
+        self._reconciliation_complete.clear()
         asyncio.create_task(self._initial_eventsub_sync())
     
     async def _register_eventsub_for_user(self, user_id: str, user_login: str):
@@ -416,6 +484,11 @@ class TwitchNotifierBot(discord.Client):
                 f"`{type(e).__name__}: {str(e)[:300]}`",
                 color=0xFF6B35
             )
+        finally:
+            # The safety poll must not snapshot live state until reconciliation
+            # has finished (successfully or otherwise). Always release it so a
+            # Twitch API failure cannot block health checks forever.
+            self._reconciliation_complete.set()
 
         # Post the enriched Bot Started message with the full operational picture.
         try:
@@ -1518,6 +1591,8 @@ class TwitchNotifierBot(discord.Client):
         unique_logins = list({s['streamer_name'].lower() for s in streamers})
         logins_with_id    = {l for l in unique_logins if l in login_to_stored_id}
         logins_without_id = [l for l in unique_logins if l not in login_to_stored_id]
+        monitored_user_ids = {str(login_to_stored_id[l]) for l in logins_with_id}
+        resolution_complete = True
 
         # Clear stale unresolvable records — will repopulate fresh below
         self.db.clear_unresolvable_streamers()
@@ -1573,8 +1648,6 @@ class TwitchNotifierBot(discord.Client):
             )
             # Re-fetch the now-canonical subscription list
             existing = await self.twitch.get_subscriptions()
-        self._last_pruned_subscriptions = pruned_count
-
         existing_keys = set()
         for sub in existing:
             if sub.get("type") in ("stream.online", "stream.offline"):
@@ -1620,11 +1693,13 @@ class TwitchNotifierBot(discord.Client):
                 ) as resp:
                     if resp.status != 200:
                         logger.warning(f"Failed to resolve user IDs for EventSub batch: {resp.status}")
+                        resolution_complete = False
                         continue
                     data = await resp.json()
                     users = data.get("data", [])
             except Exception as e:
                 logger.error(f"Error resolving user IDs for EventSub: {e}")
+                resolution_complete = False
                 continue
 
             resolved_logins = {u["login"].lower() for u in users}
@@ -1640,10 +1715,42 @@ class TwitchNotifierBot(discord.Client):
             for user in users:
                 uid = user["id"]
                 login = user["login"].lower()
+                monitored_user_ids.add(str(uid))
                 # Backfill the stored ID for all guilds monitoring this streamer
                 for gid in login_guild_ids.get(login, []):
                     self.db.update_streamer_user_id(gid, login, uid)
                 await _register_if_needed(uid, login)
+
+        # Remove stream subscriptions for broadcasters that are no longer
+        # monitored. Reward subscriptions use different event types and are
+        # deliberately untouched. Only prune after every missing login was
+        # resolved successfully; a partial Helix failure must never delete a
+        # valid subscription.
+        obsolete_pruned = 0
+        if resolution_complete:
+            retained = []
+            for sub in existing:
+                event_type = sub.get("type")
+                uid = str(sub.get("condition", {}).get("broadcaster_user_id", ""))
+                if event_type in ("stream.online", "stream.offline") and uid and uid not in monitored_user_ids:
+                    try:
+                        if await self.twitch.delete_subscription(sub["id"]):
+                            obsolete_pruned += 1
+                            continue
+                        logger.warning(f"Failed to delete obsolete EventSub sub {sub['id']}")
+                    except Exception as e:
+                        logger.error(f"Error deleting obsolete EventSub sub {sub.get('id')}: {e}")
+                retained.append(sub)
+            existing = retained
+            if obsolete_pruned:
+                logger.warning(
+                    f"Pruned {obsolete_pruned} obsolete stream EventSub subscription(s) "
+                    f"for broadcasters no longer monitored"
+                )
+        else:
+            logger.warning("Skipped obsolete EventSub pruning because user-ID resolution was incomplete")
+
+        self._last_pruned_subscriptions = pruned_count + obsolete_pruned
 
         if registered or failed:
             logger.info(f"EventSub sync: registered {registered} new, {failed} failed, {len(unresolvable)} unresolvable")
@@ -1691,6 +1798,7 @@ class TwitchNotifierBot(discord.Client):
             "failed": failed,
             "unresolvable": len(unresolvable),
             "pruned": pruned_count,
+            "obsolete_pruned": obsolete_pruned,
         }
 
     async def _assign_live_role(self, guild_id: int, streamer_name: str, add: bool):
@@ -2063,55 +2171,18 @@ class TwitchNotifierBot(discord.Client):
     async def refresh_twitch_bot_token(self):
         """Refresh the Twitch chat bot OAuth token daily using the refresh token."""
         try:
-            from config import TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
-            import aiohttp, os
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://id.twitch.tv/oauth2/token",
-                    params={
-                        "grant_type":    "refresh_token",
-                        "refresh_token": TWITCH_REFRESH_TOKEN,
-                        "client_id":     TWITCH_CLIENT_ID,
-                        "client_secret": TWITCH_CLIENT_SECRET,
-                    }
-                ) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        logger.error(f"Twitch token refresh failed: {resp.status} {text}")
-                        return
-                    data = await resp.json()
-
-            new_token = data.get("access_token")
-            new_refresh = data.get("refresh_token")
-            if not new_token:
-                logger.error("Twitch token refresh: no access_token in response")
-                return
-
-            # Update the running chat bot's token
-            if self.twitch_chat_bot:
-                self.twitch_chat_bot._connection.token = new_token
-                logger.info("Twitch bot token refreshed successfully")
-
-            # Update Fly secret so it persists across restarts
-            if new_refresh:
-                proc = await asyncio.create_subprocess_exec(
-                    "fly", "secrets", "set",
-                    f"TWITCH_BOT_TOKEN={new_token}",
-                    f"TWITCH_REFRESH_TOKEN={new_refresh}",
-                    "-a", "excelprotocol",
-                    "--stage",  # stage only, don't trigger a redeploy
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                await proc.communicate()
-                logger.info("Fly secrets updated with new Twitch tokens")
-
+            await self._refresh_twitch_chat_credentials()
         except Exception as e:
+            self._twitch_token_last_error = f"{type(e).__name__}: {str(e)[:300]}"
             logger.error(f"Twitch token refresh error: {e}", exc_info=True)
 
     @refresh_twitch_bot_token.before_loop
     async def before_refresh_twitch_bot_token(self):
         await self.wait_until_ready()
+        # setup_hook already refreshes before Twitch chat connects. Schedule
+        # the recurring refresh for a day later instead of rotating twice at
+        # every startup.
+        await asyncio.sleep(24 * 60 * 60)
 
     async def alert_permission_issue(self, guild: discord.Guild, channel_id: int, issue: str):
         """DM the guild owner and bot owner when a permission issue is detected."""
@@ -2618,8 +2689,7 @@ class TwitchNotifierBot(discord.Client):
     @poll_live_streamers_health.before_loop
     async def before_poll_live_streamers_health(self):
         await self.wait_until_ready()
-        # Wait an extra minute after startup so reconciliation finishes first
-        await asyncio.sleep(60)
+        await self._reconciliation_complete.wait()
 
     @tasks.loop(seconds=20)
     @health_tracked("rotate_status")

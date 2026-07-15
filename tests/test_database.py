@@ -1230,3 +1230,24 @@ class TestLeaderboardBlacklist:
         rows = db.get_global_leaderboard(sort_by='longest')
         names = [r["streamer_name"] for r in rows]
         assert "alice" not in names
+
+
+class TestTwitchBotCredentials:
+    def test_credentials_are_empty_initially(self, db):
+        assert db.get_twitch_bot_credentials() is None
+
+    def test_credentials_persist_and_rotate_as_a_pair(self, db):
+        db.set_twitch_bot_credentials("access-one", "refresh-one")
+        first = db.get_twitch_bot_credentials()
+        assert first["access_token"] == "access-one"
+        assert first["refresh_token"] == "refresh-one"
+
+        db.set_twitch_bot_credentials("access-two", "refresh-two")
+        second = db.get_twitch_bot_credentials()
+        assert second["access_token"] == "access-two"
+        assert second["refresh_token"] == "refresh-two"
+
+    def test_incomplete_credential_pair_is_rejected(self, db):
+        import pytest
+        with pytest.raises(ValueError):
+            db.set_twitch_bot_credentials("access-only", "")

@@ -435,8 +435,11 @@ class TwitchAPI:
                     params=params
                 ) as resp:
                     if resp.status != 200:
-                        logger.warning(f"get_streams_by_logins batch failed: HTTP {resp.status}")
-                        continue
+                        # An incomplete response must never be interpreted as
+                        # "all offline" by reconciliation or the health poll.
+                        raise RuntimeError(
+                            f"get_streams_by_logins batch failed: HTTP {resp.status}"
+                        )
                     data = await resp.json()
                     for stream in data.get("data", []):
                         login = stream.get("user_login", "").lower()
@@ -444,7 +447,7 @@ class TwitchAPI:
                             result[login] = stream
             except Exception as e:
                 logger.error(f"Error fetching stream batch: {e}")
-                continue
+                raise
 
         # Enrich each live stream with profile image (best-effort, one batch call)
         if result:
