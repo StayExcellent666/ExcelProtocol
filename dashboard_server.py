@@ -3471,7 +3471,8 @@ async def landing_page(request):
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ExcelProtocol — Twitch Stream Notifications for Discord</title>
+  <title>ExcelProtocol — Discord &amp; Twitch Community Bot</title>
+  <meta name="description" content="Connect your Discord and Twitch communities with instant live alerts, roles, moderation, voice rooms, creator tools, statistics, and an easy web dashboard.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800;900&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
@@ -3729,6 +3730,21 @@ async def landing_page(request):
       height:1px; background:linear-gradient(to right, transparent, var(--border), transparent);
       max-width:1100px; margin:0 auto;
     }
+
+    @media (max-width:700px) {
+      nav { padding:0 18px; }
+      .nav-logo { font-size:14px; gap:8px; }
+      .nav-logo img { width:28px; height:28px; }
+      .nav-links { gap:0; }
+      .nav-link { display:none; }
+      .nav-btn { padding:7px 13px; font-size:12px; }
+      .hero { padding-left:20px; padding-right:20px; }
+      .hero-badge { max-width:100%; text-align:center; line-height:1.5; }
+      .cta-section { padding:72px 18px; }
+      .cta-inner { padding:48px 22px; }
+      footer { padding:28px 20px; justify-content:center; text-align:center; }
+      .footer-links { justify-content:center; width:100%; }
+    }
   </style>
 </head>
 <body>
@@ -3754,12 +3770,12 @@ async def landing_page(request):
 <section class="hero">
   <div class="hero-badge">
     <div class="pulse-dot"></div>
-    Powered by Twitch EventSub — instant notifications
+    Discord + Twitch — one connected community
   </div>
-  <h1 class="hero-title">Never miss a<br><span>live stream</span></h1>
-  <p class="hero-sub">ExcelProtocol brings real-time Twitch stream notifications, channel point video triggers, and full server management to your Discord — with a web dashboard and zero local software required.</p>
+  <h1 class="hero-title">Your community.<br><span>Better connected.</span></h1>
+  <p class="hero-sub">One polished bot for your Discord and Twitch community — instant live alerts, roles, safety tools, voice rooms, creator integrations, and an easy web dashboard.</p>
   <div class="hero-actions">
-    <a class="btn-primary" href="https://discord.com/oauth2/authorize?client_id=1472217050104729701&permissions=1497740488784&scope=bot+applications.commands">
+    <a class="btn-primary" href="https://discord.com/oauth2/authorize?client_id=1472217050104729701">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057c.002.022.015.043.03.056a19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/></svg>
       Add to Discord
     </a>
@@ -3773,8 +3789,8 @@ async def landing_page(request):
       <div class="stat-label">notification speed</div>
     </div>
     <div class="stat">
-      <div class="stat-num">zero</div>
-      <div class="stat-label">local software needed</div>
+      <div class="stat-num">one</div>
+      <div class="stat-label">simple dashboard</div>
     </div>
     <div class="stat">
       <div class="stat-num">20+</div>
@@ -3789,8 +3805,8 @@ async def landing_page(request):
 <section id="features">
   <div class="section-inner">
     <div class="section-label">What it does</div>
-    <h2 class="section-title">Everything your streaming<br>community needs</h2>
-    <p class="section-sub">From instant live alerts to cloud-hosted OBS video triggers, ExcelProtocol handles the streaming side so you can focus on your content.</p>
+    <h2 class="section-title">Everything your creator<br>community needs</h2>
+    <p class="section-sub">From going live to growing a welcoming, well-managed server, ExcelProtocol keeps your creator community connected in one place.</p>
     <div class="feature-grid">
       <div class="feature-card">
         <div class="feature-icon">📺</div>
@@ -3801,7 +3817,7 @@ async def landing_page(request):
       <div class="feature-card">
         <div class="feature-icon">⚙️</div>
         <div class="feature-title">Web Dashboard</div>
-        <div class="feature-desc">Manage everything from a sleek web dashboard. Add streamers, configure channels, set ping roles — no commands needed.</div>
+        <div class="feature-desc">Configure your server visually, add streamers, manage channels and roles, or use the guided setup wizard — no command chains required.</div>
         <span class="feature-tag">No-code setup</span>
       </div>
       <div class="feature-card">
@@ -3811,34 +3827,40 @@ async def landing_page(request):
         <span class="feature-tag">Roles</span>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">🎬</div>
-        <div class="feature-title">OBS Video Overlay</div>
-        <div class="feature-desc">Trigger YouTube videos in OBS from channel point redeems or Twitch chat — no local software required. Just paste a URL into OBS and it works. Supports queuing, skip, and volume control from the dashboard.</div>
-        <span class="feature-tag">Cloud-hosted</span>
+        <div class="feature-icon">👋</div>
+        <div class="feature-title">Welcome, Goodbye &amp; Birthdays</div>
+        <div class="feature-desc">Make members feel at home with custom arrival and farewell messages, plus automatic birthday announcements for your community.</div>
+        <span class="feature-tag">Community</span>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔊</div>
+        <div class="feature-title">Dynamic Voice Rooms</div>
+        <div class="feature-desc">Members create personal voice rooms simply by joining a trigger channel, then rename, lock, limit, or manage their temporary space.</div>
+        <span class="feature-tag">Voice</span>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🛡️</div>
+        <div class="feature-title">Safety &amp; Cleanup</div>
+        <div class="feature-desc">Protect new joins with configurable account checks and keep busy channels tidy using automatic cleanup rules that preserve pinned messages.</div>
+        <span class="feature-tag">Moderation</span>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🟣</div>
-        <div class="feature-title">Channel Point Rewards</div>
-        <div class="feature-desc">Connect your Twitch broadcaster account and assign YouTube video triggers to any channel point reward. Fires instantly via EventSub — no polling, no delay.</div>
-        <span class="feature-tag">Affiliates &amp; Partners</span>
+        <div class="feature-title">Twitch Chat &amp; Rewards</div>
+        <div class="feature-desc">Create custom chat commands, connect channel point rewards, and give your Twitch community interactive tools managed from the same dashboard.</div>
+        <span class="feature-tag">Creator tools</span>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">💬</div>
-        <div class="feature-title">Twitch Chat Commands</div>
-        <div class="feature-desc">Mods can trigger videos with <code style="font-family:'JetBrains Mono',monospace;color:var(--cyan);font-size:12px">!play</code>, skip with <code style="font-family:'JetBrains Mono',monospace;color:var(--cyan);font-size:12px">!skip</code>, or stop everything with <code style="font-family:'JetBrains Mono',monospace;color:var(--cyan);font-size:12px">!stop</code>. Works for non-affiliates too. Custom commands also supported.</div>
-        <span class="feature-tag">All streamers</span>
+        <div class="feature-icon">🎬</div>
+        <div class="feature-title">OBS Video Overlay</div>
+        <div class="feature-desc">Trigger queued YouTube videos from Twitch chat or channel point rewards using a cloud-hosted OBS browser source with skip and volume controls.</div>
+        <span class="feature-tag">Interactive</span>
       </div>
       <div class="feature-card">
         <div class="feature-icon">📊</div>
-        <div class="feature-title">Server Stats</div>
-        <div class="feature-desc">Display live member counts in voice channel names, auto-updating every 15 minutes.</div>
-        <span class="feature-tag">Auto-update</span>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🔔</div>
-        <div class="feature-title">Smart Deduplication</div>
-        <div class="feature-desc">Built-in duplicate prevention via Twitch message ID dedup and DB-level checks — no double notifications ever.</div>
-        <span class="feature-tag">Reliability</span>
+        <div class="feature-title">Stats &amp; Leaderboards</div>
+        <div class="feature-desc">Display live server counts, track streams and hours, celebrate milestones, and compare consistency, total time, or longest streams.</div>
+        <span class="feature-tag">Insights</span>
       </div>
     </div>
   </div>
@@ -3852,7 +3874,7 @@ async def landing_page(request):
     <div style="flex:1; min-width:280px;">
       <div class="section-label">Setup in minutes</div>
       <h2 class="section-title">How it works</h2>
-      <p class="section-sub">Get stream notifications running in your server in under five minutes.</p>
+      <p class="section-sub">Get your creator community configured in just a few minutes.</p>
     </div>
     <div class="steps" style="flex:1; min-width:280px;">
       <div class="step">
@@ -3881,8 +3903,8 @@ async def landing_page(request):
           <div class="step-line"></div>
         </div>
         <div class="step-content">
-          <div class="step-title">Add your streamers</div>
-          <div class="step-desc">Search for any Twitch username and pick which channel to post notifications to.</div>
+          <div class="step-title">Choose what your community needs</div>
+          <div class="step-desc">Use the setup wizard or configure live alerts, roles, welcomes, voice rooms, safety tools, Twitch features, and more individually.</div>
         </div>
       </div>
       <div class="step">
@@ -3891,8 +3913,8 @@ async def landing_page(request):
           <div class="step-line"></div>
         </div>
         <div class="step-content">
-          <div class="step-title">Go live — get notified instantly</div>
-          <div class="step-desc">EventSub subscriptions are registered automatically. The moment a streamer goes live, your server knows.</div>
+          <div class="step-title">Let ExcelProtocol handle the routine</div>
+          <div class="step-desc">Live alerts, celebrations, cleanup, statistics, and community tools keep running automatically in the cloud.</div>
         </div>
       </div>
     </div>
@@ -3904,10 +3926,10 @@ async def landing_page(request):
 <!-- CTA -->
 <section class="cta-section">
   <div class="cta-inner">
-    <h2 class="cta-title">Ready to level up your stream?</h2>
-    <p class="cta-sub">Add ExcelProtocol in seconds. Instant stream notifications, cloud-hosted OBS video triggers, and full server management — all free.</p>
+    <h2 class="cta-title">Ready to level up your community?</h2>
+    <p class="cta-sub">Add ExcelProtocol in seconds and bring your Discord and Twitch communities together with one easy, creator-focused toolkit.</p>
     <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
-      <a class="btn-primary" href="https://discord.com/oauth2/authorize?client_id=1472217050104729701&permissions=1497740488784&scope=bot+applications.commands">
+      <a class="btn-primary" href="https://discord.com/oauth2/authorize?client_id=1472217050104729701">
         Add to Discord — it's free
       </a>
       <a class="btn-secondary" href="/app/">Open Dashboard</a>
