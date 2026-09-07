@@ -460,6 +460,52 @@ class TestDevDashboardRoutes:
             "display_name": "Viewer", "entry_count": 1,
         })]
 
+    @pytest.mark.asyncio
+    async def test_fortuna_test_spin_drives_wheel_and_labels_chat_message(self, monkeypatch):
+        broadcasts = []
+        messages = []
+
+        class FakeChannel:
+            name = "stayexcellent666"
+
+            async def send(self, message):
+                messages.append(message)
+
+        class FakeChatBot:
+            connected_channels = [FakeChannel()]
+
+        class FakeBot:
+            twitch_chat_bot = FakeChatBot()
+
+        async def fake_broadcast(broadcaster_id, payload):
+            broadcasts.append((broadcaster_id, payload))
+
+        async def no_wait(_seconds):
+            return None
+
+        monkeypatch.setattr(dashboard_server, "_bot_ref", FakeBot())
+        monkeypatch.setattr(dashboard_server, "_fortuna_broadcast", fake_broadcast)
+        monkeypatch.setattr(dashboard_server.asyncio, "sleep", no_wait)
+        monkeypatch.setattr(dashboard_server.secrets, "randbelow", lambda _size: 2)
+
+        await dashboard_server._fortuna_run_test_spin(
+            "100", "StayExcellent666", 2500,
+        )
+
+        event_types = [payload["type"] for _, payload in broadcasts]
+        assert event_types == [
+            "reset_entries", "state", *("entry" for _ in range(12)),
+            "spin", "winner",
+        ]
+        spin = next(payload for _, payload in broadcasts if payload["type"] == "spin")
+        assert spin["winner_display_name"] == "NovaNoodle"
+        assert spin["spin_duration_ms"] == 2500
+        assert len(messages) == 1
+        assert "[TEST]" in messages[0]
+        assert "NovaNoodle" in messages[0]
+        assert "no prize" in messages[0]
+        assert "100" not in dashboard_server._fortuna_test_channels
+
 
 class TestOperationalSafetyRegressions:
     def test_health_poll_waits_for_reconciliation_event(self):

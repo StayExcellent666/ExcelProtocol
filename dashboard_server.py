@@ -57,6 +57,7 @@ _overlay_connections: dict = {}
 _fortuna_connections: dict[str, set] = {}
 _fortuna_connections_by_key: dict[int, set] = {}
 _fortuna_finish_tasks: dict[int, asyncio.Task] = {}
+_fortuna_test_channels: set[str] = set()
 
 async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: str):
     """Push a !play event to all overlay WebSockets for guilds linked to this Twitch channel.
@@ -3443,6 +3444,80 @@ async def _fortuna_announce_winner(giveaway: dict, winner: dict):
     return True
 
 
+async def _fortuna_run_test_spin(broadcaster_id: str, broadcaster_login: str,
+                                 spin_duration_ms: int):
+    """Run an end-to-end wheel/chat test without recording a real giveaway."""
+    entrants = [
+        {"twitch_user_id": "test-1", "twitch_display_name": "PixelPilot"},
+        {"twitch_user_id": "test-2", "twitch_display_name": "LuckyLuna"},
+        {"twitch_user_id": "test-3", "twitch_display_name": "NovaNoodle"},
+        {"twitch_user_id": "test-4", "twitch_display_name": "CozyCritter"},
+        {"twitch_user_id": "test-5", "twitch_display_name": "EchoEmber"},
+        {"twitch_user_id": "test-6", "twitch_display_name": "MintMeteor"},
+        {"twitch_user_id": "test-7", "twitch_display_name": "TurboTurtle"},
+        {"twitch_user_id": "test-8", "twitch_display_name": "StarSage"},
+        {"twitch_user_id": "test-9", "twitch_display_name": "VelvetViking"},
+        {"twitch_user_id": "test-10", "twitch_display_name": "CosmicCactus"},
+        {"twitch_user_id": "test-11", "twitch_display_name": "NeonNomad"},
+        {"twitch_user_id": "test-12", "twitch_display_name": "QuestQueen"},
+    ]
+    spin_duration_ms = max(2000, min(30000, int(spin_duration_ms)))
+    _fortuna_test_channels.add(broadcaster_id)
+    try:
+        winner_index = secrets.randbelow(len(entrants))
+        winner = entrants[winner_index]
+        await _fortuna_broadcast(broadcaster_id, {"type": "reset_entries"})
+        await _fortuna_broadcast(broadcaster_id, {
+            "type": "state", "status": "open", "giveaway_id": "test",
+            "title": "ExcelFortuna Test Spin", "entry_count": len(entrants),
+            "target_entries": len(entrants), "remaining_seconds": 0,
+        })
+        for index, entrant in enumerate(entrants, start=1):
+            await _fortuna_broadcast(broadcaster_id, {
+                "type": "entry", "user_id": entrant["twitch_user_id"],
+                "display_name": entrant["twitch_display_name"],
+                "entry_count": index,
+            })
+        await _fortuna_broadcast(broadcaster_id, {
+            "type": "spin", "giveaway_id": "test",
+            "winner_id": winner["twitch_user_id"],
+            "winner_display_name": winner["twitch_display_name"],
+            "winner_index": winner_index,
+            "spin_duration_ms": spin_duration_ms,
+        })
+        await asyncio.sleep(spin_duration_ms / 1000)
+        await _fortuna_broadcast(broadcaster_id, {
+            "type": "winner", "winner_id": winner["twitch_user_id"],
+            "winner_display_name": winner["twitch_display_name"],
+        })
+
+        channel = None
+        if _bot_ref and getattr(_bot_ref, "twitch_chat_bot", None):
+            channel = next(
+                (candidate for candidate in _bot_ref.twitch_chat_bot.connected_channels
+                 if candidate.name.lower() == broadcaster_login.lower()),
+                None,
+            )
+        if channel:
+            await channel.send(
+                f"[TEST] ExcelFortuna selected {winner['twitch_display_name']}. "
+                "This was only a test - no prize was awarded."
+            )
+        else:
+            logger.warning("Fortuna test could not post in @%s chat", broadcaster_login)
+            await _fortuna_broadcast(broadcaster_id, {
+                "type": "error",
+                "message": "Test spin finished, but ExcelProtocol is not connected to this Twitch chat",
+            })
+    except Exception as exc:
+        logger.error("Fortuna test spin failed: %s", exc, exc_info=True)
+        await _fortuna_broadcast(broadcaster_id, {
+            "type": "error", "message": "Test spin failed on ExcelProtocol",
+        })
+    finally:
+        _fortuna_test_channels.discard(broadcaster_id)
+
+
 async def _fortuna_reveal_after_spin(giveaway: dict, winner: dict):
     await asyncio.sleep(max(2.0, min(30.0, int(giveaway.get("spin_duration_ms") or 8000) / 1000)))
     await _fortuna_broadcast(str(giveaway["twitch_broadcaster_id"]), {
@@ -3709,6 +3784,24 @@ async def fortuna_plugin_ws(request):
                     await ws.send_str(json.dumps({"type": "error", "message": "No giveaway is open"}))
                 else:
                     await _fortuna_finish_giveaway(int(giveaway["id"]))
+            elif command_type == "test_spin":
+                if await _fortuna_open_giveaway(broadcaster_id):
+                    await ws.send_str(json.dumps({
+                        "type": "error",
+                        "message": "Cancel or finish the live giveaway before running a test",
+                    }))
+                elif broadcaster_id in _fortuna_test_channels:
+                    await ws.send_str(json.dumps({
+                        "type": "error", "message": "A test spin is already running",
+                    }))
+                else:
+                    try:
+                        test_spin_ms = int(command.get("spin_duration_ms") or 8000)
+                    except (TypeError, ValueError):
+                        test_spin_ms = 8000
+                    asyncio.create_task(_fortuna_run_test_spin(
+                        broadcaster_id, broadcaster_login, test_spin_ms,
+                    ))
             elif command_type == "cancel":
                 giveaway = await _fortuna_open_giveaway(broadcaster_id)
                 if not giveaway:
