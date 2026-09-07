@@ -24,7 +24,7 @@ RUN npm run build
 # =============================================================================
 # Stage 2 — Python runtime (the actual deployed image)
 # =============================================================================
-FROM python:3.11-slim-bullseye 
+FROM python:3.11-slim-bookworm
 
 # Install SQLite runtime, image libs, fonts, and build dependencies.
 # - libsqlite3-* : SQLite
