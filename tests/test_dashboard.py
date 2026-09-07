@@ -172,6 +172,8 @@ class TestDevDashboardRoutes:
         assert ("DELETE", "/api/dev/leaderboard-blacklist/{streamer_name}") in routes
         assert ("GET", "/api/dev/stream-events") in routes
         assert ("GET", "/api/dev/health-check") in routes
+        assert ("GET", "/api/admin/fortuna") in routes
+        assert ("GET", "/api/admin/fortuna/{giveaway_id}") in routes
         assert ("GET", "/auth/twitch/bot/login") in routes
 
     def test_twitch_login_normalisation(self):
@@ -304,6 +306,100 @@ class TestDevDashboardRoutes:
         from aiohttp import web
         with pytest.raises(web.HTTPForbidden):
             await dashboard_server.get_operations_health({"session": {}})
+
+    @pytest.mark.asyncio
+    async def test_fortuna_history_returns_admin_summary(self, monkeypatch):
+        import json
+
+        async def fake_db_fetch(query, params=()):
+            assert "datetime('now', '-30 days')" in query
+            assert params == ()
+            return [{
+                "id": 7,
+                "twitch_broadcaster_id": "100",
+                "twitch_broadcaster_login": "stayexcellent666",
+                "reward_id": "reward-1",
+                "reward_title": "Giveaway Entry",
+                "title": "Launch Giveaway",
+                "status": "completed",
+                "started_at": "2026-09-07 12:00:00",
+                "ended_at": "2026-09-07 12:10:00",
+                "winner_twitch_user_id": "viewer-1",
+                "winner_twitch_login": "viewer",
+                "winner_display_name": "Viewer",
+                "winner_selected_at": "2026-09-07 12:10:00",
+                "total_entries": 4,
+                "eligible_entries": 3,
+                "unique_entrants": 3,
+                "runtime_seconds": 600,
+            }]
+
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_db_fetch)
+        response = await dashboard_server.get_fortuna_history(
+            {"session": {"admin": True}}
+        )
+        payload = json.loads(response.text)
+
+        assert response.headers["Cache-Control"] == "no-store"
+        assert payload["window_days"] == 30
+        assert payload["summary"] == {
+            "giveaways": 1,
+            "total_entries": 4,
+            "eligible_entries": 3,
+            "winners": 1,
+            "average_runtime_seconds": 600,
+        }
+        assert payload["giveaways"][0]["winner_display_name"] == "Viewer"
+
+    @pytest.mark.asyncio
+    async def test_fortuna_detail_returns_all_entries(self, monkeypatch):
+        import json
+
+        async def fake_db_fetch(query, params=()):
+            assert params == (7,)
+            if "FROM fortuna_giveaways" in query:
+                return [{"id": 7, "title": "Launch Giveaway", "total_entries": 2}]
+            assert "FROM fortuna_entries" in query
+            return [
+                {"id": 1, "twitch_display_name": "One", "eligible": 1},
+                {"id": 2, "twitch_display_name": "Two", "eligible": 0},
+            ]
+
+        class FakeRequest(dict):
+            @property
+            def match_info(self):
+                return self["match_info"]
+
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_db_fetch)
+        response = await dashboard_server.get_fortuna_giveaway(FakeRequest({
+            "session": {"dev": True},
+            "match_info": {"giveaway_id": "7"},
+        }))
+        payload = json.loads(response.text)
+
+        assert response.headers["Cache-Control"] == "no-store"
+        assert payload["giveaway"]["id"] == 7
+        assert [entry["twitch_display_name"] for entry in payload["entries"]] == ["One", "Two"]
+
+    @pytest.mark.asyncio
+    async def test_fortuna_routes_reject_regular_users(self):
+        from aiohttp import web
+
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.get_fortuna_history({"session": {}})
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.get_fortuna_giveaway({
+                "session": {},
+                "match_info": {"giveaway_id": "1"},
+            })
+
+    def test_fortuna_frontend_is_owner_admin_only(self):
+        from pathlib import Path
+
+        source = (Path(__file__).parent.parent / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+        assert 'id:"fortuna"' in source
+        assert 'activeTab==="fortuna"' in source
+        assert "(effectivelyDev || effectivelyAdmin || isAdmin) && <FortunaTab />" in source
 
 
 class TestOperationalSafetyRegressions:

@@ -4257,6 +4257,180 @@ function DbToolsTab() {
   );
 }
 
+function FortunaTab() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selectedId, setSelectedId] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setData(await apiFetch("/api/admin/fortuna"));
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const openGiveaway = async (id) => {
+    if (selectedId === id) {
+      setSelectedId(null);
+      setDetail(null);
+      setDetailError("");
+      return;
+    }
+    setSelectedId(id);
+    setDetail(null);
+    setDetailError("");
+    setDetailLoading(true);
+    try {
+      setDetail(await apiFetch(`/api/admin/fortuna/${id}`));
+    } catch (e) {
+      setDetailError(e.message || String(e));
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const parseTimestamp = (value) => {
+    if (!value) return null;
+    return new Date(value.includes("T") ? value : value.replace(" ", "T") + "Z");
+  };
+  const formatTimestamp = (value) => {
+    const parsed = parseTimestamp(value);
+    return parsed && !Number.isNaN(parsed.getTime()) ? parsed.toLocaleString() : "—";
+  };
+  const formatRuntime = (seconds) => {
+    const total = Math.max(0, Number(seconds) || 0);
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    if (hours) return `${hours}h ${minutes}m`;
+    if (minutes) return `${minutes}m ${secs}s`;
+    return `${secs}s`;
+  };
+  const statusColor = (status) => status === "completed"
+    ? "var(--green)"
+    : status === "cancelled" ? "var(--red)" : "var(--yellow)";
+
+  if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
+
+  const summary = data?.summary || {};
+  const giveaways = data?.giveaways || [];
+  const statCards = [
+    ["Giveaways", summary.giveaways || 0, "Runs started in the last 30 days"],
+    ["Entries", summary.total_entries || 0, `${summary.eligible_entries || 0} currently eligible`],
+    ["Winners", summary.winners || 0, "Completed selections recorded"],
+    ["Average Runtime", formatRuntime(summary.average_runtime_seconds), "Start to close"],
+  ];
+
+  return (
+    <div>
+      <PageHeader title="Fortuna" subtitle="Private giveaway history for ExcelProtocol owners and admins" />
+
+      {error && (
+        <div style={{ ...C.card, borderColor:"rgba(255,77,109,0.35)", color:"var(--red)", fontSize:12, fontFamily:"'JetBrains Mono',monospace", marginBottom:14 }}>
+          Could not load Fortuna history: {error}
+          <button onClick={load} style={{ ...C.btnSecondary, marginLeft:12, padding:"4px 10px", fontSize:11 }}>Retry</button>
+        </div>
+      )}
+
+      {!error && <>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))", gap:10, marginBottom:14 }}>
+          {statCards.map(([label, value, sub]) => (
+            <div key={label} style={{ ...C.card, padding:"15px 17px" }}>
+              <div style={{ fontSize:10, color:"var(--cyan2)", textTransform:"uppercase", letterSpacing:1.2, fontFamily:"'JetBrains Mono',monospace" }}>{label}</div>
+              <div style={{ marginTop:6, fontSize:24, fontWeight:800, color:"var(--text)", fontFamily:"'Orbitron',sans-serif" }}>{typeof value === "number" ? value.toLocaleString() : value}</div>
+              <div style={{ marginTop:4, fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>{sub}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ ...C.card, padding:0, overflow:"hidden" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 18px", borderBottom:"1px solid var(--border)", gap:12 }}>
+            <div>
+              <div style={{ fontSize:14, fontWeight:700, color:"var(--text)" }}>Giveaway History</div>
+              <div style={{ marginTop:2, fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>Last {data?.window_days || 30} days · select a row to inspect every entry</div>
+            </div>
+            <button onClick={load} style={{ ...C.btnSecondary, padding:"5px 11px", fontSize:11 }}>Refresh</button>
+          </div>
+
+          {giveaways.length === 0 ? (
+            <div style={{ padding:"40px 20px", textAlign:"center" }}>
+              <div style={{ fontSize:15, color:"var(--text2)", fontWeight:600 }}>No Fortuna giveaways recorded yet</div>
+              <div style={{ marginTop:6, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>History will appear here when the Fortuna giveaway engine is connected.</div>
+            </div>
+          ) : (
+            <div style={{ overflowX:"auto" }}>
+              <div style={{ minWidth:850 }}>
+                <div style={{ display:"grid", gridTemplateColumns:"minmax(190px,1.5fr) minmax(115px,1fr) 105px 90px 105px minmax(140px,1fr)", gap:12, padding:"9px 18px", borderBottom:"1px solid var(--border)", color:"var(--text3)", fontSize:9, textTransform:"uppercase", letterSpacing:1, fontFamily:"'JetBrains Mono',monospace" }}>
+                  <span>Giveaway</span><span>Channel</span><span>Status</span><span>Entries</span><span>Runtime</span><span>Winner</span>
+                </div>
+                {giveaways.map(g => (
+                  <button key={g.id} onClick={() => openGiveaway(g.id)} style={{ width:"100%", display:"grid", gridTemplateColumns:"minmax(190px,1.5fr) minmax(115px,1fr) 105px 90px 105px minmax(140px,1fr)", gap:12, padding:"11px 18px", border:"none", borderBottom:"1px solid var(--border)", background:selectedId === g.id ? "var(--cyan-dim)" : "transparent", color:"var(--text2)", textAlign:"left", cursor:"pointer", alignItems:"center", fontFamily:"'Outfit',sans-serif" }}>
+                    <span style={{ minWidth:0 }}>
+                      <span style={{ display:"block", color:"var(--text)", fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{g.title || g.reward_title}</span>
+                      <span style={{ display:"block", marginTop:2, color:"var(--text3)", fontSize:10, fontFamily:"'JetBrains Mono',monospace" }}>{formatTimestamp(g.started_at)}</span>
+                    </span>
+                    <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:11, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>@{g.twitch_broadcaster_login}</span>
+                    <span><Badge text={g.status} color={statusColor(g.status)} /></span>
+                    <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:11 }}>{Number(g.total_entries || 0).toLocaleString()} <span style={{ color:"var(--text3)" }}>({Number(g.unique_entrants || 0).toLocaleString()} unique)</span></span>
+                    <span style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:11 }}>{formatRuntime(g.runtime_seconds)}</span>
+                    <span style={{ color:g.winner_display_name ? "var(--green)" : "var(--text3)", fontWeight:g.winner_display_name ? 600 : 400, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{g.winner_display_name || g.winner_twitch_login || "—"}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {selectedId && (
+          <div style={{ ...C.card, marginTop:14, padding:0, overflow:"hidden" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 18px", borderBottom:"1px solid var(--border)" }}>
+              <div>
+                <div style={{ fontSize:14, fontWeight:700, color:"var(--text)" }}>{detail?.giveaway?.title || "Giveaway Entries"}</div>
+                <div style={{ marginTop:2, fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>Every recorded Channel Points redemption for giveaway #{selectedId}</div>
+              </div>
+              <button onClick={() => { setSelectedId(null); setDetail(null); }} style={{ ...C.btnSecondary, padding:"4px 9px", fontSize:11 }}>Close</button>
+            </div>
+
+            {detailLoading ? <div style={{ display:"flex", justifyContent:"center", padding:34 }}><Spinner /></div>
+              : detailError ? <div style={{ padding:18, color:"var(--red)", fontSize:12, fontFamily:"'JetBrains Mono',monospace" }}>{detailError}</div>
+              : (detail?.entries || []).length === 0 ? <div style={{ padding:30, textAlign:"center", color:"var(--text3)", fontSize:12 }}>No entries were recorded.</div>
+              : <div style={{ overflowX:"auto", maxHeight:420, overflowY:"auto" }}>
+                  <div style={{ minWidth:690 }}>
+                    <div style={{ display:"grid", gridTemplateColumns:"55px minmax(170px,1.5fr) minmax(150px,1fr) 170px 95px", gap:12, padding:"8px 18px", borderBottom:"1px solid var(--border)", color:"var(--text3)", fontSize:9, textTransform:"uppercase", letterSpacing:1, fontFamily:"'JetBrains Mono',monospace" }}>
+                      <span>#</span><span>Entrant</span><span>Twitch ID</span><span>Redeemed</span><span>Eligibility</span>
+                    </div>
+                    {detail.entries.map((entry, index) => (
+                      <div key={entry.id} style={{ display:"grid", gridTemplateColumns:"55px minmax(170px,1.5fr) minmax(150px,1fr) 170px 95px", gap:12, padding:"9px 18px", borderBottom:"1px solid var(--border)", alignItems:"center", fontSize:11, color:"var(--text2)", fontFamily:"'JetBrains Mono',monospace" }} title={entry.disqualification_note || ""}>
+                        <span style={{ color:"var(--text3)" }}>{index + 1}</span>
+                        <span style={{ minWidth:0 }}>
+                          <span style={{ display:"block", color:"var(--text)", fontFamily:"'Outfit',sans-serif", fontSize:13, fontWeight:600, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{entry.twitch_display_name}</span>
+                          <span style={{ display:"block", color:"var(--text3)", fontSize:10 }}>@{entry.twitch_user_login}</span>
+                        </span>
+                        <span style={{ overflow:"hidden", textOverflow:"ellipsis" }}>{entry.twitch_user_id}</span>
+                        <span>{formatTimestamp(entry.redeemed_at)}</span>
+                        <span style={{ color:entry.eligible ? "var(--green)" : "var(--red)" }}>{entry.eligible ? "Eligible" : "Excluded"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>}
+          </div>
+        )}
+      </>}
+    </div>
+  );
+}
+
 function HealthCheckTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4505,11 +4679,13 @@ export default function App() {
   const devTabs = effectivelyDev ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
+    { id:"fortuna",        icon:"/app/icons/rewards.png", label:"Fortuna"          },
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
     { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
   ] : (effectivelyAdmin || isAdmin) ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
+    { id:"fortuna",        icon:"/app/icons/rewards.png", label:"Fortuna"          },
   ] : [];
   const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
 
@@ -4661,6 +4837,7 @@ export default function App() {
               {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
               {activeTab==="globalstats"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <GlobalStatsTab />}
               {activeTab==="healthcheck"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <HealthCheckTab />}
+              {activeTab==="fortuna"       && (effectivelyDev || effectivelyAdmin || isAdmin) && <FortunaTab />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
               {activeTab==="auditlog"      && effectivelyDev && <AdminAuditLogTab />}
             </>
@@ -4703,6 +4880,10 @@ export default function App() {
               <div style={{ fontSize:9, color:"var(--cyan)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Dev Only</div>
               <NavItem large icon="/app/icons/globe.png" label="Global Stats" active={activeTab==="globalstats"} onClick={() => { setActiveTab("globalstats"); setNavDrawerOpen(false); }} />
               <NavItem large icon="/app/icons/tools.png" label="DB Tools" active={activeTab==="dbtools"} onClick={() => { setActiveTab("dbtools"); setNavDrawerOpen(false); }} />
+            </>}
+            {(effectivelyDev || effectivelyAdmin || isAdmin) && <>
+              {!effectivelyDev && <div style={{ fontSize:9, color:"#f5b432", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Admin Only</div>}
+              <NavItem large icon="/app/icons/rewards.png" label="Fortuna" active={activeTab==="fortuna"} onClick={() => { setActiveTab("fortuna"); setNavDrawerOpen(false); }} />
             </>}
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>

@@ -3239,6 +3239,112 @@ def _require_dev_or_admin(request):
         raise web.HTTPForbidden(reason="Owner or admin access required")
 
 
+_FORTUNA_HISTORY_DAYS = 30
+
+
+async def get_fortuna_history(request):
+    """Owner/admin-only summary of giveaways started in the last 30 days."""
+    _require_dev_or_admin(request)
+    rows = await db_fetch(
+        """SELECT g.id,
+                  g.twitch_broadcaster_id,
+                  g.twitch_broadcaster_login,
+                  g.reward_id,
+                  g.reward_title,
+                  g.title,
+                  g.status,
+                  g.started_at,
+                  g.ended_at,
+                  g.winner_twitch_user_id,
+                  g.winner_twitch_login,
+                  g.winner_display_name,
+                  g.winner_selected_at,
+                  COUNT(e.id) AS total_entries,
+                  SUM(CASE WHEN e.eligible = 1 THEN 1 ELSE 0 END) AS eligible_entries,
+                  COUNT(DISTINCT CASE WHEN e.eligible = 1 THEN e.twitch_user_id END) AS unique_entrants,
+                  CAST(MAX(0, ROUND(
+                      (julianday(COALESCE(g.ended_at, CURRENT_TIMESTAMP)) - julianday(g.started_at)) * 86400
+                  )) AS INTEGER) AS runtime_seconds
+           FROM fortuna_giveaways AS g
+           LEFT JOIN fortuna_entries AS e ON e.giveaway_id = g.id
+           WHERE g.started_at >= datetime('now', '-30 days')
+           GROUP BY g.id
+           ORDER BY g.started_at DESC, g.id DESC"""
+    )
+
+    runtimes = [int(row.get("runtime_seconds") or 0) for row in rows]
+    summary = {
+        "giveaways": len(rows),
+        "total_entries": sum(int(row.get("total_entries") or 0) for row in rows),
+        "eligible_entries": sum(int(row.get("eligible_entries") or 0) for row in rows),
+        "winners": sum(1 for row in rows if row.get("winner_twitch_user_id")),
+        "average_runtime_seconds": round(sum(runtimes) / len(runtimes)) if runtimes else 0,
+    }
+    return web.json_response(
+        {"window_days": _FORTUNA_HISTORY_DAYS, "summary": summary, "giveaways": rows},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def get_fortuna_giveaway(request):
+    """Owner/admin-only giveaway detail including every recorded entry."""
+    _require_dev_or_admin(request)
+    try:
+        giveaway_id = int(request.match_info["giveaway_id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="Invalid giveaway ID")
+    if giveaway_id < 1:
+        raise web.HTTPBadRequest(reason="Invalid giveaway ID")
+
+    giveaways = await db_fetch(
+        """SELECT g.id,
+                  g.twitch_broadcaster_id,
+                  g.twitch_broadcaster_login,
+                  g.reward_id,
+                  g.reward_title,
+                  g.title,
+                  g.status,
+                  g.started_at,
+                  g.ended_at,
+                  g.winner_twitch_user_id,
+                  g.winner_twitch_login,
+                  g.winner_display_name,
+                  g.winner_selected_at,
+                  COUNT(e.id) AS total_entries,
+                  SUM(CASE WHEN e.eligible = 1 THEN 1 ELSE 0 END) AS eligible_entries,
+                  COUNT(DISTINCT CASE WHEN e.eligible = 1 THEN e.twitch_user_id END) AS unique_entrants,
+                  CAST(MAX(0, ROUND(
+                      (julianday(COALESCE(g.ended_at, CURRENT_TIMESTAMP)) - julianday(g.started_at)) * 86400
+                  )) AS INTEGER) AS runtime_seconds
+           FROM fortuna_giveaways AS g
+           LEFT JOIN fortuna_entries AS e ON e.giveaway_id = g.id
+           WHERE g.id = ?
+           GROUP BY g.id""",
+        (giveaway_id,),
+    )
+    if not giveaways:
+        raise web.HTTPNotFound(reason="Giveaway not found")
+
+    entries = await db_fetch(
+        """SELECT id,
+                  redemption_id,
+                  twitch_user_id,
+                  twitch_user_login,
+                  twitch_display_name,
+                  redeemed_at,
+                  eligible,
+                  disqualification_note
+           FROM fortuna_entries
+           WHERE giveaway_id = ?
+           ORDER BY redeemed_at ASC, id ASC""",
+        (giveaway_id,),
+    )
+    return web.json_response(
+        {"giveaway": giveaways[0], "entries": entries},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _normalise_twitch_login(raw: str) -> str:
     name = (raw or "").strip().lower().lstrip("@")
     if not re.fullmatch(r"[a-z0-9_]{1,25}", name):
@@ -4239,6 +4345,8 @@ def create_dashboard_app(bot=None):
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
     app.router.add_get("/api/me",        auth_me)
     app.router.add_get("/api/admin/audit-log", admin_audit_log)
+    app.router.add_get("/api/admin/fortuna", get_fortuna_history)
+    app.router.add_get("/api/admin/fortuna/{giveaway_id}", get_fortuna_giveaway)
     app.router.add_get("/api/guilds",    get_guilds)
     app.router.add_get("/api/guild/{guild_id}", get_guild_summary)
 

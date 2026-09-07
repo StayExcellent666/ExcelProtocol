@@ -51,6 +51,61 @@ class TestSchema:
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert warnings == [], f"Fresh DB init logged warnings: {[r.message for r in warnings]}"
 
+    def test_fortuna_history_tables_and_indexes_exist(self, db):
+        conn = db.get_connection()
+        giveaway_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(fortuna_giveaways)").fetchall()
+        }
+        entry_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(fortuna_entries)").fetchall()
+        }
+        indexes = {
+            r[1] for r in conn.execute(
+                "SELECT type, name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        conn.close()
+
+        assert {
+            "twitch_broadcaster_id", "twitch_broadcaster_login", "reward_id",
+            "reward_title", "status", "started_at", "ended_at",
+            "winner_twitch_user_id", "winner_display_name",
+        }.issubset(giveaway_cols)
+        assert {
+            "giveaway_id", "redemption_id", "twitch_user_id",
+            "twitch_user_login", "twitch_display_name", "redeemed_at", "eligible",
+        }.issubset(entry_cols)
+        assert "idx_fortuna_giveaways_started_at" in indexes
+        assert "idx_fortuna_entries_giveaway" in indexes
+        assert "idx_fortuna_entries_user" in indexes
+
+    def test_fortuna_redemption_id_is_deduplicated(self, db):
+        import sqlite3
+        import pytest
+
+        conn = db.get_connection()
+        giveaway_id = conn.execute(
+            """INSERT INTO fortuna_giveaways
+               (twitch_broadcaster_id, twitch_broadcaster_login)
+               VALUES (?, ?)""",
+            ("100", "stayexcellent666"),
+        ).lastrowid
+        entry = (giveaway_id, "redemption-1", "viewer-1", "viewer", "Viewer")
+        conn.execute(
+            """INSERT INTO fortuna_entries
+               (giveaway_id, redemption_id, twitch_user_id, twitch_user_login, twitch_display_name)
+               VALUES (?, ?, ?, ?, ?)""",
+            entry,
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """INSERT INTO fortuna_entries
+                   (giveaway_id, redemption_id, twitch_user_id, twitch_user_login, twitch_display_name)
+                   VALUES (?, ?, ?, ?, ?)""",
+                entry,
+            )
+        conn.close()
+
 
 # ── log_stream_event + mark_stream_ended ──────────────────────────────────────
 

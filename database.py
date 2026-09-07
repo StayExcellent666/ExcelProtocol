@@ -747,6 +747,58 @@ class Database:
             )
         ''')
 
+        # Fortuna giveaway history. These tables are intentionally isolated
+        # from the existing Twitch/Discord feature tables so the giveaway
+        # integration can be added without changing current bot behaviour.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fortuna_giveaways (
+                id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                twitch_broadcaster_id    TEXT NOT NULL,
+                twitch_broadcaster_login TEXT NOT NULL,
+                reward_id                TEXT,
+                reward_title             TEXT NOT NULL DEFAULT 'Giveaway Entry',
+                title                    TEXT NOT NULL DEFAULT 'Giveaway',
+                status                   TEXT NOT NULL DEFAULT 'open'
+                                         CHECK(status IN ('open', 'completed', 'cancelled')),
+                started_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ended_at                 TIMESTAMP,
+                winner_twitch_user_id    TEXT,
+                winner_twitch_login      TEXT,
+                winner_display_name      TEXT,
+                winner_selected_at       TIMESTAMP,
+                created_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_fortuna_giveaways_started_at
+            ON fortuna_giveaways(started_at DESC)
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fortuna_entries (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                giveaway_id           INTEGER NOT NULL,
+                redemption_id         TEXT NOT NULL UNIQUE,
+                twitch_user_id        TEXT NOT NULL,
+                twitch_user_login     TEXT NOT NULL,
+                twitch_display_name   TEXT NOT NULL,
+                redeemed_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                eligible              INTEGER NOT NULL DEFAULT 1 CHECK(eligible IN (0, 1)),
+                disqualification_note TEXT,
+                created_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(giveaway_id) REFERENCES fortuna_giveaways(id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_fortuna_entries_giveaway
+            ON fortuna_entries(giveaway_id, redeemed_at)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_fortuna_entries_user
+            ON fortuna_entries(giveaway_id, twitch_user_id)
+        ''')
+
         # Latest rotated credentials for the Twitch chat bot. Fly secrets are
         # the bootstrap/fallback values; rotations live on the persistent
         # volume so the app never needs to mutate its own deployment config.
