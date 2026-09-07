@@ -4265,6 +4265,12 @@ function FortunaTab() {
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
+  const [pluginKeys, setPluginKeys] = useState([]);
+  const [keyLogin, setKeyLogin] = useState("");
+  const [keyLabel, setKeyLabel] = useState("My OBS");
+  const [generatedKey, setGeneratedKey] = useState("");
+  const [keyBusy, setKeyBusy] = useState(false);
+  const [keyError, setKeyError] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -4279,6 +4285,47 @@ function FortunaTab() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const loadPluginKeys = useCallback(async () => {
+    try {
+      const result = await apiFetch("/api/admin/fortuna-plugin-keys");
+      setPluginKeys(result.keys || []);
+    } catch (e) {
+      setKeyError(e.message || String(e));
+    }
+  }, []);
+
+  useEffect(() => { loadPluginKeys(); }, [loadPluginKeys]);
+
+  const createPluginKey = async () => {
+    setKeyBusy(true);
+    setKeyError("");
+    setGeneratedKey("");
+    try {
+      const result = await apiFetch("/api/admin/fortuna-plugin-keys", {
+        method:"POST",
+        body:JSON.stringify({ twitch_login:keyLogin, label:keyLabel }),
+      });
+      setGeneratedKey(result.plugin_key || "");
+      setKeyLogin("");
+      await loadPluginKeys();
+    } catch (e) {
+      setKeyError(e.message || String(e));
+    } finally {
+      setKeyBusy(false);
+    }
+  };
+
+  const revokePluginKey = async (id) => {
+    if (!window.confirm("Revoke this ExcelFortuna plugin key? Connected OBS sources using it will disconnect.")) return;
+    setKeyError("");
+    try {
+      await apiFetch(`/api/admin/fortuna-plugin-keys/${id}`, { method:"DELETE" });
+      await loadPluginKeys();
+    } catch (e) {
+      setKeyError(e.message || String(e));
+    }
+  };
 
   const openGiveaway = async (id) => {
     if (selectedId === id) {
@@ -4335,6 +4382,52 @@ function FortunaTab() {
   return (
     <div>
       <PageHeader title="Fortuna" subtitle="Private giveaway history for ExcelProtocol owners and admins" />
+
+      <div style={{ ...C.card, marginBottom:14 }}>
+        <div style={{ fontSize:14, fontWeight:700, color:"var(--text)" }}>ExcelFortuna OBS Connection</div>
+        <div style={{ marginTop:4, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+          Generate a revocable key for one Twitch channel, then paste it into the ExcelFortuna source properties in OBS. Twitch credentials are never placed in OBS.
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"minmax(160px,1fr) minmax(150px,1fr) auto", gap:9, marginTop:12, alignItems:"end" }}>
+          <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+            TWITCH LOGIN
+            <input value={keyLogin} onChange={e => setKeyLogin(e.target.value)} placeholder="channelname" style={{ ...C.input, marginTop:5 }} />
+          </label>
+          <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+            KEY LABEL
+            <input value={keyLabel} onChange={e => setKeyLabel(e.target.value)} placeholder="Streaming PC" style={{ ...C.input, marginTop:5 }} />
+          </label>
+          <button onClick={createPluginKey} disabled={keyBusy || !keyLogin.trim()} style={{ ...C.btnPrimary, opacity:keyBusy || !keyLogin.trim() ? 0.5 : 1 }}>
+            {keyBusy ? "Generating…" : "Generate Key"}
+          </button>
+        </div>
+
+        {generatedKey && (
+          <div style={{ marginTop:12, padding:12, border:"1px solid rgba(57,217,138,0.4)", borderRadius:7, background:"rgba(57,217,138,0.06)" }}>
+            <div style={{ color:"var(--green)", fontSize:11, fontWeight:700 }}>Copy this key now—it cannot be shown again.</div>
+            <div style={{ display:"flex", gap:8, marginTop:7, alignItems:"center" }}>
+              <code style={{ flex:1, minWidth:0, overflowWrap:"anywhere", color:"var(--text)", fontSize:11 }}>{generatedKey}</code>
+              <button onClick={() => navigator.clipboard.writeText(generatedKey)} style={{ ...C.btnSecondary, padding:"5px 10px", fontSize:11 }}>Copy</button>
+            </div>
+          </div>
+        )}
+        {keyError && <div style={{ color:"var(--red)", marginTop:9, fontSize:11 }}>{keyError}</div>}
+
+        {pluginKeys.length > 0 && (
+          <div style={{ display:"grid", gap:7, marginTop:12 }}>
+            {pluginKeys.map(key => (
+              <div key={key.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, padding:"8px 10px", border:"1px solid var(--border)", borderRadius:6 }}>
+                <div style={{ minWidth:0 }}>
+                  <span style={{ color:"var(--text)", fontWeight:600 }}>{key.label}</span>
+                  <span style={{ color:"var(--text3)", marginLeft:8, fontSize:11 }}>@{key.twitch_broadcaster_login}</span>
+                  <span style={{ color:key.connected_sources ? "var(--green)" : "var(--text3)", marginLeft:8, fontSize:10, fontFamily:"'JetBrains Mono',monospace" }}>{key.connected_sources || 0} connected</span>
+                </div>
+                <button onClick={() => revokePluginKey(key.id)} style={{ ...C.btnDanger, padding:"4px 9px", fontSize:10 }}>Revoke</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {error && (
         <div style={{ ...C.card, borderColor:"rgba(255,77,109,0.35)", color:"var(--red)", fontSize:12, fontFamily:"'JetBrains Mono',monospace", marginBottom:14 }}>

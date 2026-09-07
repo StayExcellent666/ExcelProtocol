@@ -10,6 +10,7 @@ Uses secrets on hosting service to complete the lookups
 
 import os
 import asyncio
+import hashlib
 import json
 import re
 import secrets
@@ -50,6 +51,12 @@ TWITCH_API            = "https://api.twitch.tv/helix"
 
 # WebSocket connections for overlays: {guild_id: set of ws}
 _overlay_connections: dict = {}
+
+# Authenticated native ExcelFortuna sources, grouped by Twitch broadcaster ID.
+# These sockets are independent from the existing browser overlay connections.
+_fortuna_connections: dict[str, set] = {}
+_fortuna_connections_by_key: dict[int, set] = {}
+_fortuna_finish_tasks: dict[int, asyncio.Task] = {}
 
 async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: str):
     """Push a !play event to all overlay WebSockets for guilds linked to this Twitch channel.
@@ -138,6 +145,15 @@ async def db_execute(query: str, params: tuple = ()):
         await db.execute("PRAGMA busy_timeout=30000")
         await db.execute(query, params)
         await db.commit()
+
+async def db_insert(query: str, params: tuple = ()) -> int:
+    """Execute an INSERT and return its row id using the normal WAL settings."""
+    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
+        cursor = await db.execute(query, params)
+        await db.commit()
+        return int(cursor.lastrowid)
 
 # ── Shared HTTP Session ───────────────────────────────────────────────────────
 _http_session: http_client.ClientSession | None = None
@@ -453,7 +469,7 @@ def _session_can_access_guild(session: dict, guild_id: str) -> bool:
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/twitch/callback", "/api/eventsub/callback")
-    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/auth/twitch/login") or request.path.startswith("/companion"):
+    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/auth/twitch/login") or request.path.startswith("/companion") or request.path.startswith("/api/fortuna/plugin"):
         return await handler(request)
 
     session = get_session(request)
@@ -2215,6 +2231,11 @@ async def eventsub_callback(request):
             broadcaster_login = event.get("broadcaster_user_login", "").lower()
             redeemer          = event.get("user_name", "")
 
+            # Fortuna uses the same verified redemption event as the existing
+            # reward-video integration, but stores and broadcasts it through
+            # its own isolated tables/socket path.
+            await _fortuna_record_redemption(event)
+
             # Find which guild this broadcaster belongs to
             rows = await db_fetch("SELECT guild_id FROM broadcaster_tokens WHERE twitch_login = ?", (broadcaster_login,))
             for row in rows:
@@ -3240,6 +3261,482 @@ def _require_dev_or_admin(request):
 
 
 _FORTUNA_HISTORY_DAYS = 30
+
+
+def _fortuna_token_hash(token: str) -> str:
+    """Return the digest stored for a revocable OBS plugin key."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _fortuna_remaining_seconds(giveaway: dict) -> int:
+    duration = max(0, int(giveaway.get("duration_seconds") or 0))
+    if not duration:
+        return 0
+    raw_started = str(giveaway.get("started_at") or "")
+    try:
+        started = datetime.fromisoformat(raw_started.replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        return max(0, int(duration - elapsed))
+    except (TypeError, ValueError):
+        return duration
+
+
+async def _fortuna_broadcast(broadcaster_id: str, payload: dict):
+    """Send a protocol event to every connected source for one channel."""
+    dead = set()
+    message = json.dumps(payload, separators=(",", ":"))
+    for ws in list(_fortuna_connections.get(str(broadcaster_id), set())):
+        try:
+            await ws.send_str(message)
+        except Exception:
+            dead.add(ws)
+    if dead:
+        _fortuna_connections.get(str(broadcaster_id), set()).difference_update(dead)
+
+
+async def _fortuna_open_giveaway(broadcaster_id: str):
+    rows = await db_fetch(
+        """SELECT * FROM fortuna_giveaways
+           WHERE twitch_broadcaster_id = ? AND status = 'open'
+           ORDER BY id DESC LIMIT 1""",
+        (str(broadcaster_id),),
+    )
+    return rows[0] if rows else None
+
+
+async def _fortuna_record_redemption(event: dict):
+    """Record a matching Channel Points redemption for the active giveaway."""
+    broadcaster_id = str(event.get("broadcaster_user_id") or "")
+    if not broadcaster_id:
+        return False
+    giveaway = await _fortuna_open_giveaway(broadcaster_id)
+    if not giveaway:
+        return False
+    reward = event.get("reward") or {}
+    reward_id = str(reward.get("id") or "")
+    reward_title = str(reward.get("title") or "")
+    configured_id = str(giveaway.get("reward_id") or "")
+    configured_title = str(giveaway.get("reward_title") or "")
+    if configured_id:
+        if reward_id != configured_id:
+            return False
+    elif reward_title.casefold() != configured_title.casefold():
+        return False
+    else:
+        await db_execute(
+            "UPDATE fortuna_giveaways SET reward_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND reward_id IS NULL",
+            (reward_id, giveaway["id"]),
+        )
+
+    user_id = str(event.get("user_id") or "")
+    user_login = str(event.get("user_login") or "").lower()
+    display_name = str(event.get("user_name") or user_login)
+    redemption_id = str(event.get("id") or "")
+    if not user_id or not redemption_id:
+        return False
+    previous = await db_fetch(
+        """SELECT 1 FROM fortuna_entries
+           WHERE giveaway_id = ? AND twitch_user_id = ? AND eligible = 1
+           LIMIT 1""",
+        (giveaway["id"], user_id),
+    )
+    eligible = 0 if previous else 1
+    note = "Duplicate entry" if previous else None
+    try:
+        await db_insert(
+            """INSERT INTO fortuna_entries
+               (giveaway_id, redemption_id, twitch_user_id, twitch_user_login,
+                twitch_display_name, redeemed_at, eligible, disqualification_note)
+               VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)""",
+            (giveaway["id"], redemption_id, user_id, user_login, display_name,
+             event.get("redeemed_at"), eligible, note),
+        )
+    except Exception as exc:
+        if "UNIQUE" in str(exc).upper():
+            return False
+        raise
+    if not eligible:
+        return False
+
+    count_rows = await db_fetch(
+        """SELECT COUNT(DISTINCT twitch_user_id) AS count
+           FROM fortuna_entries WHERE giveaway_id = ? AND eligible = 1""",
+        (giveaway["id"],),
+    )
+    entry_count = int(count_rows[0]["count"] if count_rows else 0)
+    await _fortuna_broadcast(broadcaster_id, {
+        "type": "entry", "user_id": user_id, "display_name": display_name,
+        "entry_count": entry_count,
+    })
+    target = int(giveaway.get("target_entries") or 0)
+    if target > 0 and entry_count >= target:
+        await _fortuna_finish_giveaway(int(giveaway["id"]))
+    return True
+
+
+async def _fortuna_send_snapshot(ws, broadcaster_id: str):
+    """Hydrate a newly connected OBS source without exposing plugin secrets."""
+    giveaway = await _fortuna_open_giveaway(broadcaster_id)
+    await ws.send_str(json.dumps({"type": "reset_entries"}))
+    if not giveaway:
+        await ws.send_str(json.dumps({
+            "type": "state", "status": "idle", "entry_count": 0,
+            "target_entries": 0, "remaining_seconds": 0,
+        }))
+        return
+    entries = await db_fetch(
+        """SELECT twitch_user_id, twitch_display_name
+           FROM fortuna_entries
+           WHERE giveaway_id = ? AND eligible = 1
+           ORDER BY id ASC""",
+        (giveaway["id"],),
+    )
+    # Only the first eligible redemption per Twitch account appears on wheel.
+    unique = []
+    seen = set()
+    for entry in entries:
+        user_id = str(entry["twitch_user_id"])
+        if user_id not in seen:
+            seen.add(user_id)
+            unique.append(entry)
+    await ws.send_str(json.dumps({
+        "type": "state",
+        "status": "open",
+        "giveaway_id": giveaway["id"],
+        "title": giveaway["title"],
+        "entry_count": len(unique),
+        "target_entries": int(giveaway.get("target_entries") or 0),
+        "remaining_seconds": _fortuna_remaining_seconds(giveaway),
+    }))
+    for index, entry in enumerate(unique, start=1):
+        await ws.send_str(json.dumps({
+            "type": "entry",
+            "user_id": str(entry["twitch_user_id"]),
+            "display_name": entry["twitch_display_name"],
+            "entry_count": index,
+        }))
+
+
+async def _fortuna_announce_winner(giveaway: dict, winner: dict):
+    """Name the selected winner in Twitch chat through ExcelProtocol's bot."""
+    if not _bot_ref or not getattr(_bot_ref, "twitch_chat_bot", None):
+        logger.warning("Fortuna winner selected, but the Twitch chat bot is unavailable")
+        return False
+    channel_login = str(giveaway["twitch_broadcaster_login"]).lower()
+    channel = next(
+        (candidate for candidate in _bot_ref.twitch_chat_bot.connected_channels
+         if candidate.name.lower() == channel_login),
+        None,
+    )
+    if not channel:
+        logger.warning("Fortuna could not announce winner: @%s is not joined", channel_login)
+        return False
+    await channel.send(
+        f"🎉 {winner['twitch_display_name']} won {giveaway['title']}! Congratulations!"
+    )
+    await db_execute(
+        "UPDATE fortuna_giveaways SET winner_announced = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (giveaway["id"],),
+    )
+    return True
+
+
+async def _fortuna_reveal_after_spin(giveaway: dict, winner: dict):
+    await asyncio.sleep(max(2.0, min(30.0, int(giveaway.get("spin_duration_ms") or 8000) / 1000)))
+    await _fortuna_broadcast(str(giveaway["twitch_broadcaster_id"]), {
+        "type": "winner",
+        "winner_id": str(winner["twitch_user_id"]),
+        "winner_display_name": winner["twitch_display_name"],
+    })
+    try:
+        await _fortuna_announce_winner(giveaway, winner)
+    except Exception as exc:
+        logger.error("Fortuna winner chat announcement failed: %s", exc, exc_info=True)
+
+
+async def _fortuna_finish_giveaway(giveaway_id: int):
+    """Atomically choose one unique eligible entrant and begin the wheel."""
+    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=30000")
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            "SELECT * FROM fortuna_giveaways WHERE id = ? AND status = 'open'",
+            (giveaway_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            await db.rollback()
+            return False
+        giveaway = dict(row)
+        async with db.execute(
+            """SELECT e.twitch_user_id, e.twitch_user_login, e.twitch_display_name
+               FROM fortuna_entries AS e
+               JOIN (
+                   SELECT twitch_user_id, MIN(id) AS first_id
+                   FROM fortuna_entries
+                   WHERE giveaway_id = ? AND eligible = 1
+                   GROUP BY twitch_user_id
+               ) AS first_entry ON first_entry.first_id = e.id
+               ORDER BY e.id ASC""",
+            (giveaway_id,),
+        ) as cursor:
+            entrants = [dict(item) for item in await cursor.fetchall()]
+        if not entrants:
+            await db.rollback()
+            await _fortuna_broadcast(str(giveaway["twitch_broadcaster_id"]), {
+                "type": "error", "message": "No eligible entries yet",
+            })
+            return False
+        winner_index = secrets.randbelow(len(entrants))
+        winner = entrants[winner_index]
+        await db.execute(
+            """UPDATE fortuna_giveaways
+               SET status = 'completed', ended_at = CURRENT_TIMESTAMP,
+                   winner_twitch_user_id = ?, winner_twitch_login = ?,
+                   winner_display_name = ?, winner_selected_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND status = 'open'""",
+            (winner["twitch_user_id"], winner["twitch_user_login"],
+             winner["twitch_display_name"], giveaway_id),
+        )
+        await db.commit()
+
+    await _fortuna_broadcast(str(giveaway["twitch_broadcaster_id"]), {
+        "type": "spin",
+        "giveaway_id": giveaway_id,
+        "winner_id": str(winner["twitch_user_id"]),
+        "winner_display_name": winner["twitch_display_name"],
+        "winner_index": winner_index,
+        "spin_duration_ms": int(giveaway.get("spin_duration_ms") or 8000),
+    })
+    task = asyncio.create_task(_fortuna_reveal_after_spin(giveaway, winner))
+    _fortuna_finish_tasks[giveaway_id] = task
+    task.add_done_callback(
+        lambda finished, gid=giveaway_id:
+            _fortuna_finish_tasks.pop(gid, None)
+            if _fortuna_finish_tasks.get(gid) is finished else None
+    )
+    return True
+
+
+def _fortuna_schedule_deadline(giveaway_id: int, duration_seconds: int):
+    if duration_seconds <= 0:
+        return
+    previous = _fortuna_finish_tasks.pop(giveaway_id, None)
+    if previous:
+        previous.cancel()
+
+    async def wait_and_finish():
+        await asyncio.sleep(duration_seconds)
+        await _fortuna_finish_giveaway(giveaway_id)
+
+    task = asyncio.create_task(wait_and_finish())
+    _fortuna_finish_tasks[giveaway_id] = task
+    task.add_done_callback(
+        lambda finished, gid=giveaway_id:
+            _fortuna_finish_tasks.pop(gid, None)
+            if _fortuna_finish_tasks.get(gid) is finished else None
+    )
+
+
+async def get_fortuna_plugin_keys(request):
+    _require_dev_or_admin(request)
+    keys = await db_fetch(
+        """SELECT id, twitch_broadcaster_id, twitch_broadcaster_login, label,
+                  created_at, last_seen_at
+           FROM fortuna_plugin_keys
+           WHERE revoked_at IS NULL
+           ORDER BY created_at DESC"""
+    )
+    for key in keys:
+        key["connected_sources"] = len(
+            _fortuna_connections.get(str(key["twitch_broadcaster_id"]), set())
+        )
+    return web.json_response({"keys": keys}, headers={"Cache-Control": "no-store"})
+
+
+async def create_fortuna_plugin_key(request):
+    _require_dev_or_admin(request)
+    body = await request.json()
+    login = str(body.get("twitch_login") or "").strip().lower().lstrip("@")
+    label = str(body.get("label") or "OBS").strip()[:60] or "OBS"
+    if not re.fullmatch(r"[a-z0-9_]{3,25}", login):
+        raise web.HTTPBadRequest(reason="Enter a valid Twitch login")
+
+    session = get_http_session()
+    app_token = await get_twitch_token()
+    async with session.get(
+        f"{TWITCH_API}/users",
+        headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {app_token}"},
+        params={"login": login},
+    ) as response:
+        payload = await response.json(content_type=None)
+        user = payload.get("data", [None])[0] if response.status == 200 and payload.get("data") else None
+    if not user:
+        raise web.HTTPNotFound(reason="Twitch channel not found")
+
+    token = "fortuna_" + secrets.token_urlsafe(32)
+    key_id = await db_insert(
+        """INSERT INTO fortuna_plugin_keys
+           (twitch_broadcaster_id, twitch_broadcaster_login, label, token_hash)
+           VALUES (?, ?, ?, ?)""",
+        (str(user["id"]), str(user["login"]).lower(), label, _fortuna_token_hash(token)),
+    )
+    return web.json_response({
+        "id": key_id,
+        "twitch_broadcaster_id": str(user["id"]),
+        "twitch_broadcaster_login": str(user["login"]).lower(),
+        "label": label,
+        "plugin_key": token,
+        "warning": "Copy this key now. ExcelProtocol stores only its hash.",
+    })
+
+
+async def revoke_fortuna_plugin_key(request):
+    _require_dev_or_admin(request)
+    try:
+        key_id = int(request.match_info["key_id"])
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="Invalid plugin key ID")
+    rows = await db_fetch(
+        "SELECT twitch_broadcaster_id FROM fortuna_plugin_keys WHERE id = ? AND revoked_at IS NULL",
+        (key_id,),
+    )
+    if not rows:
+        raise web.HTTPNotFound(reason="Plugin key not found")
+    await db_execute(
+        "UPDATE fortuna_plugin_keys SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (key_id,),
+    )
+    broadcaster_id = str(rows[0]["twitch_broadcaster_id"])
+    for ws in list(_fortuna_connections_by_key.get(key_id, set())):
+        await ws.close(code=1008, message=b"Plugin key revoked")
+    return web.json_response({"ok": True})
+
+
+async def fortuna_plugin_ws(request):
+    """Authenticated control/event socket used by the native OBS source."""
+    authorization = request.headers.get("Authorization", "")
+    token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    if not token:
+        raise web.HTTPUnauthorized(reason="Missing plugin key")
+    rows = await db_fetch(
+        """SELECT id, twitch_broadcaster_id, twitch_broadcaster_login
+           FROM fortuna_plugin_keys
+           WHERE token_hash = ? AND revoked_at IS NULL""",
+        (_fortuna_token_hash(token),),
+    )
+    if not rows:
+        raise web.HTTPUnauthorized(reason="Invalid or revoked plugin key")
+    key = rows[0]
+    broadcaster_id = str(key["twitch_broadcaster_id"])
+    broadcaster_login = str(key["twitch_broadcaster_login"])
+    ws = web.WebSocketResponse(heartbeat=30, max_msg_size=16384)
+    await ws.prepare(request)
+    _fortuna_connections.setdefault(broadcaster_id, set()).add(ws)
+    _fortuna_connections_by_key.setdefault(int(key["id"]), set()).add(ws)
+    await db_execute(
+        "UPDATE fortuna_plugin_keys SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (key["id"],),
+    )
+    await ws.send_str(json.dumps({"type": "hello", "channel": broadcaster_login}))
+    await _fortuna_send_snapshot(ws, broadcaster_id)
+
+    async def heartbeat():
+        while not ws.closed:
+            await asyncio.sleep(1)
+            giveaway = await _fortuna_open_giveaway(broadcaster_id)
+            if giveaway:
+                await ws.send_str(json.dumps({
+                    "type": "state", "status": "open",
+                    "giveaway_id": giveaway["id"], "title": giveaway["title"],
+                    "entry_count": len({row["twitch_user_id"] for row in await db_fetch(
+                        "SELECT twitch_user_id FROM fortuna_entries WHERE giveaway_id = ? AND eligible = 1",
+                        (giveaway["id"],),
+                    )}),
+                    "target_entries": int(giveaway.get("target_entries") or 0),
+                    "remaining_seconds": _fortuna_remaining_seconds(giveaway),
+                }))
+            else:
+                await ws.send_str(json.dumps({"type": "pong"}))
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        async for message in ws:
+            if message.type != web.WSMsgType.TEXT:
+                continue
+            try:
+                command = json.loads(message.data)
+            except (TypeError, json.JSONDecodeError):
+                await ws.send_str(json.dumps({"type": "error", "message": "Invalid command JSON"}))
+                continue
+            command_type = str(command.get("type") or "")
+            if command_type == "ping":
+                await ws.send_str(json.dumps({"type": "pong"}))
+            elif command_type == "start":
+                if await _fortuna_open_giveaway(broadcaster_id):
+                    await ws.send_str(json.dumps({"type": "error", "message": "A giveaway is already open"}))
+                    continue
+                title = str(command.get("title") or "Fortuna Giveaway").strip()[:100]
+                reward_title = str(command.get("reward_title") or "Giveaway Entry").strip()[:100]
+                target_entries = max(0, min(100000, int(command.get("target_entries") or 0)))
+                duration_seconds = max(0, min(86400, int(command.get("duration_seconds") or 0)))
+                spin_duration_ms = max(2000, min(30000, int(command.get("spin_duration_ms") or 8000)))
+                giveaway_id = await db_insert(
+                    """INSERT INTO fortuna_giveaways
+                       (twitch_broadcaster_id, twitch_broadcaster_login,
+                        reward_title, title, target_entries, duration_seconds,
+                        spin_duration_ms)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (broadcaster_id, broadcaster_login, reward_title, title,
+                     target_entries, duration_seconds, spin_duration_ms),
+                )
+                await _fortuna_broadcast(broadcaster_id, {"type": "reset_entries"})
+                await _fortuna_broadcast(broadcaster_id, {
+                    "type": "state", "status": "open", "giveaway_id": giveaway_id,
+                    "title": title, "entry_count": 0,
+                    "target_entries": target_entries,
+                    "remaining_seconds": duration_seconds,
+                })
+                _fortuna_schedule_deadline(giveaway_id, duration_seconds)
+            elif command_type == "spin":
+                giveaway = await _fortuna_open_giveaway(broadcaster_id)
+                if not giveaway:
+                    await ws.send_str(json.dumps({"type": "error", "message": "No giveaway is open"}))
+                else:
+                    await _fortuna_finish_giveaway(int(giveaway["id"]))
+            elif command_type == "cancel":
+                giveaway = await _fortuna_open_giveaway(broadcaster_id)
+                if not giveaway:
+                    await ws.send_str(json.dumps({"type": "error", "message": "No giveaway is open"}))
+                else:
+                    await db_execute(
+                        """UPDATE fortuna_giveaways SET status = 'cancelled',
+                                  ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                           WHERE id = ? AND status = 'open'""",
+                        (giveaway["id"],),
+                    )
+                    task = _fortuna_finish_tasks.pop(int(giveaway["id"]), None)
+                    if task:
+                        task.cancel()
+                    await _fortuna_broadcast(broadcaster_id, {"type": "cancelled"})
+            else:
+                await ws.send_str(json.dumps({"type": "error", "message": "Unknown command"}))
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.debug("ExcelFortuna socket closed for @%s: %s", broadcaster_login, exc)
+    finally:
+        heartbeat_task.cancel()
+        _fortuna_connections.get(broadcaster_id, set()).discard(ws)
+        _fortuna_connections_by_key.get(int(key["id"]), set()).discard(ws)
+        if not ws.closed:
+            await ws.close()
+    return ws
 
 
 async def get_fortuna_history(request):
@@ -4347,6 +4844,10 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/api/admin/audit-log", admin_audit_log)
     app.router.add_get("/api/admin/fortuna", get_fortuna_history)
     app.router.add_get("/api/admin/fortuna/{giveaway_id}", get_fortuna_giveaway)
+    app.router.add_get("/api/admin/fortuna-plugin-keys", get_fortuna_plugin_keys)
+    app.router.add_post("/api/admin/fortuna-plugin-keys", create_fortuna_plugin_key)
+    app.router.add_delete("/api/admin/fortuna-plugin-keys/{key_id}", revoke_fortuna_plugin_key)
+    app.router.add_get("/api/fortuna/plugin/ws", fortuna_plugin_ws)
     app.router.add_get("/api/guilds",    get_guilds)
     app.router.add_get("/api/guild/{guild_id}", get_guild_summary)
 

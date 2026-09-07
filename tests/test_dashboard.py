@@ -401,6 +401,65 @@ class TestDevDashboardRoutes:
         assert 'activeTab==="fortuna"' in source
         assert "(effectivelyDev || effectivelyAdmin || isAdmin) && <FortunaTab />" in source
 
+    def test_fortuna_plugin_tokens_are_hashed_deterministically(self):
+        assert dashboard_server._fortuna_token_hash("secret") == (
+            "2bb80d537b1da3e38bd30361aa855686bde0"
+            "eacd7162fef6a25fe97bf527a25b"
+        )
+        assert dashboard_server._fortuna_token_hash("secret") != "secret"
+
+    @pytest.mark.asyncio
+    async def test_matching_fortuna_redemption_is_recorded_and_broadcast(self, monkeypatch):
+        inserts = []
+        broadcasts = []
+
+        async def fake_open(_broadcaster_id):
+            return {
+                "id": 7, "reward_id": None, "reward_title": "Giveaway Entry",
+                "target_entries": 0,
+            }
+
+        async def fake_fetch(query, params=()):
+            if "SELECT 1 FROM fortuna_entries" in query:
+                return []
+            if "COUNT(DISTINCT twitch_user_id)" in query:
+                return [{"count": 1}]
+            raise AssertionError(query)
+
+        async def fake_execute(*_args, **_kwargs):
+            return None
+
+        async def fake_insert(query, params=()):
+            inserts.append((query, params))
+            return 1
+
+        async def fake_broadcast(broadcaster_id, payload):
+            broadcasts.append((broadcaster_id, payload))
+
+        monkeypatch.setattr(dashboard_server, "_fortuna_open_giveaway", fake_open)
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_fetch)
+        monkeypatch.setattr(dashboard_server, "db_execute", fake_execute)
+        monkeypatch.setattr(dashboard_server, "db_insert", fake_insert)
+        monkeypatch.setattr(dashboard_server, "_fortuna_broadcast", fake_broadcast)
+
+        accepted = await dashboard_server._fortuna_record_redemption({
+            "id": "redemption-1",
+            "broadcaster_user_id": "100",
+            "user_id": "viewer-1",
+            "user_login": "viewer",
+            "user_name": "Viewer",
+            "redeemed_at": "2026-09-07T20:00:00Z",
+            "reward": {"id": "reward-1", "title": "Giveaway Entry"},
+        })
+
+        assert accepted is True
+        assert len(inserts) == 1
+        assert inserts[0][1][1] == "redemption-1"
+        assert broadcasts == [("100", {
+            "type": "entry", "user_id": "viewer-1",
+            "display_name": "Viewer", "entry_count": 1,
+        })]
+
 
 class TestOperationalSafetyRegressions:
     def test_health_poll_waits_for_reconciliation_event(self):

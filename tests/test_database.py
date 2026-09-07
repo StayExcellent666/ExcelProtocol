@@ -59,6 +59,9 @@ class TestSchema:
         entry_cols = {
             r[1] for r in conn.execute("PRAGMA table_info(fortuna_entries)").fetchall()
         }
+        plugin_key_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(fortuna_plugin_keys)").fetchall()
+        }
         indexes = {
             r[1] for r in conn.execute(
                 "SELECT type, name FROM sqlite_master WHERE type = 'index'"
@@ -70,6 +73,8 @@ class TestSchema:
             "twitch_broadcaster_id", "twitch_broadcaster_login", "reward_id",
             "reward_title", "status", "started_at", "ended_at",
             "winner_twitch_user_id", "winner_display_name",
+            "target_entries", "duration_seconds", "spin_duration_ms",
+            "winner_announced",
         }.issubset(giveaway_cols)
         assert {
             "giveaway_id", "redemption_id", "twitch_user_id",
@@ -78,6 +83,11 @@ class TestSchema:
         assert "idx_fortuna_giveaways_started_at" in indexes
         assert "idx_fortuna_entries_giveaway" in indexes
         assert "idx_fortuna_entries_user" in indexes
+        assert {
+            "twitch_broadcaster_id", "twitch_broadcaster_login", "label",
+            "token_hash", "created_at", "last_seen_at", "revoked_at",
+        }.issubset(plugin_key_cols)
+        assert "idx_fortuna_plugin_keys_broadcaster" in indexes
 
     def test_fortuna_redemption_id_is_deduplicated(self, db):
         import sqlite3

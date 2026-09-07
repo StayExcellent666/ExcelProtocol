@@ -775,6 +775,21 @@ class Database:
             ON fortuna_giveaways(started_at DESC)
         ''')
 
+        # Columns added by the live ExcelFortuna engine. Keep these as small,
+        # additive migrations because existing installations may already have
+        # the history-only table created by the first Fortuna release.
+        fortuna_columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(fortuna_giveaways)").fetchall()
+        }
+        for column, definition in (
+            ("target_entries", "INTEGER NOT NULL DEFAULT 0"),
+            ("duration_seconds", "INTEGER NOT NULL DEFAULT 0"),
+            ("spin_duration_ms", "INTEGER NOT NULL DEFAULT 8000"),
+            ("winner_announced", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in fortuna_columns:
+                cursor.execute(f"ALTER TABLE fortuna_giveaways ADD COLUMN {column} {definition}")
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS fortuna_entries (
                 id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -797,6 +812,25 @@ class Database:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_fortuna_entries_user
             ON fortuna_entries(giveaway_id, twitch_user_id)
+        ''')
+
+        # Revocable OBS plugin keys. Only a SHA-256 digest is persisted; the
+        # plaintext key is returned once when an owner/admin generates it.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fortuna_plugin_keys (
+                id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                twitch_broadcaster_id    TEXT NOT NULL,
+                twitch_broadcaster_login TEXT NOT NULL,
+                label                    TEXT NOT NULL DEFAULT 'OBS',
+                token_hash               TEXT NOT NULL UNIQUE,
+                created_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at             TIMESTAMP,
+                revoked_at               TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_fortuna_plugin_keys_broadcaster
+            ON fortuna_plugin_keys(twitch_broadcaster_id, revoked_at)
         ''')
 
         # Latest rotated credentials for the Twitch chat bot. Fly secrets are
