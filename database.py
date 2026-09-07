@@ -757,6 +757,8 @@ class Database:
                 twitch_broadcaster_login TEXT NOT NULL,
                 reward_id                TEXT,
                 reward_title             TEXT NOT NULL DEFAULT 'Giveaway Entry',
+                entry_mode               TEXT NOT NULL DEFAULT 'channel_reward',
+                chat_command             TEXT NOT NULL DEFAULT '!enter',
                 title                    TEXT NOT NULL DEFAULT 'Giveaway',
                 status                   TEXT NOT NULL DEFAULT 'open'
                                          CHECK(status IN ('open', 'completed', 'cancelled')),
@@ -786,6 +788,8 @@ class Database:
             ("duration_seconds", "INTEGER NOT NULL DEFAULT 0"),
             ("spin_duration_ms", "INTEGER NOT NULL DEFAULT 8000"),
             ("winner_announced", "INTEGER NOT NULL DEFAULT 0"),
+            ("entry_mode", "TEXT NOT NULL DEFAULT 'channel_reward'"),
+            ("chat_command", "TEXT NOT NULL DEFAULT '!enter'"),
         ):
             if column not in fortuna_columns:
                 cursor.execute(f"ALTER TABLE fortuna_giveaways ADD COLUMN {column} {definition}")
@@ -2210,7 +2214,12 @@ class Database:
             days = [row[0] for row in cursor.fetchall()]
             streak = 0
             from datetime import date as _date, timedelta as _td
-            today = _date.today()
+            # SQLite's date('now') is UTC, so anchor the Python side to that
+            # same day. Using local date here broke streaks between local and
+            # UTC midnight (for example 00:00-02:00 in Central Europe).
+            today = _date.fromisoformat(
+                cursor.execute("SELECT date('now')").fetchone()[0]
+            )
             cursor_day = today
             for d in days:
                 # Parse YYYY-MM-DD

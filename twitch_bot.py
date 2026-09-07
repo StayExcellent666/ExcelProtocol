@@ -66,6 +66,24 @@ class TwitchChatBot(commands.Bot):
         args = parts[1] if len(parts) > 1 else ""
         channel_name = message.channel.name.lower()
 
+        # An active ExcelFortuna chat-command giveaway gets first refusal on
+        # its configured command. Outside that narrow case, existing built-in
+        # and custom command behaviour is unchanged.
+        try:
+            from dashboard_server import _fortuna_record_chat_entry
+            author_login = str(getattr(message.author, "name", "") or "").lower()
+            author_id = str(getattr(message.author, "id", "") or author_login)
+            display_name = str(
+                getattr(message.author, "display_name", "") or author_login
+            )
+            if await _fortuna_record_chat_entry(
+                channel_name, command_name, str(getattr(message, "id", "") or ""),
+                author_id, author_login, display_name,
+            ):
+                return
+        except Exception as e:
+            logger.error(f"Fortuna chat entry failed for {channel_name}: {e}", exc_info=True)
+
         handled = await self._handle_builtin(message, command_name, args, channel_name)
         if handled:
             return

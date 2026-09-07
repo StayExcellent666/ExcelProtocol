@@ -58,6 +58,7 @@ _fortuna_connections: dict[str, set] = {}
 _fortuna_connections_by_key: dict[int, set] = {}
 _fortuna_finish_tasks: dict[int, asyncio.Task] = {}
 _fortuna_test_channels: set[str] = set()
+_fortuna_chat_commands: dict[str, str] = {}
 
 async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: str):
     """Push a !play event to all overlay WebSockets for guilds linked to this Twitch channel.
@@ -3315,6 +3316,8 @@ async def _fortuna_record_redemption(event: dict):
     giveaway = await _fortuna_open_giveaway(broadcaster_id)
     if not giveaway:
         return False
+    if str(giveaway.get("entry_mode") or "channel_reward") != "channel_reward":
+        return False
     reward = event.get("reward") or {}
     reward_id = str(reward.get("id") or "")
     reward_title = str(reward.get("title") or "")
@@ -3377,6 +3380,77 @@ async def _fortuna_record_redemption(event: dict):
     return True
 
 
+async def _fortuna_record_chat_entry(channel_login: str, command_name: str,
+                                     message_id: str, user_id: str,
+                                     user_login: str, display_name: str):
+    """Consume a matching chat command and record one eligible entry per user."""
+    channel_login = str(channel_login).lower()
+    command_name = str(command_name).casefold()
+    # Avoid a database lookup for every ordinary command across every Twitch
+    # channel. This cache exists only while a chat-entry giveaway is active.
+    if _fortuna_chat_commands.get(channel_login) != command_name:
+        return False
+    rows = await db_fetch(
+        """SELECT * FROM fortuna_giveaways
+           WHERE lower(twitch_broadcaster_login) = ? AND status = 'open'
+           ORDER BY id DESC LIMIT 1""",
+        (channel_login,),
+    )
+    if not rows:
+        return False
+    giveaway = rows[0]
+    if str(giveaway.get("entry_mode") or "channel_reward") != "chat_command":
+        return False
+    configured_command = str(giveaway.get("chat_command") or "!enter").casefold()
+    if command_name != configured_command:
+        return False
+
+    user_id = str(user_id or "")
+    user_login = str(user_login or "").lower()
+    display_name = str(display_name or user_login)
+    if not user_id or not user_login:
+        return True
+    previous = await db_fetch(
+        """SELECT 1 FROM fortuna_entries
+           WHERE giveaway_id = ? AND twitch_user_id = ? AND eligible = 1
+           LIMIT 1""",
+        (giveaway["id"], user_id),
+    )
+    eligible = 0 if previous else 1
+    note = "Duplicate entry" if previous else None
+    entry_event_id = f"chat:{giveaway['id']}:{message_id or secrets.token_urlsafe(12)}"
+    try:
+        await db_insert(
+            """INSERT INTO fortuna_entries
+               (giveaway_id, redemption_id, twitch_user_id, twitch_user_login,
+                twitch_display_name, eligible, disqualification_note)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (giveaway["id"], entry_event_id, user_id, user_login,
+             display_name, eligible, note),
+        )
+    except Exception as exc:
+        if "UNIQUE" in str(exc).upper():
+            return True
+        raise
+    if not eligible:
+        return True
+
+    count_rows = await db_fetch(
+        """SELECT COUNT(DISTINCT twitch_user_id) AS count
+           FROM fortuna_entries WHERE giveaway_id = ? AND eligible = 1""",
+        (giveaway["id"],),
+    )
+    entry_count = int(count_rows[0]["count"] if count_rows else 0)
+    await _fortuna_broadcast(str(giveaway["twitch_broadcaster_id"]), {
+        "type": "entry", "user_id": user_id, "display_name": display_name,
+        "entry_count": entry_count,
+    })
+    target = int(giveaway.get("target_entries") or 0)
+    if target > 0 and entry_count >= target:
+        await _fortuna_finish_giveaway(int(giveaway["id"]))
+    return True
+
+
 async def _fortuna_send_snapshot(ws, broadcaster_id: str):
     """Hydrate a newly connected OBS source without exposing plugin secrets."""
     giveaway = await _fortuna_open_giveaway(broadcaster_id)
@@ -3387,6 +3461,12 @@ async def _fortuna_send_snapshot(ws, broadcaster_id: str):
             "target_entries": 0, "remaining_seconds": 0,
         }))
         return
+    if str(giveaway.get("entry_mode") or "channel_reward") == "chat_command":
+        login = str(giveaway.get("twitch_broadcaster_login") or "").lower()
+        if login:
+            _fortuna_chat_commands[login] = str(
+                giveaway.get("chat_command") or "!enter"
+            ).casefold()
     entries = await db_fetch(
         """SELECT twitch_user_id, twitch_display_name
            FROM fortuna_entries
@@ -3580,6 +3660,10 @@ async def _fortuna_finish_giveaway(giveaway_id: int):
         )
         await db.commit()
 
+    _fortuna_chat_commands.pop(
+        str(giveaway.get("twitch_broadcaster_login") or "").lower(), None,
+    )
+
     await _fortuna_broadcast(str(giveaway["twitch_broadcaster_id"]), {
         "type": "spin",
         "giveaway_id": giveaway_id,
@@ -3758,18 +3842,35 @@ async def fortuna_plugin_ws(request):
                     continue
                 title = str(command.get("title") or "Fortuna Giveaway").strip()[:100]
                 reward_title = str(command.get("reward_title") or "Giveaway Entry").strip()[:100]
+                entry_mode = str(command.get("entry_mode") or "channel_reward")
+                if entry_mode not in {"channel_reward", "chat_command"}:
+                    entry_mode = "channel_reward"
+                chat_command = str(command.get("chat_command") or "!enter").strip().lower()
+                if not chat_command.startswith("!"):
+                    chat_command = "!" + chat_command
+                if not re.fullmatch(r"![a-z0-9_]{1,25}", chat_command):
+                    await ws.send_str(json.dumps({
+                        "type": "error",
+                        "message": "Chat entry command must look like !enter",
+                    }))
+                    continue
                 target_entries = max(0, min(100000, int(command.get("target_entries") or 0)))
                 duration_seconds = max(0, min(86400, int(command.get("duration_seconds") or 0)))
                 spin_duration_ms = max(2000, min(30000, int(command.get("spin_duration_ms") or 8000)))
                 giveaway_id = await db_insert(
                     """INSERT INTO fortuna_giveaways
                        (twitch_broadcaster_id, twitch_broadcaster_login,
-                        reward_title, title, target_entries, duration_seconds,
-                        spin_duration_ms)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (broadcaster_id, broadcaster_login, reward_title, title,
+                        reward_title, entry_mode, chat_command, title,
+                        target_entries, duration_seconds, spin_duration_ms)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (broadcaster_id, broadcaster_login, reward_title,
+                     entry_mode, chat_command, title,
                      target_entries, duration_seconds, spin_duration_ms),
                 )
+                if entry_mode == "chat_command":
+                    _fortuna_chat_commands[broadcaster_login.lower()] = chat_command
+                else:
+                    _fortuna_chat_commands.pop(broadcaster_login.lower(), None)
                 await _fortuna_broadcast(broadcaster_id, {"type": "reset_entries"})
                 await _fortuna_broadcast(broadcaster_id, {
                     "type": "state", "status": "open", "giveaway_id": giveaway_id,
@@ -3816,6 +3917,7 @@ async def fortuna_plugin_ws(request):
                     task = _fortuna_finish_tasks.pop(int(giveaway["id"]), None)
                     if task:
                         task.cancel()
+                    _fortuna_chat_commands.pop(broadcaster_login.lower(), None)
                     await _fortuna_broadcast(broadcaster_id, {"type": "cancelled"})
             else:
                 await ws.send_str(json.dumps({"type": "error", "message": "Unknown command"}))

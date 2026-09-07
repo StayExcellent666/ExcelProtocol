@@ -74,7 +74,7 @@ class TestSchema:
             "reward_title", "status", "started_at", "ended_at",
             "winner_twitch_user_id", "winner_display_name",
             "target_entries", "duration_seconds", "spin_duration_ms",
-            "winner_announced",
+            "winner_announced", "entry_mode", "chat_command",
         }.issubset(giveaway_cols)
         assert {
             "giveaway_id", "redemption_id", "twitch_user_id",
