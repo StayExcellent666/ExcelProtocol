@@ -464,6 +464,11 @@ class TestDevDashboardRoutes:
     async def test_matching_fortuna_chat_command_records_entry(self, monkeypatch):
         inserts = []
         broadcasts = []
+        confirmations = []
+
+        class FakeChannel:
+            async def send(self, message):
+                confirmations.append(message)
 
         async def fake_fetch(query, params=()):
             if "FROM fortuna_giveaways" in query:
@@ -495,7 +500,7 @@ class TestDevDashboardRoutes:
 
         handled = await dashboard_server._fortuna_record_chat_entry(
             "StayExcellent666", "!ENTER", "message-1", "viewer-1",
-            "viewer", "Viewer",
+            "viewer", "Viewer", FakeChannel(),
         )
 
         assert handled is True
@@ -504,6 +509,9 @@ class TestDevDashboardRoutes:
             "type": "entry", "user_id": "viewer-1",
             "display_name": "Viewer", "entry_count": 1,
         })]
+        assert confirmations == [
+            "@viewer, you're entered! Total entrants: 1."
+        ]
 
     @pytest.mark.asyncio
     async def test_fortuna_chat_command_ignores_other_commands(self, monkeypatch):
@@ -521,6 +529,49 @@ class TestDevDashboardRoutes:
             "channel", "!uptime", "message-1", "viewer-1", "viewer", "Viewer",
         )
         assert handled is False
+
+    @pytest.mark.asyncio
+    async def test_duplicate_fortuna_chat_entry_gets_total_confirmation(self, monkeypatch):
+        confirmations = []
+        inserts = []
+
+        class FakeChannel:
+            async def send(self, message):
+                confirmations.append(message)
+
+        async def fake_fetch(query, params=()):
+            if "FROM fortuna_giveaways" in query:
+                return [{
+                    "id": 7, "twitch_broadcaster_id": "100",
+                    "entry_mode": "chat_command", "chat_command": "!enter",
+                    "target_entries": 0,
+                }]
+            if "SELECT 1 FROM fortuna_entries" in query:
+                return [{"1": 1}]
+            if "COUNT(DISTINCT twitch_user_id)" in query:
+                return [{"count": 8}]
+            raise AssertionError(query)
+
+        async def fake_insert(query, params=()):
+            inserts.append((query, params))
+            return 1
+
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_fetch)
+        monkeypatch.setattr(dashboard_server, "db_insert", fake_insert)
+        monkeypatch.setitem(
+            dashboard_server._fortuna_chat_commands, "channel", "!enter",
+        )
+
+        handled = await dashboard_server._fortuna_record_chat_entry(
+            "channel", "!enter", "message-2", "viewer-1",
+            "viewer", "Viewer", FakeChannel(),
+        )
+
+        assert handled is True
+        assert inserts[0][1][-2:] == (0, "Duplicate entry")
+        assert confirmations == [
+            "@viewer, you're already entered. Total entrants: 8."
+        ]
 
     @pytest.mark.asyncio
     async def test_twitch_chat_routes_matching_command_to_fortuna(self, monkeypatch):
@@ -561,7 +612,7 @@ class TestDevDashboardRoutes:
 
         assert received == [(
             "stayexcellent666", "!enter", "message-1",
-            "viewer-1", "viewer", "Viewer",
+            "viewer-1", "viewer", "Viewer", FakeMessage.channel,
         )]
 
     @pytest.mark.asyncio

@@ -78,7 +78,7 @@ class TwitchChatBot(commands.Bot):
             )
             if await _fortuna_record_chat_entry(
                 channel_name, command_name, str(getattr(message, "id", "") or ""),
-                author_id, author_login, display_name,
+                author_id, author_login, display_name, message.channel,
             ):
                 return
         except Exception as e:

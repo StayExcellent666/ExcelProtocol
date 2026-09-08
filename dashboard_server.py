@@ -3384,7 +3384,8 @@ async def _fortuna_record_redemption(event: dict):
 
 async def _fortuna_record_chat_entry(channel_login: str, command_name: str,
                                      message_id: str, user_id: str,
-                                     user_login: str, display_name: str):
+                                     user_login: str, display_name: str,
+                                     chat_channel=None):
     """Consume a matching chat command and record one eligible entry per user."""
     channel_login = str(channel_login).lower()
     command_name = str(command_name).casefold()
@@ -3434,15 +3435,30 @@ async def _fortuna_record_chat_entry(channel_login: str, command_name: str,
         if "UNIQUE" in str(exc).upper():
             return True
         raise
-    if not eligible:
-        return True
-
     count_rows = await db_fetch(
         """SELECT COUNT(DISTINCT twitch_user_id) AS count
            FROM fortuna_entries WHERE giveaway_id = ? AND eligible = 1""",
         (giveaway["id"],),
     )
     entry_count = int(count_rows[0]["count"] if count_rows else 0)
+    if chat_channel:
+        try:
+            if eligible:
+                await chat_channel.send(
+                    f"@{user_login}, you're entered! Total entrants: {entry_count}."
+                )
+            else:
+                await chat_channel.send(
+                    f"@{user_login}, you're already entered. Total entrants: {entry_count}."
+                )
+        except Exception as exc:
+            # The entry is authoritative even if Twitch temporarily rejects a
+            # confirmation message; never roll it back or duplicate it.
+            logger.warning("Fortuna entry confirmation failed in @%s: %s",
+                           channel_login, exc)
+    if not eligible:
+        return True
+
     await _fortuna_broadcast(str(giveaway["twitch_broadcaster_id"]), {
         "type": "entry", "user_id": user_id, "display_name": display_name,
         "entry_count": entry_count,
