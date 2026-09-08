@@ -158,6 +158,105 @@ class TestSessionCanAccessGuild:
         assert dashboard_server._session_can_access_guild(session, "100") is False
 
 
+class TestGuildFortunaAccess:
+    class FakeRequest(dict):
+        @property
+        def match_info(self):
+            return self["match_info"]
+
+    def test_verified_server_manager_is_allowed(self):
+        request = self.FakeRequest({
+            "session": {"guilds": [{"id": "100", "can_manage": True}]},
+            "match_info": {"guild_id": "100"},
+        })
+        assert dashboard_server._require_fortuna_guild_manager(request) == "100"
+
+    def test_plain_member_flag_is_not_enough(self):
+        from aiohttp import web
+
+        request = self.FakeRequest({
+            "session": {"guilds": [{"id": "100"}]},
+            "match_info": {"guild_id": "100"},
+        })
+        with pytest.raises(web.HTTPForbidden):
+            dashboard_server._require_fortuna_guild_manager(request)
+
+    def test_manager_of_another_server_is_denied(self):
+        from aiohttp import web
+
+        request = self.FakeRequest({
+            "session": {"guilds": [{"id": "200", "can_manage": True}]},
+            "match_info": {"guild_id": "100"},
+        })
+        with pytest.raises(web.HTTPForbidden):
+            dashboard_server._require_fortuna_guild_manager(request)
+
+    def test_bot_owner_and_configured_admin_are_allowed(self):
+        for role in ("dev", "admin"):
+            request = self.FakeRequest({
+                "session": {role: True, "guilds": []},
+                "match_info": {"guild_id": "100"},
+            })
+            assert dashboard_server._require_fortuna_guild_manager(request) == "100"
+
+    @pytest.mark.asyncio
+    async def test_fortuna_resolves_only_the_server_broadcaster_link(self, monkeypatch):
+        async def fake_fetch(query, params=()):
+            assert "FROM broadcaster_tokens" in query
+            assert params == ("100",)
+            return [{
+                "guild_id": 100,
+                "twitch_broadcaster_id": "twitch-42",
+                "twitch_broadcaster_login": "stayexcellent666",
+            }]
+
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_fetch)
+        request = self.FakeRequest({
+            "session": {"guilds": [{"id": "100", "can_manage": True}]},
+            "match_info": {"guild_id": "100"},
+        })
+        channel = await dashboard_server._fortuna_guild_channel(request)
+        assert channel["twitch_broadcaster_id"] == "twitch-42"
+
+    @pytest.mark.asyncio
+    async def test_key_creation_ignores_request_twitch_identity(self, monkeypatch):
+        captured = {}
+
+        async def fake_channel(_request, required=True):
+            return {
+                "twitch_broadcaster_id": "bound-42",
+                "twitch_broadcaster_login": "bound_channel",
+            }
+
+        async def fake_insert(query, params=()):
+            captured["query"] = query
+            captured["params"] = params
+            return 7
+
+        class JsonRequest(self.FakeRequest):
+            async def json(self):
+                return {
+                    "label": "Studio OBS",
+                    "twitch_broadcaster_id": "attacker",
+                    "twitch_broadcaster_login": "wrong_channel",
+                }
+
+        monkeypatch.setattr(dashboard_server, "_fortuna_guild_channel", fake_channel)
+        monkeypatch.setattr(dashboard_server, "db_insert", fake_insert)
+        request = JsonRequest({
+            "session": {"guilds": [{"id": "100", "can_manage": True}]},
+            "match_info": {"guild_id": "100"},
+        })
+
+        response = await dashboard_server.create_guild_fortuna_plugin_key(request)
+
+        assert response.status == 201
+        assert captured["params"][0:4] == (
+            "100", "bound-42", "bound_channel", "Studio OBS",
+        )
+        assert "attacker" not in captured["params"]
+
+
 class TestDevDashboardRoutes:
     """The developer panels must have matching backend endpoints."""
 
@@ -178,6 +277,15 @@ class TestDevDashboardRoutes:
         assert ("POST", "/api/admin/fortuna-control/start") in routes
         assert ("POST", "/api/admin/fortuna-control/spin") in routes
         assert ("POST", "/api/admin/fortuna-control/cancel") in routes
+        assert ("GET", "/api/guild/{guild_id}/fortuna/control") in routes
+        assert ("POST", "/api/guild/{guild_id}/fortuna/start") in routes
+        assert ("POST", "/api/guild/{guild_id}/fortuna/spin") in routes
+        assert ("POST", "/api/guild/{guild_id}/fortuna/cancel") in routes
+        assert ("GET", "/api/guild/{guild_id}/fortuna/history") in routes
+        assert ("GET", "/api/guild/{guild_id}/fortuna/history/{giveaway_id}") in routes
+        assert ("GET", "/api/guild/{guild_id}/fortuna/plugin-keys") in routes
+        assert ("POST", "/api/guild/{guild_id}/fortuna/plugin-keys") in routes
+        assert ("DELETE", "/api/guild/{guild_id}/fortuna/plugin-keys/{key_id}") in routes
         assert ("GET", "/auth/twitch/bot/login") in routes
 
     def test_twitch_login_normalisation(self):
@@ -399,14 +507,16 @@ class TestDevDashboardRoutes:
         with pytest.raises(web.HTTPForbidden):
             await dashboard_server.get_fortuna_control({"session": {}})
 
-    def test_fortuna_frontend_is_owner_admin_only(self):
+    def test_fortuna_frontend_uses_the_active_server_binding(self):
         from pathlib import Path
 
         source = (Path(__file__).parent.parent / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
         assert 'id:"fortuna"' in source
         assert 'activeTab==="fortuna"' in source
-        assert "(effectivelyDev || effectivelyAdmin || isAdmin) && <FortunaTab />" in source
-        assert "...(canUseFortuna ?" in source
+        assert '<FortunaTab guildId={activeGuild} />' in source
+        assert '`/api/guild/${guildId}/fortuna/control`' in source
+        assert '`/api/guild/${guildId}/fortuna/plugin-keys`' in source
+        assert "/api/admin/fortuna" not in source
         assert 'label:"Fortuna"' in source
 
     @pytest.mark.asyncio

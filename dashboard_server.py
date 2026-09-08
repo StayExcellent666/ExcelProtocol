@@ -470,6 +470,17 @@ def _session_can_access_guild(session: dict, guild_id: str) -> bool:
     guilds = session.get("guilds", [])
     return any(str(g["id"]) == str(guild_id) for g in guilds)
 
+
+def _session_can_manage_guild(session: dict, guild_id: str) -> bool:
+    """Check Discord-verified Manage Guild access for sensitive integrations."""
+    if session.get("dev") or session.get("admin"):
+        return True
+    return any(
+        str(guild.get("id")) == str(guild_id)
+        and guild.get("can_manage") is True
+        for guild in session.get("guilds", [])
+    )
+
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/twitch/callback", "/api/eventsub/callback")
@@ -614,7 +625,13 @@ async def auth_callback(request):
     except Exception:
         bot_guild_ids = {str(g.id) for g in _bot_ref.guilds} if _bot_ref else set()
     managed = [
-        {"id": g["id"], "name": g["name"], "icon": g.get("icon")}
+        {
+            "id": g["id"], "name": g["name"], "icon": g.get("icon"),
+            # This flag is derived directly from Discord's OAuth guild
+            # permission bitset and is required again by sensitive,
+            # guild-scoped integrations such as Fortuna.
+            "can_manage": True,
+        }
         for g in guilds
         if (int(g.get("permissions", 0)) & 0x20  # Manage Guild
             or int(g.get("permissions", 0)) & 0x8   # Administrator
@@ -1692,30 +1709,29 @@ async def get_twitch_info(request):
     if not _bot_ref:
         return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50})
 
-    row = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id)))
-
-    # If no /twitchset channel, fall back to the broadcaster OAuth token login
-    if not row:
-        broadcaster_rows = await db_fetch(
-            "SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,)
-        )
-        if broadcaster_rows:
-            twitch_login = broadcaster_rows[0]["twitch_login"]
-            # Auto-link the channel using the broadcaster login
+    row = await _asyncio.get_event_loop().run_in_executor(
+        None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id))
+    )
+    broadcaster_rows = await db_fetch(
+        "SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,)
+    )
+    if broadcaster_rows:
+        twitch_login = str(broadcaster_rows[0]["twitch_login"]).lower()
+        if not row or str(row["twitch_channel"]).lower() != twitch_login:
             await _asyncio.get_event_loop().run_in_executor(
                 None, lambda: _bot_ref.db.set_twitch_channel(int(guild_id), twitch_login)
             )
-            # Also tell the running chat bot to join this channel. Without
-            # this, the bot only ever joins what was in the DB at startup —
-            # newly-linked channels would be silent until the next restart.
-            if _bot_ref and getattr(_bot_ref, "twitch_chat_bot", None):
+            if getattr(_bot_ref, "twitch_chat_bot", None):
                 try:
                     await _bot_ref.twitch_chat_bot.join_channel(twitch_login)
                 except Exception as e:
-                    logger.warning(f"Auto-link: chat bot failed to join {twitch_login}: {e}")
+                    logger.warning(f"Account sync: chat bot failed to join {twitch_login}: {e}")
             row = {"twitch_channel": twitch_login}
-        else:
-            return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50, "can_link_via_oauth": True})
+    elif not row:
+        return web.json_response({
+            "linked": False, "channel": None, "commands": [], "count": 0,
+            "limit": 50, "can_link_via_oauth": True,
+        })
 
     channel = row["twitch_channel"]
     commands = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_commands(channel))
@@ -1930,8 +1946,8 @@ async def twitch_broadcaster_login(request):
     session = get_session(request)
     if not session:
         raise web.HTTPFound(f"/auth/login")
-    if not _session_can_access_guild(session, guild_id):
-        raise web.HTTPForbidden(reason="You do not have access to this guild")
+    if not _session_can_manage_guild(session, guild_id):
+        raise web.HTTPForbidden(reason="Manage Server permission is required")
 
     # Generate a random state and store guild_id + session cookie so callback can verify both
     state = secrets.token_hex(16)
@@ -2042,24 +2058,29 @@ async def twitch_broadcaster_callback(request):
     if not user:
         raise web.HTTPInternalServerError(reason="Could not get Twitch user info")
 
+    previous_rows = await db_fetch(
+        "SELECT twitch_user_id, twitch_login FROM broadcaster_tokens WHERE guild_id = ?",
+        (guild_id,),
+    )
+    previous_broadcaster = previous_rows[0] if previous_rows else None
+    if (previous_broadcaster and
+            str(previous_broadcaster.get("twitch_user_id")) != str(user["id"])):
+        # Keys are scoped to the old account and must not survive an account
+        # replacement on the Discord server.
+        await _fortuna_revoke_guild_keys(guild_id)
+
     if _bot_ref:
         import asyncio as _asyncio
         await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_broadcaster_token(
             int(guild_id), user["id"], user["login"], access_token, refresh_token, expires_at
         ))
-        # Auto-link the chat bot's commands surface to this Twitch channel
-        # too (otherwise the user has to also run /twitchset). Then tell
-        # the running chat bot to join the new channel dynamically — without
-        # this, custom commands work in DB but the bot isn't in chat.
+        # The authenticated broadcaster is the canonical Twitch account for
+        # chat commands, rewards, and Fortuna on this Discord server.
         twitch_login = user["login"]
         try:
-            existing = await _asyncio.get_event_loop().run_in_executor(
-                None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id))
+            await _asyncio.get_event_loop().run_in_executor(
+                None, lambda: _bot_ref.db.set_twitch_channel(int(guild_id), twitch_login)
             )
-            if not existing:
-                await _asyncio.get_event_loop().run_in_executor(
-                    None, lambda: _bot_ref.db.set_twitch_channel(int(guild_id), twitch_login)
-                )
         except Exception as e:
             logger.warning(f"OAuth: failed to auto-link twitch_channel for guild {guild_id}: {e}")
         if getattr(_bot_ref, "twitch_chat_bot", None):
@@ -2072,6 +2093,12 @@ async def twitch_broadcaster_callback(request):
         await db_execute(
             "INSERT INTO broadcaster_tokens (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET twitch_user_id=excluded.twitch_user_id, twitch_login=excluded.twitch_login, access_token=excluded.access_token, refresh_token=excluded.refresh_token, expires_at=excluded.expires_at",
             (guild_id, user["id"], user["login"], access_token, refresh_token, expires_at)
+        )
+        await db_execute(
+            """INSERT INTO twitch_channels (guild_id, twitch_channel)
+               VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET
+               twitch_channel = excluded.twitch_channel""",
+            (guild_id, user["login"]),
         )
 
     # Register EventSub subscription for channel point redeems
@@ -2137,12 +2164,15 @@ async def _complete_twitch_bot_oauth(code: str):
 
 async def twitch_broadcaster_disconnect(request):
     """Remove stored broadcaster token for a guild."""
+    _require_fortuna_guild_manager(request)
     guild_id = request.match_info["guild_id"]
     if _bot_ref:
         import asyncio as _asyncio
         await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.delete_broadcaster_token(int(guild_id)))
     else:
         await db_execute("DELETE FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
+    await _fortuna_revoke_guild_keys(guild_id)
+    await db_execute("DELETE FROM twitch_channels WHERE guild_id = ?", (guild_id,))
     return web.json_response({"ok": True})
 
 async def _register_eventsub(broadcaster_user_id: str):
@@ -3916,13 +3946,53 @@ async def _fortuna_admin_channel(broadcaster_id: str):
     return rows[0] if rows else None
 
 
-async def get_fortuna_control(request):
-    """Return the latest server-authoritative state for one keyed channel."""
-    _require_dev_or_admin(request)
-    broadcaster_id = str(request.query.get("broadcaster_id") or "").strip()
-    channel = await _fortuna_admin_channel(broadcaster_id)
-    if not channel:
-        raise web.HTTPNotFound(reason="Fortuna channel not found")
+def _require_fortuna_guild_manager(request) -> str:
+    """Require a bot owner/admin or Discord-verified server manager."""
+    guild_id = str(request.match_info["guild_id"])
+    if not _session_can_manage_guild(request["session"], guild_id):
+        raise web.HTTPForbidden(reason="Manage Server permission is required")
+    return guild_id
+
+
+async def _fortuna_guild_channel(request, required=True):
+    guild_id = _require_fortuna_guild_manager(request)
+    rows = await db_fetch(
+        """SELECT guild_id, twitch_user_id AS twitch_broadcaster_id,
+                  twitch_login AS twitch_broadcaster_login
+           FROM broadcaster_tokens WHERE guild_id = ? LIMIT 1""",
+        (guild_id,),
+    )
+    if rows:
+        return rows[0]
+    if required:
+        raise web.HTTPBadRequest(
+            reason="Connect this server's Twitch broadcaster account first",
+        )
+    return None
+
+
+async def _fortuna_revoke_guild_keys(guild_id: str):
+    rows = await db_fetch(
+        """SELECT id FROM fortuna_plugin_keys
+           WHERE guild_id = ? AND revoked_at IS NULL""",
+        (str(guild_id),),
+    )
+    if not rows:
+        return 0
+    key_ids = [int(row["id"]) for row in rows]
+    await db_execute(
+        """UPDATE fortuna_plugin_keys SET revoked_at = CURRENT_TIMESTAMP
+           WHERE guild_id = ? AND revoked_at IS NULL""",
+        (str(guild_id),),
+    )
+    for key_id in key_ids:
+        for ws in list(_fortuna_connections_by_key.get(key_id, set())):
+            await ws.close(code=1008, message=b"Twitch account disconnected")
+    return len(key_ids)
+
+
+async def _fortuna_control_data(channel: dict) -> dict:
+    broadcaster_id = str(channel["twitch_broadcaster_id"])
     rows = await db_fetch(
         """SELECT g.*,
                   COUNT(DISTINCT CASE WHEN e.eligible = 1 THEN e.twitch_user_id END) AS entry_count
@@ -3962,14 +4032,27 @@ async def get_fortuna_control(request):
             "started_at": giveaway.get("started_at"),
             "ended_at": giveaway.get("ended_at"),
         }
-    return web.json_response({
+    return {
         "channel": {
-            "twitch_broadcaster_id": str(channel["twitch_broadcaster_id"]),
+            "twitch_broadcaster_id": broadcaster_id,
             "twitch_broadcaster_login": str(channel["twitch_broadcaster_login"]),
             "connected_sources": len(_fortuna_connections.get(broadcaster_id, set())),
         },
         "giveaway": state,
-    }, headers={"Cache-Control": "no-store"})
+    }
+
+
+async def get_fortuna_control(request):
+    """Return the latest server-authoritative state for one keyed channel."""
+    _require_dev_or_admin(request)
+    broadcaster_id = str(request.query.get("broadcaster_id") or "").strip()
+    channel = await _fortuna_admin_channel(broadcaster_id)
+    if not channel:
+        raise web.HTTPNotFound(reason="Fortuna channel not found")
+    return web.json_response(
+        await _fortuna_control_data(channel),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def start_fortuna_control(request):
@@ -4020,6 +4103,133 @@ async def cancel_fortuna_control(request):
             broadcaster_id, channel["twitch_broadcaster_login"]):
         raise web.HTTPConflict(reason="No giveaway is open")
     return web.json_response({"ok": True, "status": "cancelled"})
+
+
+async def get_guild_fortuna_control(request):
+    channel = await _fortuna_guild_channel(request, required=False)
+    if not channel:
+        return web.json_response({
+            "connected": False,
+            "giveaway": {"status": "idle", "entry_count": 0,
+                           "remaining_seconds": 0},
+        }, headers={"Cache-Control": "no-store"})
+    payload = await _fortuna_control_data(channel)
+    payload["connected"] = True
+    return web.json_response(payload, headers={"Cache-Control": "no-store"})
+
+
+async def start_guild_fortuna_control(request):
+    channel = await _fortuna_guild_channel(request)
+    body = await request.json()
+    try:
+        giveaway = await _fortuna_start_giveaway(
+            str(channel["twitch_broadcaster_id"]),
+            channel["twitch_broadcaster_login"], body,
+        )
+    except ValueError as exc:
+        raise web.HTTPConflict(reason=str(exc)) from exc
+    return web.json_response({"ok": True, "giveaway": giveaway}, status=201)
+
+
+async def spin_guild_fortuna_control(request):
+    channel = await _fortuna_guild_channel(request)
+    broadcaster_id = str(channel["twitch_broadcaster_id"])
+    giveaway = await _fortuna_open_giveaway(broadcaster_id)
+    if not giveaway:
+        raise web.HTTPConflict(reason="No giveaway is open")
+    counts = await db_fetch(
+        """SELECT COUNT(DISTINCT twitch_user_id) AS count
+           FROM fortuna_entries WHERE giveaway_id = ? AND eligible = 1""",
+        (giveaway["id"],),
+    )
+    if not counts or int(counts[0].get("count") or 0) == 0:
+        raise web.HTTPBadRequest(reason="No eligible entries yet")
+    if not await _fortuna_finish_giveaway(int(giveaway["id"])):
+        raise web.HTTPConflict(reason="Giveaway could not be drawn")
+    return web.json_response({"ok": True, "status": "spinning"})
+
+
+async def cancel_guild_fortuna_control(request):
+    channel = await _fortuna_guild_channel(request)
+    if not await _fortuna_cancel_giveaway(
+            str(channel["twitch_broadcaster_id"]),
+            channel["twitch_broadcaster_login"]):
+        raise web.HTTPConflict(reason="No giveaway is open")
+    return web.json_response({"ok": True, "status": "cancelled"})
+
+
+async def get_guild_fortuna_plugin_keys(request):
+    channel = await _fortuna_guild_channel(request, required=False)
+    if not channel:
+        return web.json_response({"connected": False, "keys": []})
+    guild_id = str(request.match_info["guild_id"])
+    keys = await db_fetch(
+        """SELECT id, twitch_broadcaster_id, twitch_broadcaster_login, label,
+                  created_at, last_seen_at
+           FROM fortuna_plugin_keys
+           WHERE guild_id = ? AND revoked_at IS NULL
+           ORDER BY created_at DESC""",
+        (guild_id,),
+    )
+    for key in keys:
+        key["connected_sources"] = len(
+            _fortuna_connections_by_key.get(int(key["id"]), set())
+        )
+    return web.json_response({
+        "connected": True,
+        "channel": {
+            "twitch_broadcaster_id": str(channel["twitch_broadcaster_id"]),
+            "twitch_broadcaster_login": channel["twitch_broadcaster_login"],
+        },
+        "keys": keys,
+    }, headers={"Cache-Control": "no-store"})
+
+
+async def create_guild_fortuna_plugin_key(request):
+    channel = await _fortuna_guild_channel(request)
+    body = await request.json()
+    label = str(body.get("label") or "OBS").strip()[:60] or "OBS"
+    token = "fortuna_" + secrets.token_urlsafe(32)
+    key_id = await db_insert(
+        """INSERT INTO fortuna_plugin_keys
+           (guild_id, twitch_broadcaster_id, twitch_broadcaster_login,
+            label, token_hash) VALUES (?, ?, ?, ?, ?)""",
+        (str(request.match_info["guild_id"]),
+         str(channel["twitch_broadcaster_id"]),
+         str(channel["twitch_broadcaster_login"]).lower(), label,
+         _fortuna_token_hash(token)),
+    )
+    return web.json_response({
+        "id": key_id,
+        "twitch_broadcaster_id": str(channel["twitch_broadcaster_id"]),
+        "twitch_broadcaster_login": str(channel["twitch_broadcaster_login"]),
+        "label": label, "plugin_key": token,
+        "warning": "Copy this key now. ExcelProtocol stores only its hash.",
+    }, status=201)
+
+
+async def revoke_guild_fortuna_plugin_key(request):
+    channel = await _fortuna_guild_channel(request)
+    try:
+        key_id = int(request.match_info["key_id"])
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="Invalid plugin key ID")
+    rows = await db_fetch(
+        """SELECT id FROM fortuna_plugin_keys
+           WHERE id = ? AND guild_id = ? AND twitch_broadcaster_id = ?
+             AND revoked_at IS NULL""",
+        (key_id, str(request.match_info["guild_id"]),
+         str(channel["twitch_broadcaster_id"])),
+    )
+    if not rows:
+        raise web.HTTPNotFound(reason="Plugin key not found for this server")
+    await db_execute(
+        "UPDATE fortuna_plugin_keys SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (key_id,),
+    )
+    for ws in list(_fortuna_connections_by_key.get(key_id, set())):
+        await ws.close(code=1008, message=b"Plugin key revoked")
+    return web.json_response({"ok": True})
 
 
 async def fortuna_plugin_ws(request):
@@ -4263,6 +4473,86 @@ async def get_fortuna_giveaway(request):
                   disqualification_note
            FROM fortuna_entries
            WHERE giveaway_id = ?
+           ORDER BY redeemed_at ASC, id ASC""",
+        (giveaway_id,),
+    )
+    return web.json_response(
+        {"giveaway": giveaways[0], "entries": entries},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def get_guild_fortuna_history(request):
+    """Thirty-day Fortuna history for the server's verified Twitch binding."""
+    channel = await _fortuna_guild_channel(request, required=False)
+    if not channel:
+        return web.json_response({
+            "connected": False, "window_days": _FORTUNA_HISTORY_DAYS,
+            "summary": {}, "giveaways": [],
+        }, headers={"Cache-Control": "no-store"})
+    broadcaster_id = str(channel["twitch_broadcaster_id"])
+    rows = await db_fetch(
+        """SELECT g.id, g.twitch_broadcaster_id, g.twitch_broadcaster_login,
+                  g.reward_id, g.reward_title, g.title, g.status,
+                  g.started_at, g.ended_at, g.winner_twitch_user_id,
+                  g.winner_twitch_login, g.winner_display_name,
+                  g.winner_selected_at, COUNT(e.id) AS total_entries,
+                  SUM(CASE WHEN e.eligible = 1 THEN 1 ELSE 0 END) AS eligible_entries,
+                  COUNT(DISTINCT CASE WHEN e.eligible = 1 THEN e.twitch_user_id END) AS unique_entrants,
+                  CAST(MAX(0, ROUND(
+                      (julianday(COALESCE(g.ended_at, CURRENT_TIMESTAMP)) - julianday(g.started_at)) * 86400
+                  )) AS INTEGER) AS runtime_seconds
+           FROM fortuna_giveaways AS g
+           LEFT JOIN fortuna_entries AS e ON e.giveaway_id = g.id
+           WHERE g.started_at >= datetime('now', '-30 days')
+             AND g.twitch_broadcaster_id = ?
+           GROUP BY g.id
+           ORDER BY g.started_at DESC, g.id DESC""",
+        (broadcaster_id,),
+    )
+    runtimes = [int(row.get("runtime_seconds") or 0) for row in rows]
+    summary = {
+        "giveaways": len(rows),
+        "total_entries": sum(int(row.get("total_entries") or 0) for row in rows),
+        "eligible_entries": sum(int(row.get("eligible_entries") or 0) for row in rows),
+        "winners": sum(1 for row in rows if row.get("winner_twitch_user_id")),
+        "average_runtime_seconds": round(sum(runtimes) / len(runtimes)) if runtimes else 0,
+    }
+    return web.json_response({
+        "connected": True, "window_days": _FORTUNA_HISTORY_DAYS,
+        "summary": summary, "giveaways": rows,
+    }, headers={"Cache-Control": "no-store"})
+
+
+async def get_guild_fortuna_giveaway(request):
+    channel = await _fortuna_guild_channel(request)
+    try:
+        giveaway_id = int(request.match_info["giveaway_id"])
+    except (KeyError, TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="Invalid giveaway ID")
+    if giveaway_id < 1:
+        raise web.HTTPBadRequest(reason="Invalid giveaway ID")
+    giveaways = await db_fetch(
+        """SELECT g.*,
+                  COUNT(e.id) AS total_entries,
+                  SUM(CASE WHEN e.eligible = 1 THEN 1 ELSE 0 END) AS eligible_entries,
+                  COUNT(DISTINCT CASE WHEN e.eligible = 1 THEN e.twitch_user_id END) AS unique_entrants,
+                  CAST(MAX(0, ROUND(
+                      (julianday(COALESCE(g.ended_at, CURRENT_TIMESTAMP)) - julianday(g.started_at)) * 86400
+                  )) AS INTEGER) AS runtime_seconds
+           FROM fortuna_giveaways AS g
+           LEFT JOIN fortuna_entries AS e ON e.giveaway_id = g.id
+           WHERE g.id = ? AND g.twitch_broadcaster_id = ?
+           GROUP BY g.id""",
+        (giveaway_id, str(channel["twitch_broadcaster_id"])),
+    )
+    if not giveaways:
+        raise web.HTTPNotFound(reason="Giveaway not found for this server")
+    entries = await db_fetch(
+        """SELECT id, redemption_id, twitch_user_id, twitch_user_login,
+                  twitch_display_name, redeemed_at, eligible,
+                  disqualification_note
+           FROM fortuna_entries WHERE giveaway_id = ?
            ORDER BY redeemed_at ASC, id ASC""",
         (giveaway_id,),
     )
@@ -5252,6 +5542,15 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/auth/twitch/callback",          twitch_broadcaster_callback)
     app.router.add_delete("/api/guild/{guild_id}/broadcaster",              twitch_broadcaster_disconnect)
     app.router.add_get   ("/api/guild/{guild_id}/broadcaster",              get_broadcaster_info)
+    app.router.add_get   ("/api/guild/{guild_id}/fortuna/control",          get_guild_fortuna_control)
+    app.router.add_post  ("/api/guild/{guild_id}/fortuna/start",            start_guild_fortuna_control)
+    app.router.add_post  ("/api/guild/{guild_id}/fortuna/spin",             spin_guild_fortuna_control)
+    app.router.add_post  ("/api/guild/{guild_id}/fortuna/cancel",           cancel_guild_fortuna_control)
+    app.router.add_get   ("/api/guild/{guild_id}/fortuna/history",          get_guild_fortuna_history)
+    app.router.add_get   ("/api/guild/{guild_id}/fortuna/history/{giveaway_id}", get_guild_fortuna_giveaway)
+    app.router.add_get   ("/api/guild/{guild_id}/fortuna/plugin-keys",      get_guild_fortuna_plugin_keys)
+    app.router.add_post  ("/api/guild/{guild_id}/fortuna/plugin-keys",      create_guild_fortuna_plugin_key)
+    app.router.add_delete("/api/guild/{guild_id}/fortuna/plugin-keys/{key_id}", revoke_guild_fortuna_plugin_key)
     app.router.add_post  ("/api/guild/{guild_id}/broadcaster/triggers",     upsert_reward_trigger)
     app.router.add_delete("/api/guild/{guild_id}/broadcaster/triggers/{reward_id}", delete_reward_trigger)
     app.router.add_post  ("/api/guild/{guild_id}/broadcaster/rewards",      create_reward)

@@ -4257,7 +4257,7 @@ function DbToolsTab() {
   );
 }
 
-function FortunaTab() {
+function FortunaTab({ guildId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -4266,12 +4266,10 @@ function FortunaTab() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [pluginKeys, setPluginKeys] = useState([]);
-  const [keyLogin, setKeyLogin] = useState("");
   const [keyLabel, setKeyLabel] = useState("My OBS");
   const [generatedKey, setGeneratedKey] = useState("");
   const [keyBusy, setKeyBusy] = useState(false);
   const [keyError, setKeyError] = useState("");
-  const [controlBroadcaster, setControlBroadcaster] = useState("");
   const [control, setControl] = useState(null);
   const [controlLoading, setControlLoading] = useState(false);
   const [controlBusy, setControlBusy] = useState("");
@@ -4286,37 +4284,32 @@ function FortunaTab() {
     setLoading(true);
     setError("");
     try {
-      setData(await apiFetch("/api/admin/fortuna"));
+      setData(await apiFetch(`/api/guild/${guildId}/fortuna/history`));
     } catch (e) {
       setError(e.message || String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [guildId]);
 
   useEffect(() => { load(); }, [load]);
 
   const loadPluginKeys = useCallback(async () => {
     try {
-      const result = await apiFetch("/api/admin/fortuna-plugin-keys");
+      const result = await apiFetch(`/api/guild/${guildId}/fortuna/plugin-keys`);
       const keys = result.keys || [];
       setPluginKeys(keys);
-      setControlBroadcaster(current =>
-        current && keys.some(key => String(key.twitch_broadcaster_id) === current)
-          ? current : String(keys[0]?.twitch_broadcaster_id || "")
-      );
     } catch (e) {
       setKeyError(e.message || String(e));
     }
-  }, []);
+  }, [guildId]);
 
   useEffect(() => { loadPluginKeys(); }, [loadPluginKeys]);
 
   const loadControl = useCallback(async (quiet=false) => {
-    if (!controlBroadcaster) { setControl(null); return; }
     if (!quiet) setControlLoading(true);
     try {
-      const result = await apiFetch(`/api/admin/fortuna-control?broadcaster_id=${encodeURIComponent(controlBroadcaster)}`);
+      const result = await apiFetch(`/api/guild/${guildId}/fortuna/control`);
       setControl(result);
       setControlError("");
     } catch (e) {
@@ -4324,22 +4317,19 @@ function FortunaTab() {
     } finally {
       if (!quiet) setControlLoading(false);
     }
-  }, [controlBroadcaster]);
+  }, [guildId]);
 
   useEffect(() => {
     loadControl();
-    if (!controlBroadcaster) return undefined;
     const timer = window.setInterval(() => loadControl(true), 1000);
     return () => window.clearInterval(timer);
-  }, [controlBroadcaster, loadControl]);
+  }, [loadControl]);
 
   const runControl = async (action) => {
-    if (!controlBroadcaster) return;
     setControlBusy(action);
     setControlError("");
     try {
       const body = action === "start" ? {
-        broadcaster_id:controlBroadcaster,
         title:setup.title,
         entry_mode:setup.entry_mode,
         chat_command:setup.chat_command,
@@ -4347,8 +4337,8 @@ function FortunaTab() {
         duration_seconds:Math.max(0, Math.round(Number(setup.duration_minutes || 0) * 60)),
         target_entries:Math.max(0, Math.round(Number(setup.target_entries || 0))),
         spin_duration_ms:Math.max(2000, Math.round(Number(setup.spin_duration_seconds || 8) * 1000)),
-      } : { broadcaster_id:controlBroadcaster };
-      await apiFetch(`/api/admin/fortuna-control/${action}`, {
+      } : {};
+      await apiFetch(`/api/guild/${guildId}/fortuna/${action}`, {
         method:"POST", body:JSON.stringify(body),
       });
       await Promise.all([loadControl(true), load()]);
@@ -4364,12 +4354,11 @@ function FortunaTab() {
     setKeyError("");
     setGeneratedKey("");
     try {
-      const result = await apiFetch("/api/admin/fortuna-plugin-keys", {
+      const result = await apiFetch(`/api/guild/${guildId}/fortuna/plugin-keys`, {
         method:"POST",
-        body:JSON.stringify({ twitch_login:keyLogin, label:keyLabel }),
+        body:JSON.stringify({ label:keyLabel }),
       });
       setGeneratedKey(result.plugin_key || "");
-      setKeyLogin("");
       await loadPluginKeys();
     } catch (e) {
       setKeyError(e.message || String(e));
@@ -4382,7 +4371,7 @@ function FortunaTab() {
     if (!window.confirm("Revoke this ExcelFortuna plugin key? Connected OBS sources using it will disconnect.")) return;
     setKeyError("");
     try {
-      await apiFetch(`/api/admin/fortuna-plugin-keys/${id}`, { method:"DELETE" });
+      await apiFetch(`/api/guild/${guildId}/fortuna/plugin-keys/${id}`, { method:"DELETE" });
       await loadPluginKeys();
     } catch (e) {
       setKeyError(e.message || String(e));
@@ -4401,7 +4390,7 @@ function FortunaTab() {
     setDetailError("");
     setDetailLoading(true);
     try {
-      setDetail(await apiFetch(`/api/admin/fortuna/${id}`));
+      setDetail(await apiFetch(`/api/guild/${guildId}/fortuna/history/${id}`));
     } catch (e) {
       setDetailError(e.message || String(e));
     } finally {
@@ -4429,13 +4418,6 @@ function FortunaTab() {
   const statusColor = (status) => status === "completed"
     ? "var(--green)"
     : status === "cancelled" ? "var(--red)" : "var(--yellow)";
-  const channels = Array.from(new Map(pluginKeys.map(key => [
-    String(key.twitch_broadcaster_id), {
-      id:String(key.twitch_broadcaster_id),
-      login:key.twitch_broadcaster_login,
-      connected_sources:key.connected_sources || 0,
-    },
-  ])).values());
   const live = control?.giveaway || { status:"idle", entry_count:0, remaining_seconds:0 };
   const giveawayOpen = live.status === "open";
   const formatClock = value => {
@@ -4469,19 +4451,16 @@ function FortunaTab() {
             <div style={{ fontSize:15, fontWeight:750, color:"var(--text)" }}>Giveaway Control</div>
             <div style={{ marginTop:3, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>The OBS wheel follows these controls live.</div>
           </div>
-          {channels.length > 0 && (
-            <select value={controlBroadcaster} onChange={e => setControlBroadcaster(e.target.value)} style={{ ...C.input, width:"auto", minWidth:190 }}>
-              {channels.map(channel => <option key={channel.id} value={channel.id}>@{channel.login}</option>)}
-            </select>
-          )}
+          {control?.connected && <Badge text={`@${control.channel?.twitch_broadcaster_login}`} color="var(--cyan)" />}
         </div>
 
-        {channels.length === 0 ? (
-          <div style={{ marginTop:14, padding:14, border:"1px dashed var(--border)", borderRadius:7, color:"var(--text3)", fontSize:12 }}>
-            Open Settings below and generate an OBS plugin key for the Twitch channel first.
-          </div>
-        ) : controlLoading && !control ? (
+        {controlLoading && !control ? (
           <div style={{ display:"flex", justifyContent:"center", padding:28 }}><Spinner /></div>
+        ) : control?.connected === false ? (
+          <div style={{ marginTop:14, padding:14, border:"1px dashed var(--border)", borderRadius:7, color:"var(--text3)", fontSize:12 }}>
+            Connect this Discord server’s Twitch broadcaster account first. That one verified account will be used for Chat Commands, Channel Rewards, and Fortuna.
+            <div style={{ marginTop:10 }}><a href={`/auth/twitch/login/${guildId}`} style={{ ...C.btnPrimary, display:"inline-flex", textDecoration:"none" }}>Connect Twitch Account</a></div>
+          </div>
         ) : (
           <>
             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))", gap:9, marginTop:14 }}>
@@ -4561,18 +4540,14 @@ function FortunaTab() {
         <summary style={{ cursor:"pointer", fontSize:14, fontWeight:700, color:"var(--text)", userSelect:"none" }}>Settings &amp; OBS Connection</summary>
         <div style={{ marginTop:13, fontSize:14, fontWeight:700, color:"var(--text)" }}>ExcelFortuna OBS Connection</div>
         <div style={{ marginTop:4, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
-          Generate a revocable key for one Twitch channel, then paste it into the ExcelFortuna source properties in OBS. Twitch credentials are never placed in OBS.
+          Generate a revocable key for this server’s linked Twitch account, then paste it into ExcelFortuna in OBS. Twitch credentials are never placed in OBS.
         </div>
-        <div style={{ display:"grid", gridTemplateColumns:"minmax(160px,1fr) minmax(150px,1fr) auto", gap:9, marginTop:12, alignItems:"end" }}>
-          <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
-            TWITCH LOGIN
-            <input value={keyLogin} onChange={e => setKeyLogin(e.target.value)} placeholder="channelname" style={{ ...C.input, marginTop:5 }} />
-          </label>
+        <div style={{ display:"grid", gridTemplateColumns:"minmax(150px,1fr) auto", gap:9, marginTop:12, alignItems:"end" }}>
           <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
             KEY LABEL
             <input value={keyLabel} onChange={e => setKeyLabel(e.target.value)} placeholder="Streaming PC" style={{ ...C.input, marginTop:5 }} />
           </label>
-          <button onClick={createPluginKey} disabled={keyBusy || !keyLogin.trim()} style={{ ...C.btnPrimary, opacity:keyBusy || !keyLogin.trim() ? 0.5 : 1 }}>
+          <button onClick={createPluginKey} disabled={keyBusy || !control?.connected} style={{ ...C.btnPrimary, opacity:keyBusy || !control?.connected ? 0.5 : 1 }}>
             {keyBusy ? "Generating…" : "Generate Key"}
           </button>
         </div>
@@ -4919,7 +4894,6 @@ export default function App() {
   const isAdmin = user?.is_admin === true;
   const effectivelyDev   = isActuallyDev && viewMode === "dev";
   const effectivelyAdmin = isActuallyDev && viewMode === "admin";
-  const canUseFortuna = effectivelyDev || effectivelyAdmin || isAdmin;
   const notificationsTabs = [
     { id:"streamers",      icon:"/app/icons/streams.png", label:"Streams"           },
     { id:"notiflog",       icon:"/app/icons/log.png", label:"Notification Log"  },
@@ -4927,7 +4901,7 @@ export default function App() {
   const twitchTabs = [
     { id:"twitch",         icon:"/app/icons/message.png", label:"Chat Commands"     },
     { id:"rewards",        icon:"/app/icons/rewards.png", label:"Channel Rewards"   },
-    ...(canUseFortuna ? [{ id:"fortuna", icon:"/app/icons/rewards.png", label:"Fortuna" }] : []),
+    { id:"fortuna",        icon:"/app/icons/rewards.png", label:"Fortuna"          },
   ];
   const communityTabs = [
     { id:"roles",          icon:"/app/icons/reactionroles.png", label:"Reaction Roles"    },
@@ -5105,7 +5079,7 @@ export default function App() {
               {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
               {activeTab==="globalstats"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <GlobalStatsTab />}
               {activeTab==="healthcheck"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <HealthCheckTab />}
-              {activeTab==="fortuna"       && (effectivelyDev || effectivelyAdmin || isAdmin) && <FortunaTab />}
+              {activeTab==="fortuna"       && <FortunaTab guildId={activeGuild} />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
               {activeTab==="auditlog"      && effectivelyDev && <AdminAuditLogTab />}
             </>

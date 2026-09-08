@@ -84,10 +84,27 @@ class TestSchema:
         assert "idx_fortuna_entries_giveaway" in indexes
         assert "idx_fortuna_entries_user" in indexes
         assert {
-            "twitch_broadcaster_id", "twitch_broadcaster_login", "label",
+            "guild_id", "twitch_broadcaster_id", "twitch_broadcaster_login", "label",
             "token_hash", "created_at", "last_seen_at", "revoked_at",
         }.issubset(plugin_key_cols)
         assert "idx_fortuna_plugin_keys_broadcaster" in indexes
+        assert "idx_fortuna_plugin_keys_guild" in indexes
+
+    def test_broadcaster_link_persists_across_database_restart(self, tmp_db_path):
+        from database import Database
+
+        first = Database(db_path=tmp_db_path)
+        first.set_broadcaster_token(
+            123, "twitch-42", "stayexcellent666",
+            "access-token", "refresh-token", "2099-01-01T00:00:00+00:00",
+        )
+
+        restarted = Database(db_path=tmp_db_path)
+        linked = restarted.get_broadcaster_token(123)
+
+        assert linked["twitch_user_id"] == "twitch-42"
+        assert linked["twitch_login"] == "stayexcellent666"
+        assert linked["refresh_token"] == "refresh-token"
 
     def test_fortuna_redemption_id_is_deduplicated(self, db):
         import sqlite3

@@ -823,6 +823,7 @@ class Database:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS fortuna_plugin_keys (
                 id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id                 INTEGER,
                 twitch_broadcaster_id    TEXT NOT NULL,
                 twitch_broadcaster_login TEXT NOT NULL,
                 label                    TEXT NOT NULL DEFAULT 'OBS',
@@ -835,6 +836,25 @@ class Database:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_fortuna_plugin_keys_broadcaster
             ON fortuna_plugin_keys(twitch_broadcaster_id, revoked_at)
+        ''')
+        fortuna_key_columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(fortuna_plugin_keys)").fetchall()
+        }
+        if "guild_id" not in fortuna_key_columns:
+            cursor.execute("ALTER TABLE fortuna_plugin_keys ADD COLUMN guild_id INTEGER")
+        # Preserve existing OBS keys by attaching them to the first Discord
+        # server already linked to the same authenticated Twitch account.
+        cursor.execute('''
+            UPDATE fortuna_plugin_keys
+            SET guild_id = (
+                SELECT MIN(guild_id) FROM broadcaster_tokens
+                WHERE twitch_user_id = fortuna_plugin_keys.twitch_broadcaster_id
+            )
+            WHERE guild_id IS NULL
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_fortuna_plugin_keys_guild
+            ON fortuna_plugin_keys(guild_id, revoked_at)
         ''')
 
         # Latest rotated credentials for the Twitch chat bot. Fly secrets are
