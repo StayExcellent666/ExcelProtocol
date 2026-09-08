@@ -8,10 +8,16 @@ venv/
 env/
 ENV/
 .venv
+node_modules/
+dashboard/node_modules/
+.pytest_cache/
 
 # Database
 *.db
 *.db-journal
+
+# The Dockerfile builds the dashboard from dashboard/src in stage 1.
+dashboard/dist/
 
 # Environment
 .env

@@ -4271,6 +4271,16 @@ function FortunaTab() {
   const [generatedKey, setGeneratedKey] = useState("");
   const [keyBusy, setKeyBusy] = useState(false);
   const [keyError, setKeyError] = useState("");
+  const [controlBroadcaster, setControlBroadcaster] = useState("");
+  const [control, setControl] = useState(null);
+  const [controlLoading, setControlLoading] = useState(false);
+  const [controlBusy, setControlBusy] = useState("");
+  const [controlError, setControlError] = useState("");
+  const [setup, setSetup] = useState({
+    title:"Fortuna Giveaway", entry_mode:"chat_command",
+    chat_command:"!enter", reward_title:"Giveaway Entry",
+    duration_minutes:60, target_entries:0, spin_duration_seconds:8,
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -4289,13 +4299,65 @@ function FortunaTab() {
   const loadPluginKeys = useCallback(async () => {
     try {
       const result = await apiFetch("/api/admin/fortuna-plugin-keys");
-      setPluginKeys(result.keys || []);
+      const keys = result.keys || [];
+      setPluginKeys(keys);
+      setControlBroadcaster(current =>
+        current && keys.some(key => String(key.twitch_broadcaster_id) === current)
+          ? current : String(keys[0]?.twitch_broadcaster_id || "")
+      );
     } catch (e) {
       setKeyError(e.message || String(e));
     }
   }, []);
 
   useEffect(() => { loadPluginKeys(); }, [loadPluginKeys]);
+
+  const loadControl = useCallback(async (quiet=false) => {
+    if (!controlBroadcaster) { setControl(null); return; }
+    if (!quiet) setControlLoading(true);
+    try {
+      const result = await apiFetch(`/api/admin/fortuna-control?broadcaster_id=${encodeURIComponent(controlBroadcaster)}`);
+      setControl(result);
+      setControlError("");
+    } catch (e) {
+      setControlError(e.message || String(e));
+    } finally {
+      if (!quiet) setControlLoading(false);
+    }
+  }, [controlBroadcaster]);
+
+  useEffect(() => {
+    loadControl();
+    if (!controlBroadcaster) return undefined;
+    const timer = window.setInterval(() => loadControl(true), 1000);
+    return () => window.clearInterval(timer);
+  }, [controlBroadcaster, loadControl]);
+
+  const runControl = async (action) => {
+    if (!controlBroadcaster) return;
+    setControlBusy(action);
+    setControlError("");
+    try {
+      const body = action === "start" ? {
+        broadcaster_id:controlBroadcaster,
+        title:setup.title,
+        entry_mode:setup.entry_mode,
+        chat_command:setup.chat_command,
+        reward_title:setup.reward_title,
+        duration_seconds:Math.max(0, Math.round(Number(setup.duration_minutes || 0) * 60)),
+        target_entries:Math.max(0, Math.round(Number(setup.target_entries || 0))),
+        spin_duration_ms:Math.max(2000, Math.round(Number(setup.spin_duration_seconds || 8) * 1000)),
+      } : { broadcaster_id:controlBroadcaster };
+      await apiFetch(`/api/admin/fortuna-control/${action}`, {
+        method:"POST", body:JSON.stringify(body),
+      });
+      await Promise.all([loadControl(true), load()]);
+    } catch (e) {
+      setControlError(e.message || String(e));
+    } finally {
+      setControlBusy("");
+    }
+  };
 
   const createPluginKey = async () => {
     setKeyBusy(true);
@@ -4367,6 +4429,24 @@ function FortunaTab() {
   const statusColor = (status) => status === "completed"
     ? "var(--green)"
     : status === "cancelled" ? "var(--red)" : "var(--yellow)";
+  const channels = Array.from(new Map(pluginKeys.map(key => [
+    String(key.twitch_broadcaster_id), {
+      id:String(key.twitch_broadcaster_id),
+      login:key.twitch_broadcaster_login,
+      connected_sources:key.connected_sources || 0,
+    },
+  ])).values());
+  const live = control?.giveaway || { status:"idle", entry_count:0, remaining_seconds:0 };
+  const giveawayOpen = live.status === "open";
+  const formatClock = value => {
+    const total = Math.max(0, Number(value) || 0);
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = Math.floor(total % 60);
+    return hours
+      ? `${hours}:${String(minutes).padStart(2,"0")}:${String(seconds).padStart(2,"0")}`
+      : `${minutes}:${String(seconds).padStart(2,"0")}`;
+  };
 
   if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
 
@@ -4381,10 +4461,105 @@ function FortunaTab() {
 
   return (
     <div>
-      <PageHeader title="Fortuna" subtitle="Private giveaway history for ExcelProtocol owners and admins" />
+      <PageHeader title="Fortuna" subtitle="Create, monitor, and draw Twitch giveaways from one place" />
 
-      <div style={{ ...C.card, marginBottom:14 }}>
-        <div style={{ fontSize:14, fontWeight:700, color:"var(--text)" }}>ExcelFortuna OBS Connection</div>
+      <div style={{ ...C.card, marginBottom:14, borderColor:"rgba(0,245,212,0.24)" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", gap:12, alignItems:"center", flexWrap:"wrap" }}>
+          <div>
+            <div style={{ fontSize:15, fontWeight:750, color:"var(--text)" }}>Giveaway Control</div>
+            <div style={{ marginTop:3, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>The OBS wheel follows these controls live.</div>
+          </div>
+          {channels.length > 0 && (
+            <select value={controlBroadcaster} onChange={e => setControlBroadcaster(e.target.value)} style={{ ...C.input, width:"auto", minWidth:190 }}>
+              {channels.map(channel => <option key={channel.id} value={channel.id}>@{channel.login}</option>)}
+            </select>
+          )}
+        </div>
+
+        {channels.length === 0 ? (
+          <div style={{ marginTop:14, padding:14, border:"1px dashed var(--border)", borderRadius:7, color:"var(--text3)", fontSize:12 }}>
+            Open Settings below and generate an OBS plugin key for the Twitch channel first.
+          </div>
+        ) : controlLoading && !control ? (
+          <div style={{ display:"flex", justifyContent:"center", padding:28 }}><Spinner /></div>
+        ) : (
+          <>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))", gap:9, marginTop:14 }}>
+              {[
+                ["Status", String(live.status || "idle").toUpperCase(), live.status === "open" ? "var(--green)" : live.status === "spinning" ? "var(--yellow)" : "var(--text2)"],
+                ["Time Remaining", giveawayOpen && live.duration_seconds ? formatClock(live.remaining_seconds) : "—", "var(--cyan)"],
+                ["Entrants", Number(live.entry_count || 0).toLocaleString(), "var(--text)"],
+                ["OBS Sources", Number(control?.channel?.connected_sources || 0), control?.channel?.connected_sources ? "var(--green)" : "var(--text3)"],
+              ].map(([label,value,color]) => (
+                <div key={label} style={{ padding:"11px 13px", background:"var(--bg2)", border:"1px solid var(--border)", borderRadius:7 }}>
+                  <div style={{ fontSize:9, color:"var(--text3)", letterSpacing:1, textTransform:"uppercase", fontFamily:"'JetBrains Mono',monospace" }}>{label}</div>
+                  <div style={{ marginTop:5, color, fontSize:20, fontWeight:750, fontFamily:"'Orbitron',sans-serif" }}>{value}</div>
+                </div>
+              ))}
+            </div>
+
+            {!giveawayOpen && live.status !== "spinning" && (
+              <div style={{ marginTop:14 }}>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(210px,1fr))", gap:10 }}>
+                  <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                    GIVEAWAY TITLE
+                    <input value={setup.title} onChange={e => setSetup({...setup,title:e.target.value})} style={{ ...C.input, marginTop:5 }} />
+                  </label>
+                  <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                    ENTRY METHOD
+                    <select value={setup.entry_mode} onChange={e => setSetup({...setup,entry_mode:e.target.value})} style={{ ...C.input, marginTop:5 }}>
+                      <option value="chat_command">Twitch chat command</option>
+                      <option value="channel_reward">Channel Points reward</option>
+                    </select>
+                  </label>
+                  <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                    {setup.entry_mode === "chat_command" ? "CHAT COMMAND" : "EXACT REWARD TITLE"}
+                    <input value={setup.entry_mode === "chat_command" ? setup.chat_command : setup.reward_title} onChange={e => setSetup({...setup,[setup.entry_mode === "chat_command" ? "chat_command" : "reward_title"]:e.target.value})} style={{ ...C.input, marginTop:5 }} />
+                  </label>
+                  <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                    DURATION (MINUTES, 0 = MANUAL)
+                    <input type="number" min="0" max="1440" step="1" value={setup.duration_minutes} onChange={e => setSetup({...setup,duration_minutes:e.target.value})} style={{ ...C.input, marginTop:5 }} />
+                  </label>
+                  <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                    AUTO-DRAW AT ENTRANTS (0 = OFF)
+                    <input type="number" min="0" max="100000" step="1" value={setup.target_entries} onChange={e => setSetup({...setup,target_entries:e.target.value})} style={{ ...C.input, marginTop:5 }} />
+                  </label>
+                  <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+                    WHEEL SPIN (SECONDS)
+                    <input type="number" min="2" max="30" step="1" value={setup.spin_duration_seconds} onChange={e => setSetup({...setup,spin_duration_seconds:e.target.value})} style={{ ...C.input, marginTop:5 }} />
+                  </label>
+                </div>
+                <button onClick={() => runControl("start")} disabled={!!controlBusy || !setup.title.trim()} style={{ ...C.btnPrimary, marginTop:13, opacity:controlBusy || !setup.title.trim() ? 0.5 : 1 }}>
+                  {controlBusy === "start" ? "Starting…" : "Start Giveaway"}
+                </button>
+              </div>
+            )}
+
+            {(giveawayOpen || live.status === "spinning") && (
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, marginTop:14, padding:"12px 14px", border:"1px solid var(--border)", borderRadius:7, background:"rgba(0,245,212,0.035)" }}>
+                <div>
+                  <div style={{ color:"var(--text)", fontSize:14, fontWeight:700 }}>{live.title || "Fortuna Giveaway"}</div>
+                  <div style={{ marginTop:3, color:"var(--text3)", fontSize:10, fontFamily:"'JetBrains Mono',monospace" }}>
+                    {live.entry_mode === "chat_command" ? `Enter with ${live.chat_command}` : `Redeem “${live.reward_title}”`} · {live.entry_count || 0} eligible
+                  </div>
+                </div>
+                {giveawayOpen && <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={() => runControl("spin")} disabled={!!controlBusy || !Number(live.entry_count)} style={{ ...C.btnPrimary, opacity:controlBusy || !Number(live.entry_count) ? 0.5 : 1 }}>{controlBusy === "spin" ? "Drawing…" : "Draw Winner Now"}</button>
+                  <button onClick={() => runControl("cancel")} disabled={!!controlBusy} style={{ ...C.btnDanger, opacity:controlBusy ? 0.5 : 1 }}>{controlBusy === "cancel" ? "Cancelling…" : "Cancel Giveaway"}</button>
+                </div>}
+              </div>
+            )}
+            {live.status === "completed" && live.winner_display_name && (
+              <div style={{ marginTop:12, color:"var(--green)", fontSize:12 }}>Latest winner: <strong>{live.winner_display_name}</strong></div>
+            )}
+          </>
+        )}
+        {controlError && <div style={{ color:"var(--red)", marginTop:10, fontSize:11 }}>{controlError}</div>}
+      </div>
+
+      <details style={{ ...C.card, marginBottom:14 }}>
+        <summary style={{ cursor:"pointer", fontSize:14, fontWeight:700, color:"var(--text)", userSelect:"none" }}>Settings &amp; OBS Connection</summary>
+        <div style={{ marginTop:13, fontSize:14, fontWeight:700, color:"var(--text)" }}>ExcelFortuna OBS Connection</div>
         <div style={{ marginTop:4, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
           Generate a revocable key for one Twitch channel, then paste it into the ExcelFortuna source properties in OBS. Twitch credentials are never placed in OBS.
         </div>
@@ -4427,7 +4602,7 @@ function FortunaTab() {
             ))}
           </div>
         )}
-      </div>
+      </details>
 
       {error && (
         <div style={{ ...C.card, borderColor:"rgba(255,77,109,0.35)", color:"var(--red)", fontSize:12, fontFamily:"'JetBrains Mono',monospace", marginBottom:14 }}>
@@ -4740,6 +4915,11 @@ export default function App() {
   if (!loggedIn) return <LoginScreen />;
 
   const guild = guilds.find(g=>g.id===activeGuild)||guilds[0]||{ id:"", name:"..." };
+  const isActuallyDev = user?.is_dev === true;
+  const isAdmin = user?.is_admin === true;
+  const effectivelyDev   = isActuallyDev && viewMode === "dev";
+  const effectivelyAdmin = isActuallyDev && viewMode === "admin";
+  const canUseFortuna = effectivelyDev || effectivelyAdmin || isAdmin;
   const notificationsTabs = [
     { id:"streamers",      icon:"/app/icons/streams.png", label:"Streams"           },
     { id:"notiflog",       icon:"/app/icons/log.png", label:"Notification Log"  },
@@ -4747,6 +4927,7 @@ export default function App() {
   const twitchTabs = [
     { id:"twitch",         icon:"/app/icons/message.png", label:"Chat Commands"     },
     { id:"rewards",        icon:"/app/icons/rewards.png", label:"Channel Rewards"   },
+    ...(canUseFortuna ? [{ id:"fortuna", icon:"/app/icons/rewards.png", label:"Fortuna" }] : []),
   ];
   const communityTabs = [
     { id:"roles",          icon:"/app/icons/reactionroles.png", label:"Reaction Roles"    },
@@ -4765,20 +4946,14 @@ export default function App() {
   const setupWizardTabs = [
     { id:"setupwizard",    icon:"/app/icons/wizard.png", label:"Set Up Server"     },
   ];
-  const isActuallyDev = user?.is_dev === true;
-  const isAdmin = user?.is_admin === true;
-  const effectivelyDev   = isActuallyDev && viewMode === "dev";
-  const effectivelyAdmin = isActuallyDev && viewMode === "admin";
   const devTabs = effectivelyDev ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
-    { id:"fortuna",        icon:"/app/icons/rewards.png", label:"Fortuna"          },
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
     { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
   ] : (effectivelyAdmin || isAdmin) ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
-    { id:"fortuna",        icon:"/app/icons/rewards.png", label:"Fortuna"          },
   ] : [];
   const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
 
@@ -4973,10 +5148,6 @@ export default function App() {
               <div style={{ fontSize:9, color:"var(--cyan)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Dev Only</div>
               <NavItem large icon="/app/icons/globe.png" label="Global Stats" active={activeTab==="globalstats"} onClick={() => { setActiveTab("globalstats"); setNavDrawerOpen(false); }} />
               <NavItem large icon="/app/icons/tools.png" label="DB Tools" active={activeTab==="dbtools"} onClick={() => { setActiveTab("dbtools"); setNavDrawerOpen(false); }} />
-            </>}
-            {(effectivelyDev || effectivelyAdmin || isAdmin) && <>
-              {!effectivelyDev && <div style={{ fontSize:9, color:"#f5b432", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Admin Only</div>}
-              <NavItem large icon="/app/icons/rewards.png" label="Fortuna" active={activeTab==="fortuna"} onClick={() => { setActiveTab("fortuna"); setNavDrawerOpen(false); }} />
             </>}
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>

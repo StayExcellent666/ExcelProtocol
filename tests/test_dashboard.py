@@ -174,6 +174,10 @@ class TestDevDashboardRoutes:
         assert ("GET", "/api/dev/health-check") in routes
         assert ("GET", "/api/admin/fortuna") in routes
         assert ("GET", "/api/admin/fortuna/{giveaway_id}") in routes
+        assert ("GET", "/api/admin/fortuna-control") in routes
+        assert ("POST", "/api/admin/fortuna-control/start") in routes
+        assert ("POST", "/api/admin/fortuna-control/spin") in routes
+        assert ("POST", "/api/admin/fortuna-control/cancel") in routes
         assert ("GET", "/auth/twitch/bot/login") in routes
 
     def test_twitch_login_normalisation(self):
@@ -392,6 +396,8 @@ class TestDevDashboardRoutes:
                 "session": {},
                 "match_info": {"giveaway_id": "1"},
             })
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.get_fortuna_control({"session": {}})
 
     def test_fortuna_frontend_is_owner_admin_only(self):
         from pathlib import Path
@@ -400,6 +406,82 @@ class TestDevDashboardRoutes:
         assert 'id:"fortuna"' in source
         assert 'activeTab==="fortuna"' in source
         assert "(effectivelyDev || effectivelyAdmin || isAdmin) && <FortunaTab />" in source
+        assert "...(canUseFortuna ?" in source
+        assert 'label:"Fortuna"' in source
+
+    @pytest.mark.asyncio
+    async def test_shared_fortuna_start_engine_broadcasts_state(self, monkeypatch):
+        broadcasts = []
+        scheduled = []
+
+        async def no_open(_broadcaster_id):
+            return None
+
+        async def fake_insert(_query, params=()):
+            assert params[0:2] == ("100", "stayexcellent666")
+            return 42
+
+        async def fake_broadcast(broadcaster_id, payload):
+            broadcasts.append((broadcaster_id, payload))
+
+        monkeypatch.setattr(dashboard_server, "_fortuna_open_giveaway", no_open)
+        monkeypatch.setattr(dashboard_server, "db_insert", fake_insert)
+        monkeypatch.setattr(dashboard_server, "_fortuna_broadcast", fake_broadcast)
+        monkeypatch.setattr(
+            dashboard_server, "_fortuna_schedule_deadline",
+            lambda giveaway_id, seconds: scheduled.append((giveaway_id, seconds)),
+        )
+
+        result = await dashboard_server._fortuna_start_giveaway(
+            "100", "StayExcellent666", {
+                "title": "Dashboard Draw", "entry_mode": "chat_command",
+                "chat_command": "join", "duration_seconds": 3600,
+                "target_entries": 25, "spin_duration_ms": 9000,
+            },
+        )
+
+        assert result["id"] == 42
+        assert result["chat_command"] == "!join"
+        assert scheduled == [(42, 3600)]
+        assert [payload["type"] for _, payload in broadcasts] == [
+            "reset_entries", "state",
+        ]
+        assert broadcasts[1][1]["remaining_seconds"] == 3600
+        dashboard_server._fortuna_chat_commands.pop("stayexcellent666", None)
+
+    @pytest.mark.asyncio
+    async def test_fortuna_control_reports_live_countdown(self, monkeypatch):
+        import json
+
+        class FakeRequest(dict):
+            query = {"broadcaster_id": "100"}
+
+        async def fake_fetch(query, params=()):
+            assert params == ("100",)
+            if "FROM fortuna_plugin_keys" in query:
+                return [{
+                    "twitch_broadcaster_id": "100",
+                    "twitch_broadcaster_login": "stayexcellent666",
+                }]
+            return [{
+                "id": 42, "status": "open", "title": "Dashboard Draw",
+                "entry_mode": "chat_command", "chat_command": "!enter",
+                "reward_title": "Giveaway Entry", "target_entries": 0,
+                "duration_seconds": 3600, "spin_duration_ms": 8000,
+                "entry_count": 7, "started_at": "",
+                "winner_announced": 0,
+            }]
+
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_fetch)
+        response = await dashboard_server.get_fortuna_control(FakeRequest({
+            "session": {"admin": True},
+        }))
+        payload = json.loads(response.text)
+
+        assert payload["giveaway"]["status"] == "open"
+        assert payload["giveaway"]["entry_count"] == 7
+        assert payload["giveaway"]["remaining_seconds"] == 3600
+        assert payload["channel"]["twitch_broadcaster_login"] == "stayexcellent666"
 
     def test_fortuna_plugin_tokens_are_hashed_deterministically(self):
         assert dashboard_server._fortuna_token_hash("secret") == (

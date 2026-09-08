@@ -3310,6 +3310,90 @@ async def _fortuna_open_giveaway(broadcaster_id: str):
     return rows[0] if rows else None
 
 
+def _fortuna_start_options(command: dict) -> dict:
+    """Validate one start request shared by OBS and the dashboard."""
+    title = str(command.get("title") or "Fortuna Giveaway").strip()[:100]
+    reward_title = str(command.get("reward_title") or "Giveaway Entry").strip()[:100]
+    entry_mode = str(command.get("entry_mode") or "channel_reward")
+    if entry_mode not in {"channel_reward", "chat_command"}:
+        entry_mode = "channel_reward"
+    chat_command = str(command.get("chat_command") or "!enter").strip().lower()
+    if not chat_command.startswith("!"):
+        chat_command = "!" + chat_command
+    if not re.fullmatch(r"![a-z0-9_]{1,25}", chat_command):
+        raise ValueError("Chat entry command must look like !enter")
+
+    def bounded_int(name, fallback, minimum, maximum):
+        try:
+            value = int(command.get(name) if command.get(name) is not None else fallback)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid {name.replace('_', ' ')}") from None
+        return max(minimum, min(maximum, value))
+
+    return {
+        "title": title or "Fortuna Giveaway",
+        "reward_title": reward_title or "Giveaway Entry",
+        "entry_mode": entry_mode,
+        "chat_command": chat_command,
+        "target_entries": bounded_int("target_entries", 0, 0, 100000),
+        "duration_seconds": bounded_int("duration_seconds", 0, 0, 86400),
+        "spin_duration_ms": bounded_int("spin_duration_ms", 8000, 2000, 30000),
+    }
+
+
+async def _fortuna_start_giveaway(broadcaster_id: str,
+                                   broadcaster_login: str,
+                                   command: dict):
+    if await _fortuna_open_giveaway(broadcaster_id):
+        raise ValueError("A giveaway is already open")
+    options = _fortuna_start_options(command)
+    giveaway_id = await db_insert(
+        """INSERT INTO fortuna_giveaways
+           (twitch_broadcaster_id, twitch_broadcaster_login,
+            reward_title, entry_mode, chat_command, title,
+            target_entries, duration_seconds, spin_duration_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (str(broadcaster_id), str(broadcaster_login).lower(),
+         options["reward_title"], options["entry_mode"],
+         options["chat_command"], options["title"],
+         options["target_entries"], options["duration_seconds"],
+         options["spin_duration_ms"]),
+    )
+    if options["entry_mode"] == "chat_command":
+        _fortuna_chat_commands[str(broadcaster_login).lower()] = options["chat_command"]
+    else:
+        _fortuna_chat_commands.pop(str(broadcaster_login).lower(), None)
+    await _fortuna_broadcast(str(broadcaster_id), {"type": "reset_entries"})
+    state = {
+        "type": "state", "status": "open", "giveaway_id": giveaway_id,
+        "title": options["title"], "entry_count": 0,
+        "target_entries": options["target_entries"],
+        "remaining_seconds": options["duration_seconds"],
+    }
+    await _fortuna_broadcast(str(broadcaster_id), state)
+    _fortuna_schedule_deadline(giveaway_id, options["duration_seconds"])
+    return {"id": giveaway_id, **options, **state}
+
+
+async def _fortuna_cancel_giveaway(broadcaster_id: str,
+                                    broadcaster_login: str) -> bool:
+    giveaway = await _fortuna_open_giveaway(broadcaster_id)
+    if not giveaway:
+        return False
+    await db_execute(
+        """UPDATE fortuna_giveaways SET status = 'cancelled',
+                  ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND status = 'open'""",
+        (giveaway["id"],),
+    )
+    task = _fortuna_finish_tasks.pop(int(giveaway["id"]), None)
+    if task:
+        task.cancel()
+    _fortuna_chat_commands.pop(str(broadcaster_login).lower(), None)
+    await _fortuna_broadcast(str(broadcaster_id), {"type": "cancelled"})
+    return True
+
+
 async def _fortuna_record_redemption(event: dict):
     """Record a matching Channel Points redemption for the active giveaway."""
     broadcaster_id = str(event.get("broadcaster_user_id") or "")
@@ -3821,6 +3905,123 @@ async def revoke_fortuna_plugin_key(request):
     return web.json_response({"ok": True})
 
 
+async def _fortuna_admin_channel(broadcaster_id: str):
+    rows = await db_fetch(
+        """SELECT twitch_broadcaster_id, twitch_broadcaster_login
+           FROM fortuna_plugin_keys
+           WHERE twitch_broadcaster_id = ? AND revoked_at IS NULL
+           ORDER BY id DESC LIMIT 1""",
+        (str(broadcaster_id),),
+    )
+    return rows[0] if rows else None
+
+
+async def get_fortuna_control(request):
+    """Return the latest server-authoritative state for one keyed channel."""
+    _require_dev_or_admin(request)
+    broadcaster_id = str(request.query.get("broadcaster_id") or "").strip()
+    channel = await _fortuna_admin_channel(broadcaster_id)
+    if not channel:
+        raise web.HTTPNotFound(reason="Fortuna channel not found")
+    rows = await db_fetch(
+        """SELECT g.*,
+                  COUNT(DISTINCT CASE WHEN e.eligible = 1 THEN e.twitch_user_id END) AS entry_count
+           FROM fortuna_giveaways AS g
+           LEFT JOIN fortuna_entries AS e ON e.giveaway_id = g.id
+           WHERE g.twitch_broadcaster_id = ?
+           GROUP BY g.id
+           ORDER BY g.id DESC LIMIT 1""",
+        (broadcaster_id,),
+    )
+    giveaway = rows[0] if rows else None
+    if not giveaway:
+        state = {"status": "idle", "entry_count": 0, "remaining_seconds": 0}
+    else:
+        persisted_status = str(giveaway.get("status") or "idle")
+        display_status = (
+            "spinning" if persisted_status == "completed"
+            and not int(giveaway.get("winner_announced") or 0)
+            else persisted_status
+        )
+        state = {
+            "id": giveaway["id"],
+            "status": display_status,
+            "title": giveaway.get("title"),
+            "entry_mode": giveaway.get("entry_mode") or "channel_reward",
+            "chat_command": giveaway.get("chat_command") or "!enter",
+            "reward_title": giveaway.get("reward_title") or "Giveaway Entry",
+            "target_entries": int(giveaway.get("target_entries") or 0),
+            "duration_seconds": int(giveaway.get("duration_seconds") or 0),
+            "spin_duration_ms": int(giveaway.get("spin_duration_ms") or 8000),
+            "entry_count": int(giveaway.get("entry_count") or 0),
+            "remaining_seconds": (
+                _fortuna_remaining_seconds(giveaway)
+                if persisted_status == "open" else 0
+            ),
+            "winner_display_name": giveaway.get("winner_display_name"),
+            "started_at": giveaway.get("started_at"),
+            "ended_at": giveaway.get("ended_at"),
+        }
+    return web.json_response({
+        "channel": {
+            "twitch_broadcaster_id": str(channel["twitch_broadcaster_id"]),
+            "twitch_broadcaster_login": str(channel["twitch_broadcaster_login"]),
+            "connected_sources": len(_fortuna_connections.get(broadcaster_id, set())),
+        },
+        "giveaway": state,
+    }, headers={"Cache-Control": "no-store"})
+
+
+async def start_fortuna_control(request):
+    _require_dev_or_admin(request)
+    body = await request.json()
+    broadcaster_id = str(body.get("broadcaster_id") or "").strip()
+    channel = await _fortuna_admin_channel(broadcaster_id)
+    if not channel:
+        raise web.HTTPNotFound(reason="Fortuna channel not found")
+    try:
+        giveaway = await _fortuna_start_giveaway(
+            broadcaster_id, channel["twitch_broadcaster_login"], body,
+        )
+    except ValueError as exc:
+        raise web.HTTPConflict(reason=str(exc)) from exc
+    return web.json_response({"ok": True, "giveaway": giveaway}, status=201)
+
+
+async def spin_fortuna_control(request):
+    _require_dev_or_admin(request)
+    body = await request.json()
+    broadcaster_id = str(body.get("broadcaster_id") or "").strip()
+    if not await _fortuna_admin_channel(broadcaster_id):
+        raise web.HTTPNotFound(reason="Fortuna channel not found")
+    giveaway = await _fortuna_open_giveaway(broadcaster_id)
+    if not giveaway:
+        raise web.HTTPConflict(reason="No giveaway is open")
+    counts = await db_fetch(
+        """SELECT COUNT(DISTINCT twitch_user_id) AS count
+           FROM fortuna_entries WHERE giveaway_id = ? AND eligible = 1""",
+        (giveaway["id"],),
+    )
+    if not counts or int(counts[0].get("count") or 0) == 0:
+        raise web.HTTPBadRequest(reason="No eligible entries yet")
+    if not await _fortuna_finish_giveaway(int(giveaway["id"])):
+        raise web.HTTPConflict(reason="Giveaway could not be drawn")
+    return web.json_response({"ok": True, "status": "spinning"})
+
+
+async def cancel_fortuna_control(request):
+    _require_dev_or_admin(request)
+    body = await request.json()
+    broadcaster_id = str(body.get("broadcaster_id") or "").strip()
+    channel = await _fortuna_admin_channel(broadcaster_id)
+    if not channel:
+        raise web.HTTPNotFound(reason="Fortuna channel not found")
+    if not await _fortuna_cancel_giveaway(
+            broadcaster_id, channel["twitch_broadcaster_login"]):
+        raise web.HTTPConflict(reason="No giveaway is open")
+    return web.json_response({"ok": True, "status": "cancelled"})
+
+
 async def fortuna_plugin_ws(request):
     """Authenticated control/event socket used by the native OBS source."""
     authorization = request.headers.get("Authorization", "")
@@ -3881,48 +4082,14 @@ async def fortuna_plugin_ws(request):
             if command_type == "ping":
                 await ws.send_str(json.dumps({"type": "pong"}))
             elif command_type == "start":
-                if await _fortuna_open_giveaway(broadcaster_id):
-                    await ws.send_str(json.dumps({"type": "error", "message": "A giveaway is already open"}))
-                    continue
-                title = str(command.get("title") or "Fortuna Giveaway").strip()[:100]
-                reward_title = str(command.get("reward_title") or "Giveaway Entry").strip()[:100]
-                entry_mode = str(command.get("entry_mode") or "channel_reward")
-                if entry_mode not in {"channel_reward", "chat_command"}:
-                    entry_mode = "channel_reward"
-                chat_command = str(command.get("chat_command") or "!enter").strip().lower()
-                if not chat_command.startswith("!"):
-                    chat_command = "!" + chat_command
-                if not re.fullmatch(r"![a-z0-9_]{1,25}", chat_command):
+                try:
+                    await _fortuna_start_giveaway(
+                        broadcaster_id, broadcaster_login, command,
+                    )
+                except ValueError as exc:
                     await ws.send_str(json.dumps({
-                        "type": "error",
-                        "message": "Chat entry command must look like !enter",
+                        "type": "error", "message": str(exc),
                     }))
-                    continue
-                target_entries = max(0, min(100000, int(command.get("target_entries") or 0)))
-                duration_seconds = max(0, min(86400, int(command.get("duration_seconds") or 0)))
-                spin_duration_ms = max(2000, min(30000, int(command.get("spin_duration_ms") or 8000)))
-                giveaway_id = await db_insert(
-                    """INSERT INTO fortuna_giveaways
-                       (twitch_broadcaster_id, twitch_broadcaster_login,
-                        reward_title, entry_mode, chat_command, title,
-                        target_entries, duration_seconds, spin_duration_ms)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (broadcaster_id, broadcaster_login, reward_title,
-                     entry_mode, chat_command, title,
-                     target_entries, duration_seconds, spin_duration_ms),
-                )
-                if entry_mode == "chat_command":
-                    _fortuna_chat_commands[broadcaster_login.lower()] = chat_command
-                else:
-                    _fortuna_chat_commands.pop(broadcaster_login.lower(), None)
-                await _fortuna_broadcast(broadcaster_id, {"type": "reset_entries"})
-                await _fortuna_broadcast(broadcaster_id, {
-                    "type": "state", "status": "open", "giveaway_id": giveaway_id,
-                    "title": title, "entry_count": 0,
-                    "target_entries": target_entries,
-                    "remaining_seconds": duration_seconds,
-                })
-                _fortuna_schedule_deadline(giveaway_id, duration_seconds)
             elif command_type == "spin":
                 giveaway = await _fortuna_open_giveaway(broadcaster_id)
                 if not giveaway:
@@ -3984,21 +4151,9 @@ async def fortuna_plugin_ws(request):
                             "twitch_display_name": completed["winner_display_name"],
                         })
             elif command_type == "cancel":
-                giveaway = await _fortuna_open_giveaway(broadcaster_id)
-                if not giveaway:
+                if not await _fortuna_cancel_giveaway(
+                        broadcaster_id, broadcaster_login):
                     await ws.send_str(json.dumps({"type": "error", "message": "No giveaway is open"}))
-                else:
-                    await db_execute(
-                        """UPDATE fortuna_giveaways SET status = 'cancelled',
-                                  ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                           WHERE id = ? AND status = 'open'""",
-                        (giveaway["id"],),
-                    )
-                    task = _fortuna_finish_tasks.pop(int(giveaway["id"]), None)
-                    if task:
-                        task.cancel()
-                    _fortuna_chat_commands.pop(broadcaster_login.lower(), None)
-                    await _fortuna_broadcast(broadcaster_id, {"type": "cancelled"})
             else:
                 await ws.send_str(json.dumps({"type": "error", "message": "Unknown command"}))
     except asyncio.CancelledError:
@@ -5117,6 +5272,10 @@ def create_dashboard_app(bot=None):
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
     app.router.add_get("/api/me",        auth_me)
     app.router.add_get("/api/admin/audit-log", admin_audit_log)
+    app.router.add_get("/api/admin/fortuna-control", get_fortuna_control)
+    app.router.add_post("/api/admin/fortuna-control/start", start_fortuna_control)
+    app.router.add_post("/api/admin/fortuna-control/spin", spin_fortuna_control)
+    app.router.add_post("/api/admin/fortuna-control/cancel", cancel_fortuna_control)
     app.router.add_get("/api/admin/fortuna", get_fortuna_history)
     app.router.add_get("/api/admin/fortuna/{giveaway_id}", get_fortuna_giveaway)
     app.router.add_get("/api/admin/fortuna-plugin-keys", get_fortuna_plugin_keys)
