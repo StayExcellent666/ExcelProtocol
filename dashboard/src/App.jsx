@@ -4420,6 +4420,10 @@ function FortunaTab({ guildId }) {
     : status === "cancelled" ? "var(--red)" : "var(--yellow)";
   const live = control?.giveaway || { status:"idle", entry_count:0, remaining_seconds:0 };
   const giveawayOpen = live.status === "open";
+  const obsSourceCount = Number(control?.channel?.connected_sources || 0);
+  const obsConnected = obsSourceCount > 0;
+  const hasPluginKey = pluginKeys.length > 0;
+  const fortunaDownloadUrl = "https://github.com/StayExcellent666/Excel-OBS-Plugins/releases/download/excelfortuna-v0.5.0/ExcelFortuna-0.5.0-OBS-32.2.2-Windows-x64.zip";
   const formatClock = value => {
     const total = Math.max(0, Number(value) || 0);
     const hours = Math.floor(total / 3600);
@@ -4445,6 +4449,32 @@ function FortunaTab({ guildId }) {
     <div>
       <PageHeader title="Fortuna" subtitle="Create, monitor, and draw Twitch giveaways from one place" />
 
+      <div style={{ ...C.card, marginBottom:14, borderColor:obsConnected ? "rgba(57,217,138,0.45)" : "rgba(255,190,75,0.42)", background:obsConnected ? "rgba(57,217,138,0.045)" : "rgba(255,190,75,0.045)" }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
+          <div>
+            <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+              <div style={{ fontSize:15, fontWeight:750, color:"var(--text)" }}>ExcelFortuna OBS Plugin</div>
+              <Badge text={obsConnected ? `PAIRED · ${obsSourceCount} ONLINE` : "NOT PAIRED"} color={obsConnected ? "var(--green)" : "var(--yellow)"} />
+            </div>
+            <div style={{ marginTop:5, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", maxWidth:720 }}>
+              {obsConnected
+                ? "OBS is connected and will receive the countdown, wheel, and winner reveal live."
+                : hasPluginKey
+                  ? "A plugin key exists, but no OBS source is connected. Open the ExcelFortuna source properties in OBS, paste the key, and click Connect / reconnect now."
+                  : "Install ExcelFortuna in OBS, then open Settings & OBS Connection below to generate and pair a plugin key before running a streamed giveaway."}
+            </div>
+          </div>
+          <a href={fortunaDownloadUrl} target="_blank" rel="noreferrer" style={{ ...C.btnPrimary, display:"inline-flex", textDecoration:"none", whiteSpace:"nowrap" }}>Download OBS Plugin</a>
+        </div>
+        {!obsConnected && (
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(175px,1fr))", gap:8, marginTop:12 }}>
+            {["1. Download and install the plugin", "2. Add ExcelFortuna Giveaway Wheel in OBS", "3. Generate and paste the key below", "4. Confirm this badge turns green"].map(step => (
+              <div key={step} style={{ padding:"8px 10px", border:"1px solid var(--border)", borderRadius:6, background:"var(--bg2)", color:"var(--text2)", fontSize:10, fontFamily:"'JetBrains Mono',monospace" }}>{step}</div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div style={{ ...C.card, marginBottom:14, borderColor:"rgba(0,245,212,0.24)" }}>
         <div style={{ display:"flex", justifyContent:"space-between", gap:12, alignItems:"center", flexWrap:"wrap" }}>
           <div>
@@ -4468,7 +4498,7 @@ function FortunaTab({ guildId }) {
                 ["Status", String(live.status || "idle").toUpperCase(), live.status === "open" ? "var(--green)" : live.status === "spinning" ? "var(--yellow)" : "var(--text2)"],
                 ["Time Remaining", giveawayOpen && live.duration_seconds ? formatClock(live.remaining_seconds) : "—", "var(--cyan)"],
                 ["Entrants", Number(live.entry_count || 0).toLocaleString(), "var(--text)"],
-                ["OBS Sources", Number(control?.channel?.connected_sources || 0), control?.channel?.connected_sources ? "var(--green)" : "var(--text3)"],
+                ["OBS Sources", obsSourceCount, obsConnected ? "var(--green)" : "var(--text3)"],
               ].map(([label,value,color]) => (
                 <div key={label} style={{ padding:"11px 13px", background:"var(--bg2)", border:"1px solid var(--border)", borderRadius:7 }}>
                   <div style={{ fontSize:9, color:"var(--text3)", letterSpacing:1, textTransform:"uppercase", fontFamily:"'JetBrains Mono',monospace" }}>{label}</div>

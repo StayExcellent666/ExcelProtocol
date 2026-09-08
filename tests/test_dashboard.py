@@ -518,6 +518,9 @@ class TestDevDashboardRoutes:
         assert '`/api/guild/${guildId}/fortuna/plugin-keys`' in source
         assert "/api/admin/fortuna" not in source
         assert 'label:"Fortuna"' in source
+        assert 'PAIRED · ${obsSourceCount} ONLINE' in source
+        assert 'Download OBS Plugin' in source
+        assert 'excelfortuna-v0.5.0/ExcelFortuna-0.5.0-OBS-32.2.2-Windows-x64.zip' in source
 
     @pytest.mark.asyncio
     async def test_shared_fortuna_start_engine_broadcasts_state(self, monkeypatch):
