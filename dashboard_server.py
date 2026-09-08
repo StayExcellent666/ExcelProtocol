@@ -59,6 +59,8 @@ _fortuna_connections_by_key: dict[int, set] = {}
 _fortuna_finish_tasks: dict[int, asyncio.Task] = {}
 _fortuna_test_channels: set[str] = set()
 _fortuna_chat_commands: dict[str, str] = {}
+_fortuna_test_completions: dict[str, dict] = {}
+_fortuna_reveal_claims: set[int] = set()
 
 async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: str):
     """Push a !play event to all overlay WebSockets for guilds linked to this Twitch channel.
@@ -3546,6 +3548,11 @@ async def _fortuna_run_test_spin(broadcaster_id: str, broadcaster_login: str,
     try:
         winner_index = secrets.randbelow(len(entrants))
         winner = entrants[winner_index]
+        completion = asyncio.Event()
+        _fortuna_test_completions[broadcaster_id] = {
+            "event": completion,
+            "winner_id": winner["twitch_user_id"],
+        }
         await _fortuna_broadcast(broadcaster_id, {"type": "reset_entries"})
         await _fortuna_broadcast(broadcaster_id, {
             "type": "state", "status": "open", "giveaway_id": "test",
@@ -3559,13 +3566,20 @@ async def _fortuna_run_test_spin(broadcaster_id: str, broadcaster_login: str,
                 "entry_count": index,
             })
         await _fortuna_broadcast(broadcaster_id, {
-            "type": "spin", "giveaway_id": "test",
+            "type": "spin", "giveaway_id": 0,
             "winner_id": winner["twitch_user_id"],
             "winner_display_name": winner["twitch_display_name"],
             "winner_index": winner_index,
             "spin_duration_ms": spin_duration_ms,
         })
-        await asyncio.sleep(spin_duration_ms / 1000)
+        try:
+            # Newer OBS sources acknowledge their actual last animation frame.
+            # The timeout preserves compatibility with older/hidden sources.
+            await asyncio.wait_for(
+                completion.wait(), timeout=spin_duration_ms / 1000 + 3.0,
+            )
+        except asyncio.TimeoutError:
+            pass
         await _fortuna_broadcast(broadcaster_id, {
             "type": "winner", "winner_id": winner["twitch_user_id"],
             "winner_display_name": winner["twitch_display_name"],
@@ -3595,11 +3609,16 @@ async def _fortuna_run_test_spin(broadcaster_id: str, broadcaster_login: str,
             "type": "error", "message": "Test spin failed on ExcelProtocol",
         })
     finally:
+        _fortuna_test_completions.pop(broadcaster_id, None)
         _fortuna_test_channels.discard(broadcaster_id)
 
 
-async def _fortuna_reveal_after_spin(giveaway: dict, winner: dict):
-    await asyncio.sleep(max(2.0, min(30.0, int(giveaway.get("spin_duration_ms") or 8000) / 1000)))
+async def _fortuna_complete_reveal(giveaway: dict, winner: dict):
+    """Reveal and announce a winner once, after OBS finishes its animation."""
+    giveaway_id = int(giveaway["id"])
+    if giveaway_id in _fortuna_reveal_claims:
+        return False
+    _fortuna_reveal_claims.add(giveaway_id)
     await _fortuna_broadcast(str(giveaway["twitch_broadcaster_id"]), {
         "type": "winner",
         "winner_id": str(winner["twitch_user_id"]),
@@ -3609,6 +3628,15 @@ async def _fortuna_reveal_after_spin(giveaway: dict, winner: dict):
         await _fortuna_announce_winner(giveaway, winner)
     except Exception as exc:
         logger.error("Fortuna winner chat announcement failed: %s", exc, exc_info=True)
+    return True
+
+
+async def _fortuna_reveal_after_spin(giveaway: dict, winner: dict):
+    duration = max(
+        2.0, min(30.0, int(giveaway.get("spin_duration_ms") or 8000) / 1000),
+    )
+    await asyncio.sleep(duration + 3.0)
+    await _fortuna_complete_reveal(giveaway, winner)
 
 
 async def _fortuna_finish_giveaway(giveaway_id: int):
@@ -3903,6 +3931,42 @@ async def fortuna_plugin_ws(request):
                     asyncio.create_task(_fortuna_run_test_spin(
                         broadcaster_id, broadcaster_login, test_spin_ms,
                     ))
+            elif command_type == "spin_complete":
+                try:
+                    completed_giveaway_id = int(command.get("giveaway_id") or 0)
+                except (TypeError, ValueError):
+                    completed_giveaway_id = -1
+                completed_winner_id = str(command.get("winner_id") or "")
+                if completed_giveaway_id == 0:
+                    pending_test = _fortuna_test_completions.get(broadcaster_id)
+                    if (pending_test and completed_winner_id and
+                            completed_winner_id == pending_test["winner_id"]):
+                        pending_test["event"].set()
+                    else:
+                        await ws.send_str(json.dumps({
+                            "type": "error", "message": "Test spin completion did not match",
+                        }))
+                else:
+                    completed_rows = await db_fetch(
+                        """SELECT * FROM fortuna_giveaways
+                           WHERE id = ? AND twitch_broadcaster_id = ?
+                             AND status = 'completed' AND winner_announced = 0""",
+                        (completed_giveaway_id, broadcaster_id),
+                    )
+                    completed = completed_rows[0] if completed_rows else None
+                    if (not completed or not completed_winner_id or
+                            completed_winner_id != str(completed.get("winner_twitch_user_id") or "")):
+                        await ws.send_str(json.dumps({
+                            "type": "error", "message": "Spin completion did not match the selected winner",
+                        }))
+                    else:
+                        task = _fortuna_finish_tasks.pop(completed_giveaway_id, None)
+                        if task:
+                            task.cancel()
+                        await _fortuna_complete_reveal(completed, {
+                            "twitch_user_id": completed["winner_twitch_user_id"],
+                            "twitch_display_name": completed["winner_display_name"],
+                        })
             elif command_type == "cancel":
                 giveaway = await _fortuna_open_giveaway(broadcaster_id)
                 if not giveaway:

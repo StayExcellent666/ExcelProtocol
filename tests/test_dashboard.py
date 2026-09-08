@@ -583,6 +583,8 @@ class TestDevDashboardRoutes:
 
         async def fake_broadcast(broadcaster_id, payload):
             broadcasts.append((broadcaster_id, payload))
+            if payload["type"] == "spin":
+                dashboard_server._fortuna_test_completions[broadcaster_id]["event"].set()
 
         async def no_wait(_seconds):
             return None
@@ -609,6 +611,33 @@ class TestDevDashboardRoutes:
         assert "NovaNoodle" in messages[0]
         assert "no prize" in messages[0]
         assert "100" not in dashboard_server._fortuna_test_channels
+
+    @pytest.mark.asyncio
+    async def test_fortuna_completed_spin_reveals_and_announces_only_once(self, monkeypatch):
+        broadcasts = []
+        announcements = []
+        giveaway = {"id": 77, "twitch_broadcaster_id": "100"}
+        winner = {"twitch_user_id": "viewer-1", "twitch_display_name": "Viewer"}
+
+        async def fake_broadcast(broadcaster_id, payload):
+            broadcasts.append((broadcaster_id, payload))
+
+        async def fake_announce(giveaway_arg, winner_arg):
+            announcements.append((giveaway_arg, winner_arg))
+            return True
+
+        dashboard_server._fortuna_reveal_claims.discard(77)
+        monkeypatch.setattr(dashboard_server, "_fortuna_broadcast", fake_broadcast)
+        monkeypatch.setattr(dashboard_server, "_fortuna_announce_winner", fake_announce)
+
+        assert await dashboard_server._fortuna_complete_reveal(giveaway, winner) is True
+        assert await dashboard_server._fortuna_complete_reveal(giveaway, winner) is False
+        assert broadcasts == [("100", {
+            "type": "winner", "winner_id": "viewer-1",
+            "winner_display_name": "Viewer",
+        })]
+        assert announcements == [(giveaway, winner)]
+        dashboard_server._fortuna_reveal_claims.discard(77)
 
 
 class TestOperationalSafetyRegressions:
