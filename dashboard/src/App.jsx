@@ -2686,24 +2686,19 @@ function TwitchTab({ guildId, isDev }) {
 
 // ── Channel Rewards Tab ───────────────────────────────────────────────────────
 function HotkeyRecorder({ value, onChange }) {
-  const [recording, setRecording] = React.useState(false);
-  const [keys, setKeys]           = React.useState(new Set());
+  const [recording, setRecording] = useState(false);
 
   const startRecording = (e) => {
     e.preventDefault();
-    setKeys(new Set());
     setRecording(true);
   };
 
   const stopRecording = () => {
     setRecording(false);
-    setKeys(new Set());
   };
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!recording) return;
-
-    const held = new Set();
 
     const onDown = (e) => {
       // Ignore mouse-triggered events
@@ -2723,8 +2718,6 @@ function HotkeyRecorder({ value, onChange }) {
       }
       if (parts.length > 0) {
         const combo = parts.join("+");
-        held.add(combo);
-        setKeys(new Set(held));
         onChange(combo);
       }
     };
