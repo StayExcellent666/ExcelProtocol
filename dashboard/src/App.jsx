@@ -108,7 +108,19 @@ async function apiFetch(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   if (res.status === 401) { window.location.href = "/auth/login"; throw new Error("Unauthorized"); }
-  if (!res.ok) throw new Error(`API error ${res.status}: ${path}`);
+  if (!res.ok) {
+    const responseText = await res.text();
+    let detail = responseText.trim();
+    try {
+      const payload = JSON.parse(responseText);
+      detail = payload.message || payload.error || payload.reason || detail;
+    } catch {
+      // aiohttp error responses are plain text, for example "400: Invalid title".
+    }
+    detail = detail.replace(/^\d{3}:\s*/, "");
+    throw new Error(detail || `API error ${res.status}: ${path}`);
+  }
+  if (res.status === 204) return null;
   return res.json();
 }
 
@@ -2828,12 +2840,23 @@ function ChannelRewardsTab({ guildId }) {
   };
 
   const saveReward = async () => {
+    const title = rewardForm.title.trim();
+    const cost = Number(rewardForm.cost);
+    if (!title || title.length > 45) {
+      alert("Reward titles must be between 1 and 45 characters.");
+      return;
+    }
+    if (!Number.isInteger(cost) || cost < 1) {
+      alert("Reward cost must be at least 1 point.");
+      return;
+    }
     setSaving(true);
     try {
+      const payload = { ...rewardForm, title, cost };
       if (rewardModal === "add") {
-        await apiFetch(`/api/guild/${guildId}/broadcaster/rewards`, { method:"POST", body: JSON.stringify(rewardForm) });
+        await apiFetch(`/api/guild/${guildId}/broadcaster/rewards`, { method:"POST", body: JSON.stringify(payload) });
       } else {
-        await apiFetch(`/api/guild/${guildId}/broadcaster/rewards/${rewardModal.id}`, { method:"PATCH", body: JSON.stringify(rewardForm) });
+        await apiFetch(`/api/guild/${guildId}/broadcaster/rewards/${rewardModal.id}`, { method:"PATCH", body: JSON.stringify(payload) });
       }
       setRewardModal(null); load();
     } catch(e) {

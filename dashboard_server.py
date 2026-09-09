@@ -5640,7 +5640,14 @@ def create_dashboard_app(bot=None):
     dist_path = os.path.join(os.path.dirname(__file__), "dashboard", "dist")
     if os.path.exists(dist_path):
         async def serve_index(request):
-            return web.FileResponse(os.path.join(dist_path, "index.html"))
+            return web.FileResponse(
+                os.path.join(dist_path, "index.html"),
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         app.router.add_get("/app",  serve_index)
         app.router.add_get("/app/", serve_index)
         app.router.add_static("/app/assets", path=os.path.join(dist_path, "assets"), name="frontend_assets")
