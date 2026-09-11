@@ -62,6 +62,9 @@ class TestSchema:
         plugin_key_cols = {
             r[1] for r in conn.execute("PRAGMA table_info(fortuna_plugin_keys)").fetchall()
         }
+        overlay_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(fortuna_overlay_settings)").fetchall()
+        }
         indexes = {
             r[1] for r in conn.execute(
                 "SELECT type, name FROM sqlite_master WHERE type = 'index'"
@@ -75,6 +78,7 @@ class TestSchema:
             "winner_twitch_user_id", "winner_display_name",
             "target_entries", "duration_seconds", "spin_duration_ms",
             "winner_announced", "entry_mode", "chat_command",
+            "chat_notice_message_id", "chat_notice_pinned",
         }.issubset(giveaway_cols)
         assert {
             "giveaway_id", "redemption_id", "twitch_user_id",
@@ -89,6 +93,8 @@ class TestSchema:
         }.issubset(plugin_key_cols)
         assert "idx_fortuna_plugin_keys_broadcaster" in indexes
         assert "idx_fortuna_plugin_keys_guild" in indexes
+        assert {"guild_id", "token", "layout_json", "updated_at"}.issubset(overlay_cols)
+        assert "idx_fortuna_overlay_token" in indexes
 
     def test_broadcaster_link_persists_across_database_restart(self, tmp_db_path):
         from database import Database

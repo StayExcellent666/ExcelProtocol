@@ -57,6 +57,8 @@ _overlay_connections: dict = {}
 _fortuna_connections: dict[str, set] = {}
 _fortuna_connections_by_key: dict[int, set] = {}
 _fortuna_finish_tasks: dict[int, asyncio.Task] = {}
+_fortuna_notice_tasks: dict[int, asyncio.Task] = {}
+_fortuna_notice_state: dict[int, dict] = {}
 _fortuna_test_channels: set[str] = set()
 _fortuna_chat_commands: dict[str, str] = {}
 _fortuna_test_completions: dict[str, dict] = {}
@@ -484,7 +486,7 @@ def _session_can_manage_guild(session: dict, guild_id: str) -> bool:
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/twitch/callback", "/api/eventsub/callback")
-    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/auth/twitch/login") or request.path.startswith("/companion") or request.path.startswith("/api/fortuna/plugin"):
+    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/fortuna-overlay/") or request.path.startswith("/auth/twitch/login") or request.path.startswith("/companion") or request.path.startswith("/api/fortuna/plugin"):
         return await handler(request)
 
     session = get_session(request)
@@ -1963,7 +1965,7 @@ async def twitch_broadcaster_login(request):
         "client_id":    TWITCH_CLIENT_ID,
         "redirect_uri": TWITCH_REDIRECT_URI,
         "response_type": "code",
-        "scope":        "channel:read:redemptions channel:manage:redemptions moderator:manage:chat_messages",
+        "scope":        "channel:read:redemptions channel:manage:redemptions moderator:manage:chat_messages user:write:chat",
         "state":        state,
         "force_verify": "true",
     })
@@ -3302,6 +3304,70 @@ def _fortuna_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+FORTUNA_DEFAULT_OVERLAY_LAYOUT = {
+    "reel": {"x": 14.0, "y": 18.0, "w": 72.0, "h": 54.0},
+    "small_timer": {"x": 78.0, "y": 5.0, "w": 19.0, "h": 13.0},
+    "big_timer": {"x": 30.0, "y": 18.0, "w": 40.0, "h": 54.0},
+}
+
+
+def _fortuna_normalize_overlay_layout(value) -> dict:
+    """Clamp editor coordinates so every overlay element stays on canvas."""
+    incoming = value if isinstance(value, dict) else {}
+    normalized = {}
+    minimums = {
+        "reel": (26.0, 20.0),
+        "small_timer": (12.0, 7.0),
+        "big_timer": (20.0, 20.0),
+    }
+    for name, default in FORTUNA_DEFAULT_OVERLAY_LAYOUT.items():
+        raw = incoming.get(name) if isinstance(incoming.get(name), dict) else {}
+        min_w, min_h = minimums[name]
+        try:
+            width = max(min_w, min(100.0, float(raw.get("w", default["w"]))))
+            height = max(min_h, min(100.0, float(raw.get("h", default["h"]))))
+            x = max(0.0, min(100.0 - width, float(raw.get("x", default["x"]))))
+            y = max(0.0, min(100.0 - height, float(raw.get("y", default["y"]))))
+        except (TypeError, ValueError):
+            x, y, width, height = (
+                default["x"], default["y"], default["w"], default["h"],
+            )
+        normalized[name] = {
+            "x": round(x, 2), "y": round(y, 2),
+            "w": round(width, 2), "h": round(height, 2),
+        }
+    return normalized
+
+
+async def _fortuna_overlay_record(guild_id: str) -> dict:
+    rows = await db_fetch(
+        "SELECT guild_id, token, layout_json FROM fortuna_overlay_settings WHERE guild_id = ?",
+        (str(guild_id),),
+    )
+    if not rows:
+        token = "overlay_" + secrets.token_urlsafe(32)
+        layout = _fortuna_normalize_overlay_layout(None)
+        await db_execute(
+            """INSERT OR IGNORE INTO fortuna_overlay_settings
+               (guild_id, token, layout_json) VALUES (?, ?, ?)""",
+            (str(guild_id), token, json.dumps(layout, separators=(",", ":"))),
+        )
+        rows = await db_fetch(
+            "SELECT guild_id, token, layout_json FROM fortuna_overlay_settings WHERE guild_id = ?",
+            (str(guild_id),),
+        )
+    record = rows[0]
+    try:
+        saved_layout = json.loads(record.get("layout_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        saved_layout = {}
+    return {
+        "guild_id": str(record["guild_id"]),
+        "token": str(record["token"]),
+        "layout": _fortuna_normalize_overlay_layout(saved_layout),
+    }
+
+
 def _fortuna_remaining_seconds(giveaway: dict) -> int:
     duration = max(0, int(giveaway.get("duration_seconds") or 0))
     if not duration:
@@ -3371,6 +3437,283 @@ def _fortuna_start_options(command: dict) -> dict:
     }
 
 
+def _fortuna_chat_channel(channel_login: str):
+    """Return the joined TwitchIO channel used for Fortuna chat messages."""
+    if not _bot_ref or not getattr(_bot_ref, "twitch_chat_bot", None):
+        return None
+    login = str(channel_login or "").lower()
+    return next(
+        (candidate for candidate in _bot_ref.twitch_chat_bot.connected_channels
+         if candidate.name.lower() == login),
+        None,
+    )
+
+
+async def _fortuna_send_chat(channel_login: str, message: str) -> bool:
+    channel = _fortuna_chat_channel(channel_login)
+    if not channel:
+        logger.warning("Fortuna could not post in @%s: chat bot is not joined",
+                       str(channel_login).lower())
+        return False
+    try:
+        await channel.send(str(message)[:500])
+        return True
+    except Exception as exc:
+        logger.warning("Fortuna chat message failed in @%s: %s",
+                       str(channel_login).lower(), exc)
+        return False
+
+
+def _fortuna_entry_instruction(giveaway: dict) -> str:
+    if str(giveaway.get("entry_mode") or "channel_reward") == "chat_command":
+        return f"Type {giveaway.get('chat_command') or '!enter'} to enter"
+    return f"Redeem \"{giveaway.get('reward_title') or 'Giveaway Entry'}\" to enter"
+
+
+def _fortuna_time_label(total_seconds: int) -> str:
+    total_seconds = max(0, int(total_seconds or 0))
+    if not total_seconds:
+        return "when the host closes entries"
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds and not hours:
+        parts.append(f"{seconds}s")
+    return "in " + " ".join(parts)
+
+
+async def _fortuna_notice_message(giveaway_id: int) -> tuple[dict | None, str]:
+    rows = await db_fetch(
+        "SELECT * FROM fortuna_giveaways WHERE id = ? AND status = 'open'",
+        (giveaway_id,),
+    )
+    if not rows:
+        return None, ""
+    giveaway = rows[0]
+    counts = await db_fetch(
+        """SELECT COUNT(DISTINCT twitch_user_id) AS count
+           FROM fortuna_entries WHERE giveaway_id = ? AND eligible = 1""",
+        (giveaway_id,),
+    )
+    count = int(counts[0]["count"] if counts else 0)
+    message = (
+        f"🎁 {giveaway.get('title') or 'Fortuna Giveaway'} is LIVE! "
+        f"{_fortuna_entry_instruction(giveaway)}. "
+        f"Winner drawn {_fortuna_time_label(_fortuna_remaining_seconds(giveaway))}. "
+        f"{count} {'entrant' if count == 1 else 'entrants'} so far."
+    )
+    return giveaway, message
+
+
+async def _fortuna_broadcaster_auth(broadcaster_id: str):
+    rows = await db_fetch(
+        """SELECT access_token, twitch_login
+           FROM broadcaster_tokens WHERE twitch_user_id = ?
+           ORDER BY guild_id ASC LIMIT 1""",
+        (str(broadcaster_id),),
+    )
+    return rows[0] if rows else None
+
+
+async def _fortuna_get_pinned_message(broadcaster_id: str,
+                                       access_token: str):
+    session = get_http_session()
+    async with session.get(
+        f"{TWITCH_API}/chat/pins",
+        headers={"Client-ID": TWITCH_CLIENT_ID,
+                 "Authorization": f"Bearer {access_token}"},
+        params={"broadcaster_id": str(broadcaster_id),
+                "moderator_id": str(broadcaster_id)},
+    ) as response:
+        if response.status != 200:
+            logger.warning("Fortuna could not inspect pinned chat for %s: HTTP %s",
+                           broadcaster_id, response.status)
+            return None
+        payload = await response.json(content_type=None)
+        messages = payload.get("data", []) if isinstance(payload, dict) else []
+        return messages[0] if messages else {}
+
+
+async def _fortuna_send_pinned_message(broadcaster_id: str,
+                                        access_token: str,
+                                        message: str) -> str:
+    session = get_http_session()
+    async with session.post(
+        f"{TWITCH_API}/chat/messages",
+        headers={"Client-ID": TWITCH_CLIENT_ID,
+                 "Authorization": f"Bearer {access_token}",
+                 "Content-Type": "application/json"},
+        json={"broadcaster_id": str(broadcaster_id),
+              "sender_id": str(broadcaster_id),
+              "message": str(message)[:500], "pin": True},
+    ) as response:
+        payload = await response.json(content_type=None)
+        if response.status != 200:
+            logger.warning(
+                "Fortuna could not send a pinned start message for %s: HTTP %s %s",
+                broadcaster_id, response.status,
+                payload.get("message", "") if isinstance(payload, dict) else "",
+            )
+            return ""
+        items = payload.get("data", []) if isinstance(payload, dict) else []
+        if not items or not items[0].get("is_sent"):
+            logger.warning("Twitch dropped Fortuna's pinned start message for %s",
+                           broadcaster_id)
+            return ""
+        return str(items[0].get("message_id") or "")
+
+
+async def _fortuna_extend_pin(broadcaster_id: str, access_token: str,
+                              message_id: str) -> bool:
+    session = get_http_session()
+    async with session.patch(
+        f"{TWITCH_API}/chat/pins",
+        headers={"Client-ID": TWITCH_CLIENT_ID,
+                 "Authorization": f"Bearer {access_token}"},
+        params={"broadcaster_id": str(broadcaster_id),
+                "moderator_id": str(broadcaster_id),
+                "message_id": str(message_id), "duration_seconds": 1800},
+    ) as response:
+        return response.status == 204
+
+
+async def _fortuna_unpin_message(broadcaster_id: str, access_token: str,
+                                 message_id: str) -> bool:
+    session = get_http_session()
+    async with session.delete(
+        f"{TWITCH_API}/chat/pins",
+        headers={"Client-ID": TWITCH_CLIENT_ID,
+                 "Authorization": f"Bearer {access_token}"},
+        params={"broadcaster_id": str(broadcaster_id),
+                "moderator_id": str(broadcaster_id),
+                "message_id": str(message_id)},
+    ) as response:
+        return response.status in {204, 404}
+
+
+async def _fortuna_live_notice_worker(giveaway_id: int):
+    """Own the live pinned notice or periodic reminder for one giveaway."""
+    giveaway, message = await _fortuna_notice_message(giveaway_id)
+    if not giveaway:
+        return
+    broadcaster_id = str(giveaway["twitch_broadcaster_id"])
+    broadcaster_login = str(giveaway["twitch_broadcaster_login"]).lower()
+    auth = await _fortuna_broadcaster_auth(broadcaster_id)
+    access_token = str(auth.get("access_token") or "") if auth else ""
+    reminder_mode = True
+    message_id = ""
+
+    if access_token:
+        try:
+            existing_pin = await _fortuna_get_pinned_message(
+                broadcaster_id, access_token,
+            )
+        except Exception as exc:
+            logger.warning("Fortuna pinned-message inspection failed: %s", exc)
+            existing_pin = None
+        # None means Twitch rejected the inspection request. An empty dict
+        # means the channel has no pin and Fortuna may safely create one.
+        if existing_pin == {}:
+            try:
+                message_id = await _fortuna_send_pinned_message(
+                    broadcaster_id, access_token, message,
+                )
+            except Exception as exc:
+                logger.warning("Fortuna pinned start message failed: %s", exc)
+            reminder_mode = not bool(message_id)
+
+    if message_id:
+        _fortuna_notice_state[giveaway_id] = {
+            "broadcaster_id": broadcaster_id,
+            "message_id": message_id,
+            "pinned": True,
+        }
+        await db_execute(
+            """UPDATE fortuna_giveaways
+               SET chat_notice_message_id = ?, chat_notice_pinned = 1,
+                   updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (message_id, giveaway_id),
+        )
+    else:
+        _fortuna_notice_state[giveaway_id] = {
+            "broadcaster_id": broadcaster_id,
+            "message_id": "", "pinned": False,
+        }
+        await _fortuna_send_chat(broadcaster_login, message)
+
+    while True:
+        await asyncio.sleep(600 if reminder_mode else 900)
+        current, current_message = await _fortuna_notice_message(giveaway_id)
+        if not current:
+            return
+        if reminder_mode:
+            await _fortuna_send_chat(broadcaster_login, current_message)
+        else:
+            try:
+                extended = await _fortuna_extend_pin(
+                    broadcaster_id, access_token, message_id,
+                )
+            except Exception as exc:
+                logger.warning("Fortuna pin refresh failed: %s", exc)
+                extended = False
+            if extended:
+                continue
+            # Never replace an unrelated pin that appeared after Fortuna's.
+            reminder_mode = True
+            await _fortuna_send_chat(broadcaster_login, current_message)
+
+
+def _fortuna_notice_finished(finished: asyncio.Task, giveaway_id: int):
+    if _fortuna_notice_tasks.get(giveaway_id) is finished:
+        _fortuna_notice_tasks.pop(giveaway_id, None)
+    if finished.cancelled():
+        return
+    error = finished.exception()
+    if error:
+        logger.error("Fortuna live notice task failed: %s", error,
+                     exc_info=(type(error), error, error.__traceback__))
+
+
+def _fortuna_schedule_live_notice(giveaway_id: int):
+    previous = _fortuna_notice_tasks.pop(giveaway_id, None)
+    if previous:
+        previous.cancel()
+    task = asyncio.create_task(_fortuna_live_notice_worker(giveaway_id))
+    _fortuna_notice_tasks[giveaway_id] = task
+    task.add_done_callback(
+        lambda finished, gid=giveaway_id: _fortuna_notice_finished(finished, gid)
+    )
+
+
+async def _fortuna_stop_live_notice(giveaway: dict):
+    giveaway_id = int(giveaway["id"])
+    task = _fortuna_notice_tasks.pop(giveaway_id, None)
+    if task:
+        task.cancel()
+    state = _fortuna_notice_state.pop(giveaway_id, {})
+    message_id = str(state.get("message_id") or
+                     giveaway.get("chat_notice_message_id") or "")
+    pinned = bool(state.get("pinned") or giveaway.get("chat_notice_pinned"))
+    broadcaster_id = str(giveaway.get("twitch_broadcaster_id") or "")
+    if pinned and message_id and broadcaster_id:
+        auth = await _fortuna_broadcaster_auth(broadcaster_id)
+        token = str(auth.get("access_token") or "") if auth else ""
+        if token:
+            try:
+                await _fortuna_unpin_message(broadcaster_id, token, message_id)
+            except Exception as exc:
+                logger.warning("Fortuna could not remove its pinned message: %s", exc)
+    await db_execute(
+        """UPDATE fortuna_giveaways SET chat_notice_pinned = 0,
+                   updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+        (giveaway_id,),
+    )
+
+
 async def _fortuna_start_giveaway(broadcaster_id: str,
                                    broadcaster_login: str,
                                    command: dict):
@@ -3402,6 +3745,7 @@ async def _fortuna_start_giveaway(broadcaster_id: str,
     }
     await _fortuna_broadcast(str(broadcaster_id), state)
     _fortuna_schedule_deadline(giveaway_id, options["duration_seconds"])
+    _fortuna_schedule_live_notice(giveaway_id)
     return {"id": giveaway_id, **options, **state}
 
 
@@ -3419,6 +3763,7 @@ async def _fortuna_cancel_giveaway(broadcaster_id: str,
     task = _fortuna_finish_tasks.pop(int(giveaway["id"]), None)
     if task:
         task.cancel()
+    await _fortuna_stop_live_notice(giveaway)
     _fortuna_chat_commands.pop(str(broadcaster_login).lower(), None)
     await _fortuna_broadcast(str(broadcaster_id), {"type": "cancelled"})
     return True
@@ -3477,8 +3822,6 @@ async def _fortuna_record_redemption(event: dict):
         if "UNIQUE" in str(exc).upper():
             return False
         raise
-    if not eligible:
-        return False
 
     count_rows = await db_fetch(
         """SELECT COUNT(DISTINCT twitch_user_id) AS count
@@ -3486,6 +3829,19 @@ async def _fortuna_record_redemption(event: dict):
         (giveaway["id"],),
     )
     entry_count = int(count_rows[0]["count"] if count_rows else 0)
+    channel_login = str(giveaway.get("twitch_broadcaster_login") or "").lower()
+    if eligible:
+        await _fortuna_send_chat(
+            channel_login,
+            f"@{user_login}, you're entered! Total entrants: {entry_count}.",
+        )
+    else:
+        await _fortuna_send_chat(
+            channel_login,
+            f"@{user_login}, you're already entered. Total entrants: {entry_count}.",
+        )
+        return True
+
     await _fortuna_broadcast(broadcaster_id, {
         "type": "entry", "user_id": user_id, "display_name": display_name,
         "entry_count": entry_count,
@@ -3821,6 +4177,7 @@ async def _fortuna_finish_giveaway(giveaway_id: int):
     _fortuna_chat_commands.pop(
         str(giveaway.get("twitch_broadcaster_login") or "").lower(), None,
     )
+    await _fortuna_stop_live_notice(giveaway)
 
     await _fortuna_broadcast(str(giveaway["twitch_broadcaster_id"]), {
         "type": "spin",
@@ -4230,6 +4587,111 @@ async def revoke_guild_fortuna_plugin_key(request):
     for ws in list(_fortuna_connections_by_key.get(key_id, set())):
         await ws.close(code=1008, message=b"Plugin key revoked")
     return web.json_response({"ok": True})
+
+
+async def get_guild_fortuna_overlay(request):
+    """Return the persistent Browser Source URL and draggable layout."""
+    guild_id = _require_fortuna_guild_manager(request)
+    record = await _fortuna_overlay_record(guild_id)
+    base_url = os.getenv("DASHBOARD_BASE_URL", "https://excelprotocol.fly.dev").rstrip("/")
+    return web.json_response({
+        "overlay_url": f"{base_url}/fortuna-overlay/{record['token']}",
+        "layout": record["layout"],
+    }, headers={"Cache-Control": "no-store"})
+
+
+async def save_guild_fortuna_overlay(request):
+    """Persist manager-edited browser overlay positions and dimensions."""
+    guild_id = _require_fortuna_guild_manager(request)
+    body = await request.json()
+    layout = _fortuna_normalize_overlay_layout(body.get("layout"))
+    await _fortuna_overlay_record(guild_id)
+    await db_execute(
+        """UPDATE fortuna_overlay_settings
+           SET layout_json = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE guild_id = ?""",
+        (json.dumps(layout, separators=(",", ":")), guild_id),
+    )
+    return web.json_response({"ok": True, "layout": layout})
+
+
+async def fortuna_overlay_page(request):
+    """Serve the token-gated, transparent ExcelFortuna Browser Source."""
+    token = str(request.match_info.get("token") or "")
+    rows = await db_fetch(
+        "SELECT guild_id, layout_json FROM fortuna_overlay_settings WHERE token = ?",
+        (token,),
+    )
+    if not rows:
+        raise web.HTTPNotFound(reason="Fortuna overlay not found")
+    try:
+        saved_layout = json.loads(rows[0].get("layout_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        saved_layout = {}
+    layout = _fortuna_normalize_overlay_layout(saved_layout)
+    template_path = os.path.join(os.path.dirname(__file__), "fortuna_overlay.html")
+    with open(template_path, "r", encoding="utf-8") as template_file:
+        html = template_file.read()
+    html = html.replace("__FORTUNA_TOKEN_JSON__", json.dumps(token))
+    html = html.replace("__FORTUNA_LAYOUT_JSON__", json.dumps(layout, separators=(",", ":")))
+    return web.Response(
+        text=html, content_type="text/html",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+async def fortuna_overlay_ws(request):
+    """Read-only event socket for a configured Fortuna Browser Source."""
+    token = str(request.match_info.get("token") or "")
+    rows = await db_fetch(
+        """SELECT s.guild_id, b.twitch_user_id AS twitch_broadcaster_id
+           FROM fortuna_overlay_settings AS s
+           JOIN broadcaster_tokens AS b ON CAST(b.guild_id AS TEXT) = s.guild_id
+           WHERE s.token = ? LIMIT 1""",
+        (token,),
+    )
+    if not rows:
+        raise web.HTTPUnauthorized(reason="Invalid Fortuna overlay")
+    broadcaster_id = str(rows[0]["twitch_broadcaster_id"])
+    ws = web.WebSocketResponse(heartbeat=30, max_msg_size=4096)
+    await ws.prepare(request)
+    _fortuna_connections.setdefault(broadcaster_id, set()).add(ws)
+    await _fortuna_send_snapshot(ws, broadcaster_id)
+
+    async def heartbeat():
+        while not ws.closed:
+            await asyncio.sleep(1)
+            giveaway = await _fortuna_open_giveaway(broadcaster_id)
+            if giveaway:
+                counts = await db_fetch(
+                    """SELECT COUNT(DISTINCT twitch_user_id) AS count
+                       FROM fortuna_entries
+                       WHERE giveaway_id = ? AND eligible = 1""",
+                    (giveaway["id"],),
+                )
+                await ws.send_str(json.dumps({
+                    "type": "state", "status": "open",
+                    "giveaway_id": giveaway["id"], "title": giveaway["title"],
+                    "entry_count": int(counts[0].get("count") or 0) if counts else 0,
+                    "target_entries": int(giveaway.get("target_entries") or 0),
+                    "remaining_seconds": _fortuna_remaining_seconds(giveaway),
+                }))
+            else:
+                await ws.send_str(json.dumps({"type": "pong"}))
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        async for _message in ws:
+            # Browser overlays are deliberately display-only.
+            pass
+    except (asyncio.CancelledError, ConnectionResetError):
+        pass
+    finally:
+        heartbeat_task.cancel()
+        _fortuna_connections.get(broadcaster_id, set()).discard(ws)
+        if not ws.closed:
+            await ws.close()
+    return ws
 
 
 async def fortuna_plugin_ws(request):
@@ -5551,6 +6013,8 @@ def create_dashboard_app(bot=None):
     app.router.add_get   ("/api/guild/{guild_id}/fortuna/plugin-keys",      get_guild_fortuna_plugin_keys)
     app.router.add_post  ("/api/guild/{guild_id}/fortuna/plugin-keys",      create_guild_fortuna_plugin_key)
     app.router.add_delete("/api/guild/{guild_id}/fortuna/plugin-keys/{key_id}", revoke_guild_fortuna_plugin_key)
+    app.router.add_get   ("/api/guild/{guild_id}/fortuna/overlay",          get_guild_fortuna_overlay)
+    app.router.add_patch ("/api/guild/{guild_id}/fortuna/overlay",          save_guild_fortuna_overlay)
     app.router.add_post  ("/api/guild/{guild_id}/broadcaster/triggers",     upsert_reward_trigger)
     app.router.add_delete("/api/guild/{guild_id}/broadcaster/triggers/{reward_id}", delete_reward_trigger)
     app.router.add_post  ("/api/guild/{guild_id}/broadcaster/rewards",      create_reward)
@@ -5581,6 +6045,8 @@ def create_dashboard_app(bot=None):
     app.router.add_post("/api/admin/fortuna-plugin-keys", create_fortuna_plugin_key)
     app.router.add_delete("/api/admin/fortuna-plugin-keys/{key_id}", revoke_fortuna_plugin_key)
     app.router.add_get("/api/fortuna/plugin/ws", fortuna_plugin_ws)
+    app.router.add_get("/fortuna-overlay/{token}", fortuna_overlay_page)
+    app.router.add_get("/fortuna-overlay/{token}/ws", fortuna_overlay_ws)
     app.router.add_get("/api/guilds",    get_guilds)
     app.router.add_get("/api/guild/{guild_id}", get_guild_summary)
 

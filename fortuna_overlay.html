@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ExcelFortuna Overlay</title>
+  <style>
+    :root { --cyan:#28e5e1; --violet:#9868ff; --accent:#ffe45c; --ink:#060814; --text:#f4f8ff; }
+    * { box-sizing:border-box; }
+    html,body { width:100%; height:100%; margin:0; overflow:hidden; background:transparent; }
+    body { font-family:Bahnschrift,"Segoe UI",sans-serif; color:var(--text); }
+    #stage { position:relative; width:100%; height:100%; overflow:hidden; }
+    .layer { position:absolute; display:none; }
+    .layer.visible { display:block; }
+
+    #reel { filter:drop-shadow(0 22px 38px rgba(0,0,0,.65)); }
+    .reel-shell { position:relative; width:100%; height:100%; min-width:260px; min-height:150px; overflow:hidden;
+      border:1px solid color-mix(in srgb,var(--cyan) 72%,transparent); border-radius:clamp(14px,2vw,28px);
+      background:linear-gradient(155deg,rgba(11,18,35,.97),rgba(4,7,15,.98));
+      box-shadow:inset 0 0 75px rgba(0,0,0,.62),0 0 38px color-mix(in srgb,var(--cyan) 16%,transparent); }
+    .reel-shell::before { content:""; position:absolute; inset:0; opacity:.32; pointer-events:none;
+      background:linear-gradient(rgba(40,229,225,.08) 1px,transparent 1px),linear-gradient(90deg,rgba(40,229,225,.06) 1px,transparent 1px);
+      background-size:9% 20%,9% 20%; }
+    .reel-heading { position:absolute; z-index:5; top:5%; left:6%; right:6%; text-align:center; }
+    .reel-kicker { color:var(--cyan); font-size:clamp(10px,1.1vw,18px); letter-spacing:.24em; text-transform:uppercase; }
+    .reel-title { margin-top:.5%; font-size:clamp(16px,2.1vw,34px); font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .reel-window { position:absolute; z-index:3; inset:22% 4.5% 12%; overflow:hidden; }
+    .reel-selector { position:absolute; z-index:2; left:1%; right:1%; top:50%; height:22%; transform:translateY(-50%);
+      border-left:4px solid var(--cyan); border-right:4px solid var(--cyan);
+      background:linear-gradient(90deg,color-mix(in srgb,var(--cyan) 14%,transparent),transparent 17%,transparent 83%,color-mix(in srgb,var(--cyan) 14%,transparent));
+      box-shadow:0 0 28px color-mix(in srgb,var(--cyan) 17%,transparent); }
+    .reel-selector::before,.reel-selector::after { content:""; position:absolute; left:5%; right:5%; height:1px; background:color-mix(in srgb,var(--cyan) 54%,transparent); }
+    .reel-selector::before { top:0; }.reel-selector::after { bottom:0; }
+    .reel-rows { position:absolute; inset:0; display:grid; grid-template-rows:repeat(5,1fr); align-items:center; }
+    .reel-row { text-align:center; color:rgba(244,248,255,.25); font-size:clamp(12px,1.6vw,26px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 8%; }
+    .reel-row.near { color:rgba(244,248,255,.58); font-size:clamp(14px,2vw,31px); }
+    .reel-row.focus { color:var(--text); font-size:clamp(20px,3.2vw,50px); font-weight:700; text-shadow:0 0 24px color-mix(in srgb,var(--cyan) 48%,transparent); }
+    .reel-scan { position:absolute; z-index:4; top:33%; width:9%; height:2px; opacity:0; background:var(--accent); box-shadow:0 0 12px var(--accent); }
+    #reel.spinning .reel-scan { opacity:1; animation:scan 1.05s linear infinite; }
+    #reel.winner .reel-selector { border-color:var(--accent); box-shadow:0 0 44px color-mix(in srgb,var(--accent) 34%,transparent); }
+    .reel-result { position:absolute; z-index:5; left:0; right:0; bottom:3%; text-align:center; color:var(--accent); opacity:0;
+      font-size:clamp(10px,1.15vw,18px); letter-spacing:.17em; text-transform:uppercase; transition:opacity .35s; }
+    #reel.winner .reel-result { opacity:1; }
+    @keyframes scan { from{left:6%} to{left:85%} }
+
+    #small-timer { min-width:190px; min-height:76px; padding:9px 14px; border-radius:16px;
+      border:1px solid color-mix(in srgb,var(--cyan) 70%,transparent); background:rgba(6,10,22,.93);
+      box-shadow:0 14px 34px rgba(0,0,0,.48),0 0 24px color-mix(in srgb,var(--cyan) 12%,transparent); }
+    .small-label { color:var(--cyan); font-size:clamp(9px,.8vw,14px); letter-spacing:.16em; text-transform:uppercase; }
+    .small-row { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; margin-top:3px; }
+    .small-time { font-size:clamp(23px,2.3vw,42px); line-height:1; font-weight:700; font-variant-numeric:tabular-nums; }
+    .small-count { padding-bottom:3px; color:rgba(244,248,255,.65); font-size:clamp(9px,.8vw,13px); white-space:nowrap; }
+
+    #big-timer { min-width:280px; min-height:220px; border-radius:clamp(18px,2.4vw,32px);
+      border:1px solid color-mix(in srgb,var(--cyan) 74%,transparent); background:rgba(5,9,20,.96);
+      box-shadow:0 25px 65px rgba(0,0,0,.68),0 0 54px color-mix(in srgb,var(--cyan) 18%,transparent); }
+    .big-inner { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:8%; }
+    .big-label { color:var(--cyan); font-size:clamp(11px,1.25vw,20px); letter-spacing:.22em; text-transform:uppercase; }
+    .big-number { margin-top:1%; font-size:clamp(90px,16vw,260px); line-height:.9; font-weight:700; font-variant-numeric:tabular-nums; text-shadow:0 0 45px color-mix(in srgb,var(--accent) 28%,transparent); }
+    .big-count { margin-top:3%; color:rgba(244,248,255,.72); font-size:clamp(11px,1.15vw,18px); letter-spacing:.11em; text-transform:uppercase; }
+    .big-track { position:absolute; left:6%; right:6%; bottom:5%; height:4px; border-radius:3px; background:rgba(244,248,255,.09); overflow:hidden; }
+    .big-progress { width:100%; height:100%; border-radius:inherit; background:var(--accent); box-shadow:0 0 12px var(--accent); transition:width .2s linear; }
+    @media (prefers-reduced-motion:reduce) { * { animation-duration:.01ms!important; transition-duration:.01ms!important; } }
+  </style>
+</head>
+<body>
+  <main id="stage">
+    <section id="reel" class="layer" aria-label="Giveaway name reel">
+      <div class="reel-shell">
+        <div class="reel-heading"><div class="reel-kicker">ExcelFortuna · live draw</div><div id="reel-title" class="reel-title">Fortuna Giveaway</div></div>
+        <div class="reel-window"><div class="reel-selector"></div><div class="reel-rows">
+          <div class="reel-row"></div><div class="reel-row near"></div><div class="reel-row focus">Waiting for entries</div><div class="reel-row near"></div><div class="reel-row"></div>
+        </div><div class="reel-scan"></div></div>
+        <div class="reel-result">Winner confirmed</div>
+      </div>
+    </section>
+    <section id="small-timer" class="layer" aria-label="Giveaway timer">
+      <div class="small-label">Giveaway draw in</div><div class="small-row"><div id="small-time" class="small-time">5:00</div><div id="small-count" class="small-count">0 entrants</div></div>
+    </section>
+    <section id="big-timer" class="layer" aria-label="Final giveaway countdown">
+      <div class="big-inner"><div class="big-label">Giveaway draw in</div><div id="big-number" class="big-number">10</div><div id="big-count" class="big-count">0 entrants</div></div>
+      <div class="big-track"><div id="big-progress" class="big-progress"></div></div>
+    </section>
+  </main>
+  <script>
+    const token = __FORTUNA_TOKEN_JSON__;
+    const layout = __FORTUNA_LAYOUT_JSON__;
+    const entrants = [];
+    let title = "Fortuna Giveaway";
+    let spinFrame = 0;
+    const layers = {reel:document.getElementById("reel"),small_timer:document.getElementById("small-timer"),big_timer:document.getElementById("big-timer")};
+    for (const [key,element] of Object.entries(layers)) {
+      const box = layout[key]; if (!box) continue;
+      Object.assign(element.style,{left:box.x+"%",top:box.y+"%",width:box.w+"%",height:box.h+"%"});
+    }
+    const clock = value => { const n=Math.max(0,Number(value)||0),m=Math.floor(n/60),s=Math.floor(n%60); return `${m}:${String(s).padStart(2,"0")}`; };
+    const countText = count => `${count} entrant${count===1?"":"s"}`;
+    const hideAll = () => Object.values(layers).forEach(layer=>layer.classList.remove("visible"));
+    function renderRows(index) {
+      const rows=[...document.querySelectorAll(".reel-row")];
+      if (!entrants.length) { rows.forEach((row,i)=>row.textContent=i===2?"Waiting for entries":""); return; }
+      rows.forEach((row,i)=>{ const at=(index+i-2+entrants.length*4)%entrants.length; row.textContent=entrants[at].name; });
+    }
+    function showCountdown(remaining,count) {
+      hideAll();
+      if (remaining>300) return;
+      if (remaining>10) {
+        layers.small_timer.classList.add("visible");
+        document.getElementById("small-time").textContent=clock(remaining);
+        document.getElementById("small-count").textContent=countText(count);
+      } else if (remaining>0) {
+        layers.big_timer.classList.add("visible");
+        document.getElementById("big-number").textContent=remaining;
+        document.getElementById("big-count").textContent=countText(count);
+        document.getElementById("big-progress").style.width=Math.max(0,Math.min(100,remaining*10))+"%";
+      }
+    }
+    function spin(event) {
+      cancelAnimationFrame(spinFrame); hideAll(); layers.reel.className="layer visible spinning";
+      document.getElementById("reel-title").textContent=title;
+      const winner=Math.max(0,Math.min(entrants.length-1,Number(event.winner_index)||0));
+      const duration=Math.max(2000,Math.min(30000,Number(event.spin_duration_ms)||8000));
+      const steps=Math.max(entrants.length*8,72)+winner; const started=performance.now();
+      const animate = now => {
+        const p=Math.min(1,(now-started)/duration), eased=1-Math.pow(1-p,5);
+        renderRows(Math.floor(steps*eased)%Math.max(1,entrants.length));
+        if (p<1) spinFrame=requestAnimationFrame(animate);
+        else { renderRows(winner); layers.reel.className="layer visible winner"; }
+      };
+      spinFrame=requestAnimationFrame(animate);
+    }
+    function handle(event) {
+      if (event.type==="reset_entries") { entrants.length=0; renderRows(0); return; }
+      if (event.type==="entry") { if (!entrants.some(x=>x.id===String(event.user_id))) entrants.push({id:String(event.user_id),name:String(event.display_name||"Viewer")}); return; }
+      if (event.type==="state") {
+        title=String(event.title||title); document.getElementById("reel-title").textContent=title;
+        if (event.status==="open") showCountdown(Number(event.remaining_seconds)||0,Number(event.entry_count)||entrants.length);
+        else if (event.status==="idle") hideAll();
+        return;
+      }
+      if (event.type==="spin") { spin(event); return; }
+      if (event.type==="winner") { layers.reel.className="layer visible winner"; const i=entrants.findIndex(x=>x.id===String(event.winner_id)); if(i>=0)renderRows(i); return; }
+      if (event.type==="cancelled") hideAll();
+    }
+    function connect() {
+      const scheme=location.protocol==="https:"?"wss:":"ws:";
+      const ws=new WebSocket(`${scheme}//${location.host}/fortuna-overlay/${encodeURIComponent(token)}/ws`);
+      ws.onmessage=e=>{try{handle(JSON.parse(e.data));}catch(_){}};
+      ws.onclose=()=>setTimeout(connect,2000);
+    }
+    renderRows(0); connect();
+  </script>
+</body>
+</html>

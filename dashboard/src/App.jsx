@@ -4273,6 +4273,105 @@ function DbToolsTab() {
   );
 }
 
+function FortunaOverlayEditor({ guildId }) {
+  const [layout, setLayout] = useState(null);
+  const [overlayUrl, setOverlayUrl] = useState("");
+  const [selected, setSelected] = useState("reel");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const previewRef = useRef(null);
+  const dragRef = useRef(null);
+  const defaults = {
+    reel:{x:14,y:18,w:72,h:54},
+    small_timer:{x:78,y:5,w:19,h:13},
+    big_timer:{x:30,y:18,w:40,h:54},
+  };
+  const names = {reel:"Name Reel",small_timer:"Small Timer",big_timer:"Final 10 Seconds"};
+
+  useEffect(() => {
+    let active = true;
+    apiFetch(`/api/guild/${guildId}/fortuna/overlay`)
+      .then(data => { if (active) { setLayout(data.layout || defaults); setOverlayUrl(data.overlay_url || ""); } })
+      .catch(error => { if (active) setMessage(error.message || String(error)); });
+    return () => { active = false; };
+  }, [guildId]);
+
+  const clampBox = (box) => {
+    const minimum = selected === "small_timer" ? {w:12,h:7} : selected === "big_timer" ? {w:20,h:20} : {w:26,h:20};
+    const w = Math.max(minimum.w, Math.min(100, Number(box.w)));
+    const h = Math.max(minimum.h, Math.min(100, Number(box.h)));
+    return {...box,w,h,x:Math.max(0,Math.min(100-w,Number(box.x))),y:Math.max(0,Math.min(100-h,Number(box.y)))};
+  };
+  const updateSelected = (changes) => setLayout(current => ({...current,[selected]:clampBox({...current[selected],...changes})}));
+  const beginPointer = (event, key, mode) => {
+    event.preventDefault(); event.stopPropagation(); setSelected(key);
+    const bounds = previewRef.current?.getBoundingClientRect();
+    if (!bounds || !layout?.[key]) return;
+    dragRef.current = {key,mode,startX:event.clientX,startY:event.clientY,box:{...layout[key]},bounds};
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const movePointer = (event) => {
+    const drag = dragRef.current; if (!drag) return;
+    const dx=(event.clientX-drag.startX)/drag.bounds.width*100;
+    const dy=(event.clientY-drag.startY)/drag.bounds.height*100;
+    const minimum = drag.key === "small_timer" ? {w:12,h:7} : drag.key === "big_timer" ? {w:20,h:20} : {w:26,h:20};
+    setLayout(current => {
+      let box={...drag.box};
+      if(drag.mode==="resize") { box.w=Math.max(minimum.w,Math.min(100-box.x,drag.box.w+dx)); box.h=Math.max(minimum.h,Math.min(100-box.y,drag.box.h+dy)); }
+      else { box.x=Math.max(0,Math.min(100-box.w,drag.box.x+dx)); box.y=Math.max(0,Math.min(100-box.h,drag.box.y+dy)); }
+      return {...current,[drag.key]:box};
+    });
+  };
+  const stopPointer = () => { dragRef.current=null; };
+  const save = async () => {
+    setBusy(true); setMessage("");
+    try {
+      const result=await apiFetch(`/api/guild/${guildId}/fortuna/overlay`,{method:"PATCH",body:JSON.stringify({layout})});
+      setLayout(result.layout); setMessage("Overlay layout saved. OBS will use it the next time the Browser Source loads.");
+    } catch(error) { setMessage(error.message || String(error)); }
+    finally { setBusy(false); }
+  };
+  const copyUrl = async () => { await navigator.clipboard.writeText(overlayUrl); setMessage("Browser Source URL copied."); };
+
+  if (!layout) return <div style={{ ...C.card, marginBottom:14, display:"flex", justifyContent:"center", padding:28 }}><Spinner /></div>;
+  const box = layout[selected];
+  const layerStyle = key => ({position:"absolute",left:`${layout[key].x}%`,top:`${layout[key].y}%`,width:`${layout[key].w}%`,height:`${layout[key].h}%`,border:selected===key?"2px solid var(--cyan)":"1px solid rgba(0,245,212,0.3)",borderRadius:5,cursor:"move",boxShadow:selected===key?"0 0 15px rgba(0,245,212,0.28)":"none",overflow:"hidden",userSelect:"none"});
+  const ResizeHandle = ({layer}) => <span onPointerDown={e=>beginPointer(e,layer,"resize")} style={{position:"absolute",right:0,bottom:0,width:14,height:14,background:"var(--cyan)",clipPath:"polygon(100% 0,100% 100%,0 100%)",cursor:"nwse-resize"}} />;
+
+  return <div style={{ ...C.card, marginBottom:14, borderColor:"rgba(0,245,212,0.24)" }}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+      <div><div style={{fontSize:15,fontWeight:750,color:"var(--text)"}}>Custom Browser Overlay</div><div style={{marginTop:3,fontSize:11,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>Drag any element to position it. Use the cyan corner to resize.</div></div>
+      <Badge text="1920 × 1080" color="var(--cyan)" />
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14,marginTop:13}}>
+      <div ref={previewRef} style={{position:"relative",aspectRatio:"16/9",minHeight:210,border:"1px solid var(--border2)",borderRadius:8,overflow:"hidden",background:"radial-gradient(circle at 50% 45%,rgba(0,245,212,.08),transparent 34%),#050810"}}>
+        <div style={layerStyle("reel")} onPointerDown={e=>beginPointer(e,"reel","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
+          <div style={{position:"absolute",inset:0,background:"linear-gradient(145deg,rgba(15,25,44,.97),rgba(5,8,18,.98))"}} />
+          <div style={{position:"absolute",top:"8%",left:0,right:0,textAlign:"center",fontSize:9,color:"var(--cyan)",letterSpacing:2}}>EXCELFORTUNA · LIVE DRAW</div>
+          {["PixelPilot","NovaNoodle","LuckyLuna","EchoEmber","StarSage"].map((name,i)=><div key={name} style={{position:"absolute",left:"8%",right:"8%",top:`${27+i*13}%`,textAlign:"center",fontSize:i===2?16:i===1||i===3?11:9,fontWeight:i===2?750:500,color:i===2?"#eefaff":i===1||i===3?"rgba(238,250,255,.58)":"rgba(238,250,255,.25)",borderLeft:i===2?"3px solid var(--cyan)":"none",borderRight:i===2?"3px solid var(--cyan)":"none"}}>{name}</div>)}
+          <ResizeHandle layer="reel" />
+        </div>
+        <div style={{...layerStyle("small_timer"),padding:"5px 7px",background:"rgba(7,12,24,.96)",color:"#eefaff"}} onPointerDown={e=>beginPointer(e,"small_timer","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
+          <div style={{fontSize:7,color:"var(--cyan)",letterSpacing:1}}>DRAW IN</div><div style={{fontSize:16,fontWeight:750}}>4:46 <span style={{fontSize:7,color:"#7a9ab5"}}>12 entrants</span></div><ResizeHandle layer="small_timer" />
+        </div>
+        <div style={{...layerStyle("big_timer"),display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"rgba(7,12,24,.96)",color:"#eefaff"}} onPointerDown={e=>beginPointer(e,"big_timer","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
+          <div style={{fontSize:8,color:"var(--cyan)",letterSpacing:1.4}}>GIVEAWAY DRAW IN</div><div style={{fontSize:54,lineHeight:1,fontWeight:800}}>10</div><div style={{fontSize:8,color:"#7a9ab5"}}>12 ENTRANTS</div><div style={{position:"absolute",left:"7%",right:"7%",bottom:"6%",height:3,background:"var(--yellow)"}} /><ResizeHandle layer="big_timer" />
+        </div>
+      </div>
+      <div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>{Object.keys(names).map(key=><button key={key} onClick={()=>setSelected(key)} style={{...C.btnSecondary,padding:"7px 5px",fontSize:9,borderColor:selected===key?"var(--cyan)":"var(--border)"}}>{names[key]}</button>)}</div>
+        <div style={{marginTop:12,fontSize:11,fontWeight:700,color:"var(--text)"}}>{names[selected]}</div>
+        {[['x','Horizontal'],['y','Vertical'],['w','Width'],['h','Height']].map(([key,label])=><label key={key} style={{display:"grid",gridTemplateColumns:"64px 1fr 38px",alignItems:"center",gap:7,marginTop:8,fontSize:9,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}><span>{label}</span><input type="range" min="0" max={key==='w'||key==='h'?100:100-box[key==='w'?'w':key==='h'?'h':key==='x'?'w':'h']} step="0.25" value={box[key]} onChange={e=>updateSelected({[key]:Number(e.target.value)})} /><span style={{color:"var(--cyan)",textAlign:"right"}}>{Math.round(box[key])}%</span></label>)}
+        <div style={{display:"flex",gap:7,marginTop:13,flexWrap:"wrap"}}><button onClick={save} disabled={busy} style={{...C.btnPrimary,opacity:busy?.6:1}}>{busy?"Saving…":"Save Layout"}</button><button onClick={()=>setLayout(defaults)} style={C.btnSecondary}>Reset</button></div>
+      </div>
+    </div>
+    <div style={{marginTop:13,fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>OBS Browser Source URL</div>
+    <div style={{display:"flex",gap:8,alignItems:"center",marginTop:5}}><code style={{flex:1,minWidth:0,padding:"8px 10px",background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:6,color:"var(--cyan2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:10}}>{overlayUrl}</code><button onClick={copyUrl} style={{...C.btnSecondary,whiteSpace:"nowrap"}}>Copy URL</button></div>
+    <div style={{marginTop:7,fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>In OBS, add a Browser Source at 1920 × 1080 and paste this URL. Keep the URL private; it grants read-only access to your giveaway display.</div>
+    {message&&<div style={{marginTop:8,fontSize:10,color:message.includes("saved")||message.includes("copied")?"var(--green)":"var(--red)"}}>{message}</div>}
+  </div>;
+}
+
 function FortunaTab({ guildId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4474,7 +4573,7 @@ function FortunaTab({ guildId }) {
             </div>
             <div style={{ marginTop:5, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", maxWidth:720 }}>
               {obsConnected
-                ? "OBS is connected and will receive the countdown, wheel, and winner reveal live."
+                ? "OBS is connected and will receive the countdown, name reel, and winner reveal live."
                 : hasPluginKey
                   ? "A plugin key exists, but no OBS source is connected. Open the ExcelFortuna source properties in OBS, paste the key, and click Connect / reconnect now."
                   : "Install ExcelFortuna in OBS, then open Settings & OBS Connection below to generate and pair a plugin key before running a streamed giveaway."}
@@ -4484,7 +4583,7 @@ function FortunaTab({ guildId }) {
         </div>
         {!obsConnected && (
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(175px,1fr))", gap:8, marginTop:12 }}>
-            {["1. Download and install the plugin", "2. Add ExcelFortuna Giveaway Wheel in OBS", "3. Generate and paste the key below", "4. Confirm this badge turns green"].map(step => (
+            {["1. Download and install the plugin", "2. Add ExcelFortuna Giveaway Picker in OBS", "3. Generate and paste the key below", "4. Confirm this badge turns green"].map(step => (
               <div key={step} style={{ padding:"8px 10px", border:"1px solid var(--border)", borderRadius:6, background:"var(--bg2)", color:"var(--text2)", fontSize:10, fontFamily:"'JetBrains Mono',monospace" }}>{step}</div>
             ))}
           </div>
@@ -4495,7 +4594,7 @@ function FortunaTab({ guildId }) {
         <div style={{ display:"flex", justifyContent:"space-between", gap:12, alignItems:"center", flexWrap:"wrap" }}>
           <div>
             <div style={{ fontSize:15, fontWeight:750, color:"var(--text)" }}>Giveaway Control</div>
-            <div style={{ marginTop:3, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>The OBS wheel follows these controls live.</div>
+            <div style={{ marginTop:3, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>The OBS picker and Browser Source follow these controls live.</div>
           </div>
           {control?.connected && <Badge text={`@${control.channel?.twitch_broadcaster_login}`} color="var(--cyan)" />}
         </div>
@@ -4550,7 +4649,7 @@ function FortunaTab({ guildId }) {
                     <input type="number" min="0" max="100000" step="1" value={setup.target_entries} onChange={e => setSetup({...setup,target_entries:e.target.value})} style={{ ...C.input, marginTop:5 }} />
                   </label>
                   <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
-                    WHEEL SPIN (SECONDS)
+                    NAME REEL DRAW (SECONDS)
                     <input type="number" min="2" max="30" step="1" value={setup.spin_duration_seconds} onChange={e => setSetup({...setup,spin_duration_seconds:e.target.value})} style={{ ...C.input, marginTop:5 }} />
                   </label>
                 </div>
@@ -4582,8 +4681,17 @@ function FortunaTab({ guildId }) {
         {controlError && <div style={{ color:"var(--red)", marginTop:10, fontSize:11 }}>{controlError}</div>}
       </div>
 
+      <FortunaOverlayEditor guildId={guildId} />
+
       <details style={{ ...C.card, marginBottom:14 }}>
         <summary style={{ cursor:"pointer", fontSize:14, fontWeight:700, color:"var(--text)", userSelect:"none" }}>Settings &amp; OBS Connection</summary>
+        <div style={{ marginTop:13, padding:"11px 13px", border:"1px solid rgba(0,245,212,0.22)", borderRadius:8, background:"rgba(0,245,212,0.035)" }}>
+          <div style={{ fontSize:12, fontWeight:700, color:"var(--cyan)" }}>Live Twitch chat behavior</div>
+          <div style={{ marginTop:4, fontSize:10, lineHeight:1.55, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+            Every accepted Channel Points or chat-command entry receives a confirmation with the current entrant total. Fortuna preserves an existing moderator pin; otherwise it pins the giveaway notice and removes its pin when the draw ends. If Twitch cannot pin, it posts periodic live reminders instead.
+          </div>
+          <a href={`/auth/twitch/login/${guildId}`} style={{ ...C.btnSecondary, display:"inline-flex", textDecoration:"none", marginTop:8, padding:"5px 10px", fontSize:10 }}>Refresh Twitch Permissions</a>
+        </div>
         <div style={{ marginTop:13, fontSize:14, fontWeight:700, color:"var(--text)" }}>ExcelFortuna OBS Connection</div>
         <div style={{ marginTop:4, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
           Generate a revocable key for this server’s linked Twitch account, then paste it into ExcelFortuna in OBS. Twitch credentials are never placed in OBS.

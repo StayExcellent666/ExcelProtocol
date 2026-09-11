@@ -286,7 +286,21 @@ class TestDevDashboardRoutes:
         assert ("GET", "/api/guild/{guild_id}/fortuna/plugin-keys") in routes
         assert ("POST", "/api/guild/{guild_id}/fortuna/plugin-keys") in routes
         assert ("DELETE", "/api/guild/{guild_id}/fortuna/plugin-keys/{key_id}") in routes
+        assert ("GET", "/api/guild/{guild_id}/fortuna/overlay") in routes
+        assert ("PATCH", "/api/guild/{guild_id}/fortuna/overlay") in routes
+        assert ("GET", "/fortuna-overlay/{token}") in routes
+        assert ("GET", "/fortuna-overlay/{token}/ws") in routes
         assert ("GET", "/auth/twitch/bot/login") in routes
+
+    def test_fortuna_overlay_layout_is_clamped_to_canvas(self):
+        layout = dashboard_server._fortuna_normalize_overlay_layout({
+            "reel": {"x": 95, "y": -5, "w": 50, "h": 10},
+            "small_timer": {"x": "bad", "w": 2},
+            "big_timer": {"x": 8, "y": 9, "w": 42, "h": 45},
+        })
+        assert layout["reel"] == {"x": 50.0, "y": 0.0, "w": 50.0, "h": 20.0}
+        assert layout["small_timer"] == dashboard_server.FORTUNA_DEFAULT_OVERLAY_LAYOUT["small_timer"]
+        assert layout["big_timer"] == {"x": 8.0, "y": 9.0, "w": 42.0, "h": 45.0}
 
     def test_twitch_login_normalisation(self):
         assert dashboard_server._normalise_twitch_login(" @Some_Streamer ") == "some_streamer"
@@ -544,6 +558,10 @@ class TestDevDashboardRoutes:
             dashboard_server, "_fortuna_schedule_deadline",
             lambda giveaway_id, seconds: scheduled.append((giveaway_id, seconds)),
         )
+        monkeypatch.setattr(
+            dashboard_server, "_fortuna_schedule_live_notice",
+            lambda giveaway_id: scheduled.append((giveaway_id, "notice")),
+        )
 
         result = await dashboard_server._fortuna_start_giveaway(
             "100", "StayExcellent666", {
@@ -555,7 +573,7 @@ class TestDevDashboardRoutes:
 
         assert result["id"] == 42
         assert result["chat_command"] == "!join"
-        assert scheduled == [(42, 3600)]
+        assert scheduled == [(42, 3600), (42, "notice")]
         assert [payload["type"] for _, payload in broadcasts] == [
             "reset_entries", "state",
         ]
@@ -603,15 +621,66 @@ class TestDevDashboardRoutes:
         )
         assert dashboard_server._fortuna_token_hash("secret") != "secret"
 
+    def test_fortuna_live_notice_describes_each_entry_mode(self):
+        assert dashboard_server._fortuna_entry_instruction({
+            "entry_mode": "chat_command", "chat_command": "!lucky",
+        }) == "Type !lucky to enter"
+        assert dashboard_server._fortuna_entry_instruction({
+            "entry_mode": "channel_reward", "reward_title": "Golden Ticket",
+        }) == 'Redeem "Golden Ticket" to enter'
+        assert dashboard_server._fortuna_time_label(3660) == "in 1h 1m"
+        assert dashboard_server._fortuna_time_label(0) == "when the host closes entries"
+
+    @pytest.mark.asyncio
+    async def test_fortuna_preserves_existing_pin_and_uses_chat_reminder(self, monkeypatch):
+        import asyncio
+
+        messages = []
+        giveaway = {
+            "id": 7, "twitch_broadcaster_id": "100",
+            "twitch_broadcaster_login": "stayexcellent666",
+        }
+
+        async def fake_notice(_giveaway_id):
+            return giveaway, "Giveaway is live"
+
+        async def fake_auth(_broadcaster_id):
+            return {"access_token": "token"}
+
+        async def fake_existing_pin(_broadcaster_id, _token):
+            return {"message_id": "creator-pin"}
+
+        async def fake_send(channel, message):
+            messages.append((channel, message))
+            return True
+
+        async def stop_after_initial_message(_seconds):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(dashboard_server, "_fortuna_notice_message", fake_notice)
+        monkeypatch.setattr(dashboard_server, "_fortuna_broadcaster_auth", fake_auth)
+        monkeypatch.setattr(dashboard_server, "_fortuna_get_pinned_message", fake_existing_pin)
+        monkeypatch.setattr(dashboard_server, "_fortuna_send_chat", fake_send)
+        monkeypatch.setattr(dashboard_server.asyncio, "sleep", stop_after_initial_message)
+
+        with pytest.raises(asyncio.CancelledError):
+            await dashboard_server._fortuna_live_notice_worker(7)
+
+        assert messages == [("stayexcellent666", "Giveaway is live")]
+        assert dashboard_server._fortuna_notice_state[7]["pinned"] is False
+        dashboard_server._fortuna_notice_state.pop(7, None)
+
     @pytest.mark.asyncio
     async def test_matching_fortuna_redemption_is_recorded_and_broadcast(self, monkeypatch):
         inserts = []
         broadcasts = []
+        confirmations = []
 
         async def fake_open(_broadcaster_id):
             return {
                 "id": 7, "reward_id": None, "reward_title": "Giveaway Entry",
                 "target_entries": 0,
+                "twitch_broadcaster_login": "stayexcellent666",
             }
 
         async def fake_fetch(query, params=()):
@@ -631,11 +700,16 @@ class TestDevDashboardRoutes:
         async def fake_broadcast(broadcaster_id, payload):
             broadcasts.append((broadcaster_id, payload))
 
+        async def fake_send_chat(channel_login, message):
+            confirmations.append((channel_login, message))
+            return True
+
         monkeypatch.setattr(dashboard_server, "_fortuna_open_giveaway", fake_open)
         monkeypatch.setattr(dashboard_server, "db_fetch", fake_fetch)
         monkeypatch.setattr(dashboard_server, "db_execute", fake_execute)
         monkeypatch.setattr(dashboard_server, "db_insert", fake_insert)
         monkeypatch.setattr(dashboard_server, "_fortuna_broadcast", fake_broadcast)
+        monkeypatch.setattr(dashboard_server, "_fortuna_send_chat", fake_send_chat)
 
         accepted = await dashboard_server._fortuna_record_redemption({
             "id": "redemption-1",
@@ -654,6 +728,50 @@ class TestDevDashboardRoutes:
             "type": "entry", "user_id": "viewer-1",
             "display_name": "Viewer", "entry_count": 1,
         })]
+        assert confirmations == [("stayexcellent666",
+                                  "@viewer, you're entered! Total entrants: 1.")]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_reward_redemption_gets_total_confirmation(self, monkeypatch):
+        confirmations = []
+
+        async def fake_open(_broadcaster_id):
+            return {
+                "id": 7, "entry_mode": "channel_reward",
+                "reward_id": "reward-1", "reward_title": "Giveaway Entry",
+                "target_entries": 0,
+                "twitch_broadcaster_login": "stayexcellent666",
+            }
+
+        async def fake_fetch(query, params=()):
+            if "SELECT 1 FROM fortuna_entries" in query:
+                return [{"1": 1}]
+            if "COUNT(DISTINCT twitch_user_id)" in query:
+                return [{"count": 8}]
+            raise AssertionError(query)
+
+        async def fake_insert(*_args, **_kwargs):
+            return 1
+
+        async def fake_send_chat(channel_login, message):
+            confirmations.append((channel_login, message))
+            return True
+
+        monkeypatch.setattr(dashboard_server, "_fortuna_open_giveaway", fake_open)
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_fetch)
+        monkeypatch.setattr(dashboard_server, "db_insert", fake_insert)
+        monkeypatch.setattr(dashboard_server, "_fortuna_send_chat", fake_send_chat)
+
+        handled = await dashboard_server._fortuna_record_redemption({
+            "id": "redemption-2", "broadcaster_user_id": "100",
+            "user_id": "viewer-1", "user_login": "viewer",
+            "user_name": "Viewer",
+            "reward": {"id": "reward-1", "title": "Giveaway Entry"},
+        })
+
+        assert handled is True
+        assert confirmations == [("stayexcellent666",
+                                  "@viewer, you're already entered. Total entrants: 8.")]
 
     @pytest.mark.asyncio
     async def test_matching_fortuna_chat_command_records_entry(self, monkeypatch):

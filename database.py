@@ -790,6 +790,8 @@ class Database:
             ("winner_announced", "INTEGER NOT NULL DEFAULT 0"),
             ("entry_mode", "TEXT NOT NULL DEFAULT 'channel_reward'"),
             ("chat_command", "TEXT NOT NULL DEFAULT '!enter'"),
+            ("chat_notice_message_id", "TEXT"),
+            ("chat_notice_pinned", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in fortuna_columns:
                 cursor.execute(f"ALTER TABLE fortuna_giveaways ADD COLUMN {column} {definition}")
@@ -855,6 +857,22 @@ class Database:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_fortuna_plugin_keys_guild
             ON fortuna_plugin_keys(guild_id, revoked_at)
+        ''')
+
+        # Persistent, read-only OBS Browser Source configuration. The opaque
+        # token exposes giveaway display events only; control remains behind
+        # the authenticated dashboard and native plugin key.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fortuna_overlay_settings (
+                guild_id    TEXT PRIMARY KEY,
+                token       TEXT NOT NULL UNIQUE,
+                layout_json TEXT NOT NULL,
+                updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_fortuna_overlay_token
+            ON fortuna_overlay_settings(token)
         ''')
 
         # Latest rotated credentials for the Twitch chat bot. Fly secrets are
