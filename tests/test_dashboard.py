@@ -529,12 +529,15 @@ class TestDevDashboardRoutes:
         assert 'activeTab==="fortuna"' in source
         assert '<FortunaTab guildId={activeGuild} />' in source
         assert '`/api/guild/${guildId}/fortuna/control`' in source
-        assert '`/api/guild/${guildId}/fortuna/plugin-keys`' in source
+        assert '`/api/guild/${guildId}/fortuna/overlay`' in source
         assert "/api/admin/fortuna" not in source
         assert 'label:"Fortuna"' in source
-        assert 'PAIRED · ${obsSourceCount} ONLINE' in source
-        assert 'Download OBS Plugin' in source
-        assert 'excelfortuna-v0.5.0/ExcelFortuna-0.5.0-OBS-32.2.2-Windows-x64.zip' in source
+        assert 'LIVE · ${obsSourceCount} ONLINE' in source
+        assert "No plugin installation or pairing key is needed" in source
+        assert 'Download OBS Plugin' not in source
+        assert '`/api/guild/${guildId}/fortuna/plugin-keys`' not in source
+        overlay = (Path(__file__).parent.parent / "fortuna_overlay.html").read_text(encoding="utf-8")
+        assert 'event.type==="layout"' in overlay
 
     @pytest.mark.asyncio
     async def test_shared_fortuna_start_engine_broadcasts_state(self, monkeypatch):
@@ -613,6 +616,7 @@ class TestDevDashboardRoutes:
         assert payload["giveaway"]["entry_count"] == 7
         assert payload["giveaway"]["remaining_seconds"] == 3600
         assert payload["channel"]["twitch_broadcaster_login"] == "stayexcellent666"
+        assert payload["channel"]["browser_sources"] == 0
 
     def test_fortuna_plugin_tokens_are_hashed_deterministically(self):
         assert dashboard_server._fortuna_token_hash("secret") == (

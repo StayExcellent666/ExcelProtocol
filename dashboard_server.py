@@ -52,9 +52,11 @@ TWITCH_API            = "https://api.twitch.tv/helix"
 # WebSocket connections for overlays: {guild_id: set of ws}
 _overlay_connections: dict = {}
 
-# Authenticated native ExcelFortuna sources, grouped by Twitch broadcaster ID.
-# These sockets are independent from the existing browser overlay connections.
+# ExcelFortuna display clients, grouped by Twitch broadcaster ID. The shared set
+# keeps legacy native sources compatible; the browser-only set powers the
+# dashboard's current OBS connection indicator.
 _fortuna_connections: dict[str, set] = {}
+_fortuna_browser_connections: dict[str, set] = {}
 _fortuna_connections_by_key: dict[int, set] = {}
 _fortuna_finish_tasks: dict[int, asyncio.Task] = {}
 _fortuna_notice_tasks: dict[int, asyncio.Task] = {}
@@ -4394,6 +4396,7 @@ async def _fortuna_control_data(channel: dict) -> dict:
             "twitch_broadcaster_id": broadcaster_id,
             "twitch_broadcaster_login": str(channel["twitch_broadcaster_login"]),
             "connected_sources": len(_fortuna_connections.get(broadcaster_id, set())),
+            "browser_sources": len(_fortuna_browser_connections.get(broadcaster_id, set())),
         },
         "giveaway": state,
     }
@@ -4594,9 +4597,17 @@ async def get_guild_fortuna_overlay(request):
     guild_id = _require_fortuna_guild_manager(request)
     record = await _fortuna_overlay_record(guild_id)
     base_url = os.getenv("DASHBOARD_BASE_URL", "https://excelprotocol.fly.dev").rstrip("/")
+    rows = await db_fetch(
+        "SELECT twitch_user_id FROM broadcaster_tokens WHERE guild_id = ? LIMIT 1",
+        (guild_id,),
+    )
+    broadcaster_id = str(rows[0]["twitch_user_id"]) if rows else ""
     return web.json_response({
         "overlay_url": f"{base_url}/fortuna-overlay/{record['token']}",
         "layout": record["layout"],
+        "connected_sources": len(
+            _fortuna_browser_connections.get(broadcaster_id, set())
+        ) if broadcaster_id else 0,
     }, headers={"Cache-Control": "no-store"})
 
 
@@ -4612,6 +4623,14 @@ async def save_guild_fortuna_overlay(request):
            WHERE guild_id = ?""",
         (json.dumps(layout, separators=(",", ":")), guild_id),
     )
+    rows = await db_fetch(
+        "SELECT twitch_user_id FROM broadcaster_tokens WHERE guild_id = ? LIMIT 1",
+        (guild_id,),
+    )
+    if rows:
+        await _fortuna_broadcast(str(rows[0]["twitch_user_id"]), {
+            "type": "layout", "layout": layout,
+        })
     return web.json_response({"ok": True, "layout": layout})
 
 
@@ -4656,6 +4675,7 @@ async def fortuna_overlay_ws(request):
     ws = web.WebSocketResponse(heartbeat=30, max_msg_size=4096)
     await ws.prepare(request)
     _fortuna_connections.setdefault(broadcaster_id, set()).add(ws)
+    _fortuna_browser_connections.setdefault(broadcaster_id, set()).add(ws)
     await _fortuna_send_snapshot(ws, broadcaster_id)
 
     async def heartbeat():
@@ -4689,6 +4709,7 @@ async def fortuna_overlay_ws(request):
     finally:
         heartbeat_task.cancel()
         _fortuna_connections.get(broadcaster_id, set()).discard(ws)
+        _fortuna_browser_connections.get(broadcaster_id, set()).discard(ws)
         if not ws.closed:
             await ws.close()
     return ws

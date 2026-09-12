@@ -4273,7 +4273,7 @@ function DbToolsTab() {
   );
 }
 
-function FortunaOverlayEditor({ guildId }) {
+function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
   const [layout, setLayout] = useState(null);
   const [overlayUrl, setOverlayUrl] = useState("");
   const [selected, setSelected] = useState("reel");
@@ -4327,7 +4327,7 @@ function FortunaOverlayEditor({ guildId }) {
     setBusy(true); setMessage("");
     try {
       const result=await apiFetch(`/api/guild/${guildId}/fortuna/overlay`,{method:"PATCH",body:JSON.stringify({layout})});
-      setLayout(result.layout); setMessage("Overlay layout saved. OBS will use it the next time the Browser Source loads.");
+      setLayout(result.layout); setMessage("Overlay layout saved and sent live to every open Browser Source.");
     } catch(error) { setMessage(error.message || String(error)); }
     finally { setBusy(false); }
   };
@@ -4338,10 +4338,10 @@ function FortunaOverlayEditor({ guildId }) {
   const layerStyle = key => ({position:"absolute",left:`${layout[key].x}%`,top:`${layout[key].y}%`,width:`${layout[key].w}%`,height:`${layout[key].h}%`,border:selected===key?"2px solid var(--cyan)":"1px solid rgba(0,245,212,0.3)",borderRadius:5,cursor:"move",boxShadow:selected===key?"0 0 15px rgba(0,245,212,0.28)":"none",overflow:"hidden",userSelect:"none"});
   const ResizeHandle = ({layer}) => <span onPointerDown={e=>beginPointer(e,layer,"resize")} style={{position:"absolute",right:0,bottom:0,width:14,height:14,background:"var(--cyan)",clipPath:"polygon(100% 0,100% 100%,0 100%)",cursor:"nwse-resize"}} />;
 
-  return <div style={{ ...C.card, marginBottom:14, borderColor:"rgba(0,245,212,0.24)" }}>
+  return <div id="fortuna-browser-source" style={{ ...C.card, marginBottom:14, borderColor:"rgba(0,245,212,0.24)" }}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
       <div><div style={{fontSize:15,fontWeight:750,color:"var(--text)"}}>Custom Browser Overlay</div><div style={{marginTop:3,fontSize:11,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>Drag any element to position it. Use the cyan corner to resize.</div></div>
-      <Badge text="1920 × 1080" color="var(--cyan)" />
+      <div style={{display:"flex",gap:7,alignItems:"center",flexWrap:"wrap"}}><Badge text={connectedSources ? `LIVE · ${connectedSources} SOURCE${connectedSources===1?"":"S"}` : "NOT OPEN IN OBS"} color={connectedSources ? "var(--green)" : "var(--yellow)"} /><Badge text="1920 × 1080" color="var(--cyan)" /></div>
     </div>
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:14,marginTop:13}}>
       <div ref={previewRef} style={{position:"relative",aspectRatio:"16/9",minHeight:210,border:"1px solid var(--border2)",borderRadius:8,overflow:"hidden",background:"radial-gradient(circle at 50% 45%,rgba(0,245,212,.08),transparent 34%),#050810"}}>
@@ -4367,7 +4367,7 @@ function FortunaOverlayEditor({ guildId }) {
     </div>
     <div style={{marginTop:13,fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>OBS Browser Source URL</div>
     <div style={{display:"flex",gap:8,alignItems:"center",marginTop:5}}><code style={{flex:1,minWidth:0,padding:"8px 10px",background:"var(--bg2)",border:"1px solid var(--border)",borderRadius:6,color:"var(--cyan2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:10}}>{overlayUrl}</code><button onClick={copyUrl} style={{...C.btnSecondary,whiteSpace:"nowrap"}}>Copy URL</button></div>
-    <div style={{marginTop:7,fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>In OBS, add a Browser Source at 1920 × 1080 and paste this URL. Keep the URL private; it grants read-only access to your giveaway display.</div>
+    <div style={{marginTop:7,fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>In OBS, add a Browser Source at 1920 × 1080 and paste this URL. No plugin or key is required. Keep the URL private; it grants read-only access to your giveaway display.</div>
     {message&&<div style={{marginTop:8,fontSize:10,color:message.includes("saved")||message.includes("copied")?"var(--green)":"var(--red)"}}>{message}</div>}
   </div>;
 }
@@ -4380,11 +4380,6 @@ function FortunaTab({ guildId }) {
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
-  const [pluginKeys, setPluginKeys] = useState([]);
-  const [keyLabel, setKeyLabel] = useState("My OBS");
-  const [generatedKey, setGeneratedKey] = useState("");
-  const [keyBusy, setKeyBusy] = useState(false);
-  const [keyError, setKeyError] = useState("");
   const [control, setControl] = useState(null);
   const [controlLoading, setControlLoading] = useState(false);
   const [controlBusy, setControlBusy] = useState("");
@@ -4408,18 +4403,6 @@ function FortunaTab({ guildId }) {
   }, [guildId]);
 
   useEffect(() => { load(); }, [load]);
-
-  const loadPluginKeys = useCallback(async () => {
-    try {
-      const result = await apiFetch(`/api/guild/${guildId}/fortuna/plugin-keys`);
-      const keys = result.keys || [];
-      setPluginKeys(keys);
-    } catch (e) {
-      setKeyError(e.message || String(e));
-    }
-  }, [guildId]);
-
-  useEffect(() => { loadPluginKeys(); }, [loadPluginKeys]);
 
   const loadControl = useCallback(async (quiet=false) => {
     if (!quiet) setControlLoading(true);
@@ -4461,35 +4444,6 @@ function FortunaTab({ guildId }) {
       setControlError(e.message || String(e));
     } finally {
       setControlBusy("");
-    }
-  };
-
-  const createPluginKey = async () => {
-    setKeyBusy(true);
-    setKeyError("");
-    setGeneratedKey("");
-    try {
-      const result = await apiFetch(`/api/guild/${guildId}/fortuna/plugin-keys`, {
-        method:"POST",
-        body:JSON.stringify({ label:keyLabel }),
-      });
-      setGeneratedKey(result.plugin_key || "");
-      await loadPluginKeys();
-    } catch (e) {
-      setKeyError(e.message || String(e));
-    } finally {
-      setKeyBusy(false);
-    }
-  };
-
-  const revokePluginKey = async (id) => {
-    if (!window.confirm("Revoke this ExcelFortuna plugin key? Connected OBS sources using it will disconnect.")) return;
-    setKeyError("");
-    try {
-      await apiFetch(`/api/guild/${guildId}/fortuna/plugin-keys/${id}`, { method:"DELETE" });
-      await loadPluginKeys();
-    } catch (e) {
-      setKeyError(e.message || String(e));
     }
   };
 
@@ -4535,10 +4489,8 @@ function FortunaTab({ guildId }) {
     : status === "cancelled" ? "var(--red)" : "var(--yellow)";
   const live = control?.giveaway || { status:"idle", entry_count:0, remaining_seconds:0 };
   const giveawayOpen = live.status === "open";
-  const obsSourceCount = Number(control?.channel?.connected_sources || 0);
+  const obsSourceCount = Number(control?.channel?.browser_sources || 0);
   const obsConnected = obsSourceCount > 0;
-  const hasPluginKey = pluginKeys.length > 0;
-  const fortunaDownloadUrl = "https://github.com/StayExcellent666/Excel-OBS-Plugins/releases/download/excelfortuna-v0.5.0/ExcelFortuna-0.5.0-OBS-32.2.2-Windows-x64.zip";
   const formatClock = value => {
     const total = Math.max(0, Number(value) || 0);
     const hours = Math.floor(total / 3600);
@@ -4568,22 +4520,20 @@ function FortunaTab({ guildId }) {
         <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
           <div>
             <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
-              <div style={{ fontSize:15, fontWeight:750, color:"var(--text)" }}>ExcelFortuna OBS Plugin</div>
-              <Badge text={obsConnected ? `PAIRED · ${obsSourceCount} ONLINE` : "NOT PAIRED"} color={obsConnected ? "var(--green)" : "var(--yellow)"} />
+              <div style={{ fontSize:15, fontWeight:750, color:"var(--text)" }}>ExcelFortuna Browser Source</div>
+              <Badge text={obsConnected ? `LIVE · ${obsSourceCount} ONLINE` : "NOT OPEN IN OBS"} color={obsConnected ? "var(--green)" : "var(--yellow)"} />
             </div>
             <div style={{ marginTop:5, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", maxWidth:720 }}>
               {obsConnected
                 ? "OBS is connected and will receive the countdown, name reel, and winner reveal live."
-                : hasPluginKey
-                  ? "A plugin key exists, but no OBS source is connected. Open the ExcelFortuna source properties in OBS, paste the key, and click Connect / reconnect now."
-                  : "Install ExcelFortuna in OBS, then open Settings & OBS Connection below to generate and pair a plugin key before running a streamed giveaway."}
+                : "Add the private URL from Custom Browser Overlay to a 1920 × 1080 OBS Browser Source. No plugin installation or pairing key is needed."}
             </div>
           </div>
-          <a href={fortunaDownloadUrl} target="_blank" rel="noreferrer" style={{ ...C.btnPrimary, display:"inline-flex", textDecoration:"none", whiteSpace:"nowrap" }}>Download OBS Plugin</a>
+          <a href="#fortuna-browser-source" style={{ ...C.btnPrimary, display:"inline-flex", textDecoration:"none", whiteSpace:"nowrap" }}>Browser Source Setup</a>
         </div>
         {!obsConnected && (
           <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(175px,1fr))", gap:8, marginTop:12 }}>
-            {["1. Download and install the plugin", "2. Add ExcelFortuna Giveaway Picker in OBS", "3. Generate and paste the key below", "4. Confirm this badge turns green"].map(step => (
+            {["1. Copy your private Browser Source URL below", "2. Add an OBS Browser Source", "3. Set it to 1920 × 1080", "4. Confirm this badge turns green"].map(step => (
               <div key={step} style={{ padding:"8px 10px", border:"1px solid var(--border)", borderRadius:6, background:"var(--bg2)", color:"var(--text2)", fontSize:10, fontFamily:"'JetBrains Mono',monospace" }}>{step}</div>
             ))}
           </div>
@@ -4594,7 +4544,7 @@ function FortunaTab({ guildId }) {
         <div style={{ display:"flex", justifyContent:"space-between", gap:12, alignItems:"center", flexWrap:"wrap" }}>
           <div>
             <div style={{ fontSize:15, fontWeight:750, color:"var(--text)" }}>Giveaway Control</div>
-            <div style={{ marginTop:3, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>The OBS picker and Browser Source follow these controls live.</div>
+            <div style={{ marginTop:3, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>The OBS Browser Source follows these controls live.</div>
           </div>
           {control?.connected && <Badge text={`@${control.channel?.twitch_broadcaster_login}`} color="var(--cyan)" />}
         </div>
@@ -4681,10 +4631,10 @@ function FortunaTab({ guildId }) {
         {controlError && <div style={{ color:"var(--red)", marginTop:10, fontSize:11 }}>{controlError}</div>}
       </div>
 
-      <FortunaOverlayEditor guildId={guildId} />
+      <FortunaOverlayEditor guildId={guildId} connectedSources={obsSourceCount} />
 
       <details style={{ ...C.card, marginBottom:14 }}>
-        <summary style={{ cursor:"pointer", fontSize:14, fontWeight:700, color:"var(--text)", userSelect:"none" }}>Settings &amp; OBS Connection</summary>
+        <summary style={{ cursor:"pointer", fontSize:14, fontWeight:700, color:"var(--text)", userSelect:"none" }}>Twitch &amp; Chat Settings</summary>
         <div style={{ marginTop:13, padding:"11px 13px", border:"1px solid rgba(0,245,212,0.22)", borderRadius:8, background:"rgba(0,245,212,0.035)" }}>
           <div style={{ fontSize:12, fontWeight:700, color:"var(--cyan)" }}>Live Twitch chat behavior</div>
           <div style={{ marginTop:4, fontSize:10, lineHeight:1.55, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
@@ -4692,45 +4642,6 @@ function FortunaTab({ guildId }) {
           </div>
           <a href={`/auth/twitch/login/${guildId}`} style={{ ...C.btnSecondary, display:"inline-flex", textDecoration:"none", marginTop:8, padding:"5px 10px", fontSize:10 }}>Refresh Twitch Permissions</a>
         </div>
-        <div style={{ marginTop:13, fontSize:14, fontWeight:700, color:"var(--text)" }}>ExcelFortuna OBS Connection</div>
-        <div style={{ marginTop:4, fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
-          Generate a revocable key for this server’s linked Twitch account, then paste it into ExcelFortuna in OBS. Twitch credentials are never placed in OBS.
-        </div>
-        <div style={{ display:"grid", gridTemplateColumns:"minmax(150px,1fr) auto", gap:9, marginTop:12, alignItems:"end" }}>
-          <label style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
-            KEY LABEL
-            <input value={keyLabel} onChange={e => setKeyLabel(e.target.value)} placeholder="Streaming PC" style={{ ...C.input, marginTop:5 }} />
-          </label>
-          <button onClick={createPluginKey} disabled={keyBusy || !control?.connected} style={{ ...C.btnPrimary, opacity:keyBusy || !control?.connected ? 0.5 : 1 }}>
-            {keyBusy ? "Generating…" : "Generate Key"}
-          </button>
-        </div>
-
-        {generatedKey && (
-          <div style={{ marginTop:12, padding:12, border:"1px solid rgba(57,217,138,0.4)", borderRadius:7, background:"rgba(57,217,138,0.06)" }}>
-            <div style={{ color:"var(--green)", fontSize:11, fontWeight:700 }}>Copy this key now—it cannot be shown again.</div>
-            <div style={{ display:"flex", gap:8, marginTop:7, alignItems:"center" }}>
-              <code style={{ flex:1, minWidth:0, overflowWrap:"anywhere", color:"var(--text)", fontSize:11 }}>{generatedKey}</code>
-              <button onClick={() => navigator.clipboard.writeText(generatedKey)} style={{ ...C.btnSecondary, padding:"5px 10px", fontSize:11 }}>Copy</button>
-            </div>
-          </div>
-        )}
-        {keyError && <div style={{ color:"var(--red)", marginTop:9, fontSize:11 }}>{keyError}</div>}
-
-        {pluginKeys.length > 0 && (
-          <div style={{ display:"grid", gap:7, marginTop:12 }}>
-            {pluginKeys.map(key => (
-              <div key={key.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, padding:"8px 10px", border:"1px solid var(--border)", borderRadius:6 }}>
-                <div style={{ minWidth:0 }}>
-                  <span style={{ color:"var(--text)", fontWeight:600 }}>{key.label}</span>
-                  <span style={{ color:"var(--text3)", marginLeft:8, fontSize:11 }}>@{key.twitch_broadcaster_login}</span>
-                  <span style={{ color:key.connected_sources ? "var(--green)" : "var(--text3)", marginLeft:8, fontSize:10, fontFamily:"'JetBrains Mono',monospace" }}>{key.connected_sources || 0} connected</span>
-                </div>
-                <button onClick={() => revokePluginKey(key.id)} style={{ ...C.btnDanger, padding:"4px 9px", fontSize:10 }}>Revoke</button>
-              </div>
-            ))}
-          </div>
-        )}
       </details>
 
       {error && (
