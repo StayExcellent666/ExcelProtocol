@@ -64,6 +64,7 @@ _fortuna_notice_state: dict[int, dict] = {}
 _fortuna_test_channels: set[str] = set()
 _fortuna_chat_commands: dict[str, str] = {}
 _fortuna_test_completions: dict[str, dict] = {}
+_fortuna_browser_test_tasks: dict[str, asyncio.Task] = {}
 _fortuna_reveal_claims: set[int] = set()
 
 async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: str):
@@ -3308,7 +3309,9 @@ def _fortuna_token_hash(token: str) -> str:
 
 FORTUNA_DEFAULT_OVERLAY_LAYOUT = {
     "reel": {"x": 14.0, "y": 18.0, "w": 72.0, "h": 54.0},
-    "small_timer": {"x": 78.0, "y": 5.0, "w": 19.0, "h": 13.0},
+    "small_timer": {
+        "x": 82.0, "y": 4.0, "w": 15.0, "h": 8.0, "color": "#28e5e1",
+    },
     "big_timer": {"x": 30.0, "y": 18.0, "w": 40.0, "h": 54.0},
 }
 
@@ -3319,11 +3322,17 @@ def _fortuna_normalize_overlay_layout(value) -> dict:
     normalized = {}
     minimums = {
         "reel": (26.0, 20.0),
-        "small_timer": (12.0, 7.0),
+        "small_timer": (9.0, 5.0),
         "big_timer": (20.0, 20.0),
     }
     for name, default in FORTUNA_DEFAULT_OVERLAY_LAYOUT.items():
-        raw = incoming.get(name) if isinstance(incoming.get(name), dict) else {}
+        raw = dict(incoming.get(name)) if isinstance(incoming.get(name), dict) else {}
+        if name == "small_timer" and "color" not in raw:
+            try:
+                if float(raw.get("w", 0)) == 19.0 and float(raw.get("h", 0)) == 13.0:
+                    raw["w"], raw["h"] = default["w"], default["h"]
+            except (TypeError, ValueError):
+                pass
         min_w, min_h = minimums[name]
         try:
             width = max(min_w, min(100.0, float(raw.get("w", default["w"]))))
@@ -3338,6 +3347,12 @@ def _fortuna_normalize_overlay_layout(value) -> dict:
             "x": round(x, 2), "y": round(y, 2),
             "w": round(width, 2), "h": round(height, 2),
         }
+        if name == "small_timer":
+            color = str(raw.get("color", default["color"])).strip()
+            normalized[name]["color"] = (
+                color.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", color)
+                else default["color"]
+            )
     return normalized
 
 
@@ -4101,6 +4116,57 @@ async def _fortuna_run_test_spin(broadcaster_id: str, broadcaster_login: str,
         _fortuna_test_channels.discard(broadcaster_id)
 
 
+async def _fortuna_run_browser_test(broadcaster_id: str):
+    """Exercise every browser overlay widget without chat or database writes."""
+    entrants = [
+        ("preview-1", "PixelPilot"), ("preview-2", "LuckyLuna"),
+        ("preview-3", "NovaNoodle"), ("preview-4", "CozyCritter"),
+        ("preview-5", "EchoEmber"), ("preview-6", "MintMeteor"),
+        ("preview-7", "TurboTurtle"), ("preview-8", "StarSage"),
+    ]
+    try:
+        await _fortuna_broadcast(broadcaster_id, {"type": "reset_entries"})
+        for index, (user_id, display_name) in enumerate(entrants, start=1):
+            await _fortuna_broadcast(broadcaster_id, {
+                "type": "entry", "user_id": user_id,
+                "display_name": display_name, "entry_count": index,
+            })
+        for remaining in range(15, 0, -1):
+            await _fortuna_broadcast(broadcaster_id, {
+                "type": "state", "status": "open",
+                "giveaway_id": "browser-preview",
+                "title": "ExcelFortuna Overlay Test",
+                "entry_count": len(entrants),
+                "target_entries": len(entrants),
+                "remaining_seconds": remaining,
+            })
+            await asyncio.sleep(1)
+        winner_index = secrets.randbelow(len(entrants))
+        winner_id, winner_name = entrants[winner_index]
+        spin_duration_ms = 6000
+        await _fortuna_broadcast(broadcaster_id, {
+            "type": "spin", "giveaway_id": "browser-preview",
+            "winner_id": winner_id, "winner_display_name": winner_name,
+            "winner_index": winner_index,
+            "spin_duration_ms": spin_duration_ms,
+        })
+        await asyncio.sleep(spin_duration_ms / 1000)
+        await _fortuna_broadcast(broadcaster_id, {
+            "type": "winner", "winner_id": winner_id,
+            "winner_display_name": winner_name,
+        })
+        await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error("Fortuna browser overlay test failed: %s", exc, exc_info=True)
+    finally:
+        await _fortuna_broadcast(broadcaster_id, {
+            "type": "state", "status": "idle", "entry_count": 0,
+            "target_entries": 0, "remaining_seconds": 0,
+        })
+
+
 async def _fortuna_complete_reveal(giveaway: dict, winner: dict):
     """Reveal and announce a winner once, after OBS finishes its animation."""
     giveaway_id = int(giveaway["id"])
@@ -4516,6 +4582,27 @@ async def cancel_guild_fortuna_control(request):
             channel["twitch_broadcaster_login"]):
         raise web.HTTPConflict(reason="No giveaway is open")
     return web.json_response({"ok": True, "status": "cancelled"})
+
+
+async def test_guild_fortuna_overlay(request):
+    """Start a 15-second, browser-only widget test for this server."""
+    channel = await _fortuna_guild_channel(request)
+    broadcaster_id = str(channel["twitch_broadcaster_id"])
+    if await _fortuna_open_giveaway(broadcaster_id):
+        raise web.HTTPConflict(reason="Finish or cancel the live giveaway first")
+    if not _fortuna_browser_connections.get(broadcaster_id):
+        raise web.HTTPConflict(reason="Open the Fortuna Browser Source in OBS first")
+    existing = _fortuna_browser_test_tasks.get(broadcaster_id)
+    if existing and not existing.done():
+        raise web.HTTPConflict(reason="An overlay test is already running")
+    task = asyncio.create_task(_fortuna_run_browser_test(broadcaster_id))
+    _fortuna_browser_test_tasks[broadcaster_id] = task
+    task.add_done_callback(
+        lambda finished, bid=broadcaster_id:
+            _fortuna_browser_test_tasks.pop(bid, None)
+            if _fortuna_browser_test_tasks.get(bid) is finished else None
+    )
+    return web.json_response({"ok": True, "status": "testing"}, status=202)
 
 
 async def get_guild_fortuna_plugin_keys(request):
@@ -6029,6 +6116,7 @@ def create_dashboard_app(bot=None):
     app.router.add_post  ("/api/guild/{guild_id}/fortuna/start",            start_guild_fortuna_control)
     app.router.add_post  ("/api/guild/{guild_id}/fortuna/spin",             spin_guild_fortuna_control)
     app.router.add_post  ("/api/guild/{guild_id}/fortuna/cancel",           cancel_guild_fortuna_control)
+    app.router.add_post  ("/api/guild/{guild_id}/fortuna/test",             test_guild_fortuna_overlay)
     app.router.add_get   ("/api/guild/{guild_id}/fortuna/history",          get_guild_fortuna_history)
     app.router.add_get   ("/api/guild/{guild_id}/fortuna/history/{giveaway_id}", get_guild_fortuna_giveaway)
     app.router.add_get   ("/api/guild/{guild_id}/fortuna/plugin-keys",      get_guild_fortuna_plugin_keys)

@@ -281,6 +281,7 @@ class TestDevDashboardRoutes:
         assert ("POST", "/api/guild/{guild_id}/fortuna/start") in routes
         assert ("POST", "/api/guild/{guild_id}/fortuna/spin") in routes
         assert ("POST", "/api/guild/{guild_id}/fortuna/cancel") in routes
+        assert ("POST", "/api/guild/{guild_id}/fortuna/test") in routes
         assert ("GET", "/api/guild/{guild_id}/fortuna/history") in routes
         assert ("GET", "/api/guild/{guild_id}/fortuna/history/{giveaway_id}") in routes
         assert ("GET", "/api/guild/{guild_id}/fortuna/plugin-keys") in routes
@@ -301,6 +302,12 @@ class TestDevDashboardRoutes:
         assert layout["reel"] == {"x": 50.0, "y": 0.0, "w": 50.0, "h": 20.0}
         assert layout["small_timer"] == dashboard_server.FORTUNA_DEFAULT_OVERLAY_LAYOUT["small_timer"]
         assert layout["big_timer"] == {"x": 8.0, "y": 9.0, "w": 42.0, "h": 45.0}
+
+    def test_fortuna_overlay_rejects_invalid_timer_color(self):
+        layout = dashboard_server._fortuna_normalize_overlay_layout({
+            "small_timer": {"color": "javascript:bad"},
+        })
+        assert layout["small_timer"]["color"] == "#28e5e1"
 
     def test_twitch_login_normalisation(self):
         assert dashboard_server._normalise_twitch_login(" @Some_Streamer ") == "some_streamer"
@@ -534,6 +541,7 @@ class TestDevDashboardRoutes:
         assert 'label:"Fortuna"' in source
         assert 'LIVE · ${obsSourceCount} ONLINE' in source
         assert "No plugin installation or pairing key is needed" in source
+        assert "Run 15s Overlay Test" in source
         assert 'Download OBS Plugin' not in source
         assert '`/api/guild/${guildId}/fortuna/plugin-keys`' not in source
         overlay = (Path(__file__).parent.parent / "fortuna_overlay.html").read_text(encoding="utf-8")

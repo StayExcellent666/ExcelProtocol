@@ -4283,7 +4283,7 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
   const dragRef = useRef(null);
   const defaults = {
     reel:{x:14,y:18,w:72,h:54},
-    small_timer:{x:78,y:5,w:19,h:13},
+    small_timer:{x:82,y:4,w:15,h:8,color:"#28e5e1"},
     big_timer:{x:30,y:18,w:40,h:54},
   };
   const names = {reel:"Name Reel",small_timer:"Small Timer",big_timer:"Final 10 Seconds"};
@@ -4297,7 +4297,7 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
   }, [guildId]);
 
   const clampBox = (box) => {
-    const minimum = selected === "small_timer" ? {w:12,h:7} : selected === "big_timer" ? {w:20,h:20} : {w:26,h:20};
+    const minimum = selected === "small_timer" ? {w:9,h:5} : selected === "big_timer" ? {w:20,h:20} : {w:26,h:20};
     const w = Math.max(minimum.w, Math.min(100, Number(box.w)));
     const h = Math.max(minimum.h, Math.min(100, Number(box.h)));
     return {...box,w,h,x:Math.max(0,Math.min(100-w,Number(box.x))),y:Math.max(0,Math.min(100-h,Number(box.y)))};
@@ -4314,7 +4314,7 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
     const drag = dragRef.current; if (!drag) return;
     const dx=(event.clientX-drag.startX)/drag.bounds.width*100;
     const dy=(event.clientY-drag.startY)/drag.bounds.height*100;
-    const minimum = drag.key === "small_timer" ? {w:12,h:7} : drag.key === "big_timer" ? {w:20,h:20} : {w:26,h:20};
+    const minimum = drag.key === "small_timer" ? {w:9,h:5} : drag.key === "big_timer" ? {w:20,h:20} : {w:26,h:20};
     setLayout(current => {
       let box={...drag.box};
       if(drag.mode==="resize") { box.w=Math.max(minimum.w,Math.min(100-box.x,drag.box.w+dx)); box.h=Math.max(minimum.h,Math.min(100-box.y,drag.box.h+dy)); }
@@ -4351,8 +4351,8 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
           {["PixelPilot","NovaNoodle","LuckyLuna","EchoEmber","StarSage"].map((name,i)=><div key={name} style={{position:"absolute",left:"8%",right:"8%",top:`${27+i*13}%`,textAlign:"center",fontSize:i===2?16:i===1||i===3?11:9,fontWeight:i===2?750:500,color:i===2?"#eefaff":i===1||i===3?"rgba(238,250,255,.58)":"rgba(238,250,255,.25)",borderLeft:i===2?"3px solid var(--cyan)":"none",borderRight:i===2?"3px solid var(--cyan)":"none"}}>{name}</div>)}
           <ResizeHandle layer="reel" />
         </div>
-        <div style={{...layerStyle("small_timer"),padding:"5px 7px",background:"rgba(7,12,24,.96)",color:"#eefaff"}} onPointerDown={e=>beginPointer(e,"small_timer","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
-          <div style={{fontSize:7,color:"var(--cyan)",letterSpacing:1}}>DRAW IN</div><div style={{fontSize:16,fontWeight:750}}>4:46 <span style={{fontSize:7,color:"#7a9ab5"}}>12 entrants</span></div><ResizeHandle layer="small_timer" />
+        <div style={{...layerStyle("small_timer"),padding:"4px 6px",display:"flex",flexDirection:"column",justifyContent:"center",background:"rgba(7,12,24,.96)",color:"#eefaff",borderColor:layout.small_timer.color||"#28e5e1"}} onPointerDown={e=>beginPointer(e,"small_timer","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
+          <div style={{fontSize:6,color:layout.small_timer.color||"#28e5e1",letterSpacing:1}}>DRAW IN</div><div style={{fontSize:14,lineHeight:1,fontWeight:750}}>4:46 <span style={{fontSize:6,color:"#7a9ab5"}}>12 entrants</span></div><ResizeHandle layer="small_timer" />
         </div>
         <div style={{...layerStyle("big_timer"),display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"rgba(7,12,24,.96)",color:"#eefaff"}} onPointerDown={e=>beginPointer(e,"big_timer","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
           <div style={{fontSize:8,color:"var(--cyan)",letterSpacing:1.4}}>GIVEAWAY DRAW IN</div><div style={{fontSize:54,lineHeight:1,fontWeight:800}}>10</div><div style={{fontSize:8,color:"#7a9ab5"}}>12 ENTRANTS</div><div style={{position:"absolute",left:"7%",right:"7%",bottom:"6%",height:3,background:"var(--yellow)"}} /><ResizeHandle layer="big_timer" />
@@ -4362,6 +4362,7 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>{Object.keys(names).map(key=><button key={key} onClick={()=>setSelected(key)} style={{...C.btnSecondary,padding:"7px 5px",fontSize:9,borderColor:selected===key?"var(--cyan)":"var(--border)"}}>{names[key]}</button>)}</div>
         <div style={{marginTop:12,fontSize:11,fontWeight:700,color:"var(--text)"}}>{names[selected]}</div>
         {[['x','Horizontal'],['y','Vertical'],['w','Width'],['h','Height']].map(([key,label])=><label key={key} style={{display:"grid",gridTemplateColumns:"64px 1fr 38px",alignItems:"center",gap:7,marginTop:8,fontSize:9,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}><span>{label}</span><input type="range" min="0" max={key==='w'||key==='h'?100:100-box[key==='w'?'w':key==='h'?'h':key==='x'?'w':'h']} step="0.25" value={box[key]} onChange={e=>updateSelected({[key]:Number(e.target.value)})} /><span style={{color:"var(--cyan)",textAlign:"right"}}>{Math.round(box[key])}%</span></label>)}
+        {selected==="small_timer"&&<label style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginTop:11,fontSize:9,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}><span>Accent color</span><input type="color" value={box.color||"#28e5e1"} onChange={e=>updateSelected({color:e.target.value})} style={{width:46,height:28,padding:2,border:"1px solid var(--border)",borderRadius:5,background:"var(--bg2)"}} /></label>}
         <div style={{display:"flex",gap:7,marginTop:13,flexWrap:"wrap"}}><button onClick={save} disabled={busy} style={{...C.btnPrimary,opacity:busy?.6:1}}>{busy?"Saving…":"Save Layout"}</button><button onClick={()=>setLayout(defaults)} style={C.btnSecondary}>Reset</button></div>
       </div>
     </div>
@@ -4384,6 +4385,8 @@ function FortunaTab({ guildId }) {
   const [controlLoading, setControlLoading] = useState(false);
   const [controlBusy, setControlBusy] = useState("");
   const [controlError, setControlError] = useState("");
+  const [testBusy, setTestBusy] = useState(false);
+  const testTimerRef = useRef(null);
   const [setup, setSetup] = useState({
     title:"Fortuna Giveaway", entry_mode:"chat_command",
     chat_command:"!enter", reward_title:"Giveaway Entry",
@@ -4420,7 +4423,7 @@ function FortunaTab({ guildId }) {
   useEffect(() => {
     loadControl();
     const timer = window.setInterval(() => loadControl(true), 1000);
-    return () => window.clearInterval(timer);
+    return () => { window.clearInterval(timer); if(testTimerRef.current) window.clearTimeout(testTimerRef.current); };
   }, [loadControl]);
 
   const runControl = async (action) => {
@@ -4444,6 +4447,16 @@ function FortunaTab({ guildId }) {
       setControlError(e.message || String(e));
     } finally {
       setControlBusy("");
+    }
+  };
+
+  const runOverlayTest = async () => {
+    setTestBusy(true); setControlError("");
+    try {
+      await apiFetch(`/api/guild/${guildId}/fortuna/test`, {method:"POST",body:"{}"});
+      testTimerRef.current=window.setTimeout(()=>setTestBusy(false),27000);
+    } catch(e) {
+      setTestBusy(false); setControlError(e.message || String(e));
     }
   };
 
@@ -4603,9 +4616,14 @@ function FortunaTab({ guildId }) {
                     <input type="number" min="2" max="30" step="1" value={setup.spin_duration_seconds} onChange={e => setSetup({...setup,spin_duration_seconds:e.target.value})} style={{ ...C.input, marginTop:5 }} />
                   </label>
                 </div>
-                <button onClick={() => runControl("start")} disabled={!!controlBusy || !setup.title.trim()} style={{ ...C.btnPrimary, marginTop:13, opacity:controlBusy || !setup.title.trim() ? 0.5 : 1 }}>
-                  {controlBusy === "start" ? "Starting…" : "Start Giveaway"}
-                </button>
+                <div style={{display:"flex",gap:8,marginTop:13,flexWrap:"wrap"}}>
+                  <button onClick={() => runControl("start")} disabled={!!controlBusy || testBusy || !setup.title.trim()} style={{ ...C.btnPrimary, opacity:controlBusy || testBusy || !setup.title.trim() ? 0.5 : 1 }}>
+                    {controlBusy === "start" ? "Starting…" : "Start Giveaway"}
+                  </button>
+                  <button onClick={runOverlayTest} disabled={!!controlBusy || testBusy || !obsConnected} title={obsConnected?"Runs all overlay widgets without chat or history":"Open the Browser Source in OBS first"} style={{...C.btnSecondary,opacity:(controlBusy||testBusy||!obsConnected) ? 0.5 : 1}}>
+                    {testBusy?"Testing overlay…":"Run 15s Overlay Test"}
+                  </button>
+                </div>
               </div>
             )}
 
