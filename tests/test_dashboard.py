@@ -303,11 +303,15 @@ class TestDevDashboardRoutes:
         assert layout["small_timer"] == dashboard_server.FORTUNA_DEFAULT_OVERLAY_LAYOUT["small_timer"]
         assert layout["big_timer"] == {"x": 8.0, "y": 9.0, "w": 42.0, "h": 45.0}
 
-    def test_fortuna_overlay_rejects_invalid_timer_color(self):
+    def test_fortuna_overlay_rejects_invalid_global_color_and_migrates_legacy_color(self):
         layout = dashboard_server._fortuna_normalize_overlay_layout({
-            "small_timer": {"color": "javascript:bad"},
+            "color": "javascript:bad",
         })
-        assert layout["small_timer"]["color"] == "#28e5e1"
+        assert layout["color"] == "#28e5e1"
+        migrated = dashboard_server._fortuna_normalize_overlay_layout({
+            "small_timer": {"color": "#FF4D8D"},
+        })
+        assert migrated["color"] == "#ff4d8d"
 
     def test_twitch_login_normalisation(self):
         assert dashboard_server._normalise_twitch_login(" @Some_Streamer ") == "some_streamer"
@@ -542,6 +546,7 @@ class TestDevDashboardRoutes:
         assert 'LIVE · ${obsSourceCount} ONLINE' in source
         assert "No plugin installation or pairing key is needed" in source
         assert "Run 15s Overlay Test" in source
+        assert "GLOBAL OVERLAY COLOR" in source
         assert 'Download OBS Plugin' not in source
         assert '`/api/guild/${guildId}/fortuna/plugin-keys`' not in source
         overlay = (Path(__file__).parent.parent / "fortuna_overlay.html").read_text(encoding="utf-8")

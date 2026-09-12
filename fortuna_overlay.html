@@ -46,11 +46,11 @@
     @keyframes scan { from{left:6%} to{left:85%} }
     @keyframes reel-charge { from{filter:brightness(.92)} to{filter:brightness(1.12)} }
 
-    #small-timer { --timer-color:#28e5e1; min-width:150px; min-height:54px; padding:7px 11px; border-radius:13px;
-      border:1px solid color-mix(in srgb,var(--timer-color) 74%,transparent); background:rgba(6,10,22,.93);
-      box-shadow:0 11px 28px rgba(0,0,0,.45),0 0 20px color-mix(in srgb,var(--timer-color) 15%,transparent); }
+    #small-timer { min-width:150px; min-height:54px; padding:7px 11px; border-radius:13px;
+      border:1px solid color-mix(in srgb,var(--cyan) 74%,transparent); background:rgba(6,10,22,.93);
+      box-shadow:0 11px 28px rgba(0,0,0,.45),0 0 20px color-mix(in srgb,var(--cyan) 15%,transparent); }
     #small-timer.visible { display:flex; flex-direction:column; justify-content:center; }
-    .small-label { color:var(--timer-color); font-size:clamp(8px,.65vw,12px); letter-spacing:.16em; text-transform:uppercase; }
+    .small-label { color:var(--cyan); font-size:clamp(8px,.65vw,12px); letter-spacing:.16em; text-transform:uppercase; }
     .small-row { display:flex; align-items:flex-end; justify-content:space-between; gap:9px; margin-top:2px; }
     .small-time { font-size:clamp(20px,1.85vw,34px); line-height:1; font-weight:700; font-variant-numeric:tabular-nums; }
     .small-count { padding-bottom:2px; color:rgba(244,248,255,.65); font-size:clamp(8px,.68vw,12px); white-space:nowrap; }
@@ -94,10 +94,12 @@
     let spinFrame = 0;
     const layers = {reel:document.getElementById("reel"),small_timer:document.getElementById("small-timer"),big_timer:document.getElementById("big-timer")};
     function applyLayout(nextLayout) {
+      const themeColor=nextLayout?.color||nextLayout?.small_timer?.color||"#28e5e1";
+      document.documentElement.style.setProperty("--cyan",themeColor);
+      document.documentElement.style.setProperty("--accent",themeColor);
       for (const [key,element] of Object.entries(layers)) {
         const box = nextLayout?.[key]; if (!box) continue;
         Object.assign(element.style,{left:box.x+"%",top:box.y+"%",width:box.w+"%",height:box.h+"%"});
-        if (key==="small_timer") element.style.setProperty("--timer-color",box.color||"#28e5e1");
       }
     }
     applyLayout(layout);

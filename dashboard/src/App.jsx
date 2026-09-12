@@ -4283,11 +4283,12 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
   const dragRef = useRef(null);
   const defaults = {
     reel:{x:14,y:18,w:72,h:54},
-    small_timer:{x:82,y:4,w:15,h:8,color:"#28e5e1"},
+    small_timer:{x:82,y:4,w:15,h:8},
     big_timer:{x:30,y:18,w:40,h:54},
+    color:"#28e5e1",
   };
   const names = {reel:"Name Reel",small_timer:"Small Timer",big_timer:"Final 10 Seconds"};
-  const timerColors = ["#28e5e1","#38bdf8","#9868ff","#ff4d8d","#ff5c35","#ffe45c","#39d98a","#ffffff"];
+  const overlayColors = ["#28e5e1","#38bdf8","#9868ff","#ff4d8d","#ff5c35","#ffe45c","#39d98a","#ffffff"];
 
   useEffect(() => {
     let active = true;
@@ -4336,6 +4337,7 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
 
   if (!layout) return <div style={{ ...C.card, marginBottom:14, display:"flex", justifyContent:"center", padding:28 }}><Spinner /></div>;
   const box = layout[selected];
+  const overlayColor = layout.color || layout.small_timer?.color || "#28e5e1";
   const layerStyle = key => ({position:"absolute",left:`${layout[key].x}%`,top:`${layout[key].y}%`,width:`${layout[key].w}%`,height:`${layout[key].h}%`,border:selected===key?"2px solid var(--cyan)":"1px solid rgba(0,245,212,0.3)",borderRadius:5,cursor:"move",boxShadow:selected===key?"0 0 15px rgba(0,245,212,0.28)":"none",overflow:"hidden",userSelect:"none"});
   const ResizeHandle = ({layer}) => <span onPointerDown={e=>beginPointer(e,layer,"resize")} style={{position:"absolute",right:0,bottom:0,width:14,height:14,background:"var(--cyan)",clipPath:"polygon(100% 0,100% 100%,0 100%)",cursor:"nwse-resize"}} />;
 
@@ -4348,20 +4350,20 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
       <div ref={previewRef} style={{position:"relative",aspectRatio:"16/9",minHeight:210,border:"1px solid var(--border2)",borderRadius:8,overflow:"hidden",background:"radial-gradient(circle at 50% 45%,rgba(0,245,212,.08),transparent 34%),#050810"}}>
         <div style={layerStyle("reel")} onPointerDown={e=>beginPointer(e,"reel","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
           <div style={{position:"absolute",inset:0,background:"linear-gradient(145deg,rgba(15,25,44,.97),rgba(5,8,18,.98))"}} />
-          <div style={{position:"absolute",top:"8%",left:0,right:0,textAlign:"center",fontSize:9,color:"var(--cyan)",letterSpacing:2}}>EXCELFORTUNA · LIVE DRAW</div>
-          {["PixelPilot","NovaNoodle","LuckyLuna","EchoEmber","StarSage"].map((name,i)=><div key={name} style={{position:"absolute",left:"8%",right:"8%",top:`${27+i*13}%`,textAlign:"center",fontSize:i===2?16:i===1||i===3?11:9,fontWeight:i===2?750:500,color:i===2?"#eefaff":i===1||i===3?"rgba(238,250,255,.58)":"rgba(238,250,255,.25)",borderLeft:i===2?"3px solid var(--cyan)":"none",borderRight:i===2?"3px solid var(--cyan)":"none"}}>{name}</div>)}
+          <div style={{position:"absolute",top:"8%",left:0,right:0,textAlign:"center",fontSize:9,color:overlayColor,letterSpacing:2}}>EXCELFORTUNA · LIVE DRAW</div>
+          {["PixelPilot","NovaNoodle","LuckyLuna","EchoEmber","StarSage"].map((name,i)=><div key={name} style={{position:"absolute",left:"8%",right:"8%",top:`${27+i*13}%`,textAlign:"center",fontSize:i===2?16:i===1||i===3?11:9,fontWeight:i===2?750:500,color:i===2?"#eefaff":i===1||i===3?"rgba(238,250,255,.58)":"rgba(238,250,255,.25)",borderLeft:i===2?`3px solid ${overlayColor}`:"none",borderRight:i===2?`3px solid ${overlayColor}`:"none"}}>{name}</div>)}
           <ResizeHandle layer="reel" />
         </div>
-        <div style={{...layerStyle("small_timer"),padding:"4px 6px",display:"flex",flexDirection:"column",justifyContent:"center",background:"rgba(7,12,24,.96)",color:"#eefaff",borderColor:layout.small_timer.color||"#28e5e1"}} onPointerDown={e=>beginPointer(e,"small_timer","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
-          <div style={{fontSize:6,color:layout.small_timer.color||"#28e5e1",letterSpacing:1}}>DRAW IN</div><div style={{fontSize:14,lineHeight:1,fontWeight:750}}>4:46 <span style={{fontSize:6,color:"#7a9ab5"}}>12 entrants</span></div><ResizeHandle layer="small_timer" />
+        <div style={{...layerStyle("small_timer"),padding:"4px 6px",display:"flex",flexDirection:"column",justifyContent:"center",background:"rgba(7,12,24,.96)",color:"#eefaff",borderColor:overlayColor}} onPointerDown={e=>beginPointer(e,"small_timer","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
+          <div style={{fontSize:6,color:overlayColor,letterSpacing:1}}>DRAW IN</div><div style={{fontSize:14,lineHeight:1,fontWeight:750}}>4:46 <span style={{fontSize:6,color:"#7a9ab5"}}>12 entrants</span></div><ResizeHandle layer="small_timer" />
         </div>
         <div style={{...layerStyle("big_timer"),display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"rgba(7,12,24,.96)",color:"#eefaff"}} onPointerDown={e=>beginPointer(e,"big_timer","move")} onPointerMove={movePointer} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
-          <div style={{fontSize:8,color:"var(--cyan)",letterSpacing:1.4}}>GIVEAWAY DRAW IN</div><div style={{fontSize:54,lineHeight:1,fontWeight:800}}>10</div><div style={{fontSize:8,color:"#7a9ab5"}}>12 ENTRANTS</div><div style={{position:"absolute",left:"7%",right:"7%",bottom:"6%",height:3,background:"var(--yellow)"}} /><ResizeHandle layer="big_timer" />
+          <div style={{fontSize:8,color:overlayColor,letterSpacing:1.4}}>GIVEAWAY DRAW IN</div><div style={{fontSize:54,lineHeight:1,fontWeight:800}}>10</div><div style={{fontSize:8,color:"#7a9ab5"}}>12 ENTRANTS</div><div style={{position:"absolute",left:"7%",right:"7%",bottom:"6%",height:3,background:overlayColor}} /><ResizeHandle layer="big_timer" />
         </div>
       </div>
       <div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>{Object.keys(names).map(key=><button key={key} onClick={()=>setSelected(key)} style={{...C.btnSecondary,padding:"7px 5px",fontSize:9,borderColor:selected===key?"var(--cyan)":"var(--border)"}}>{names[key]}</button>)}</div>
-        {selected==="small_timer"&&<div style={{marginTop:10,padding:"10px 11px",border:`1px solid ${box.color||"#28e5e1"}`,borderRadius:7,background:"var(--bg2)"}}><div style={{fontSize:9,fontWeight:750,color:"var(--text)",fontFamily:"'JetBrains Mono',monospace",letterSpacing:.7}}>SMALL TIMER COLOR</div><div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",marginTop:8}}>{timerColors.map(color=><button key={color} onClick={()=>updateSelected({color})} title={color} aria-label={`Use ${color}`} style={{width:24,height:24,padding:0,borderRadius:6,background:color,border:(box.color||"#28e5e1").toLowerCase()===color.toLowerCase()?"3px solid #fff":"1px solid rgba(255,255,255,.3)",boxShadow:(box.color||"#28e5e1").toLowerCase()===color.toLowerCase()?`0 0 12px ${color}`:"none",cursor:"pointer"}} />)}<label title="Choose a custom color" style={{width:29,height:29,borderRadius:6,border:"1px solid var(--border)",overflow:"hidden",cursor:"pointer"}}><input aria-label="Custom small timer color" type="color" value={box.color||"#28e5e1"} onChange={e=>updateSelected({color:e.target.value})} style={{width:40,height:40,padding:0,border:0,transform:"translate(-5px,-5px)",cursor:"pointer"}} /></label></div></div>}
+        <div style={{marginTop:10,padding:"10px 11px",border:`1px solid ${overlayColor}`,borderRadius:7,background:"var(--bg2)"}}><div style={{fontSize:9,fontWeight:750,color:"var(--text)",fontFamily:"'JetBrains Mono',monospace",letterSpacing:.7}}>GLOBAL OVERLAY COLOR</div><div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",marginTop:8}}>{overlayColors.map(color=><button key={color} onClick={()=>setLayout(current=>({...current,color}))} title={color} aria-label={`Use ${color}`} style={{width:24,height:24,padding:0,borderRadius:6,background:color,border:overlayColor.toLowerCase()===color.toLowerCase()?"3px solid #fff":"1px solid rgba(255,255,255,.3)",boxShadow:overlayColor.toLowerCase()===color.toLowerCase()?`0 0 12px ${color}`:"none",cursor:"pointer"}} />)}<label title="Choose a custom color" style={{width:29,height:29,borderRadius:6,border:"1px solid var(--border)",overflow:"hidden",cursor:"pointer"}}><input aria-label="Custom global overlay color" type="color" value={overlayColor} onChange={e=>setLayout(current=>({...current,color:e.target.value}))} style={{width:40,height:40,padding:0,border:0,transform:"translate(-5px,-5px)",cursor:"pointer"}} /></label></div></div>
         <div style={{marginTop:12,fontSize:11,fontWeight:700,color:"var(--text)"}}>{names[selected]}</div>
         {[['x','Horizontal'],['y','Vertical'],['w','Width'],['h','Height']].map(([key,label])=><label key={key} style={{display:"grid",gridTemplateColumns:"64px 1fr 38px",alignItems:"center",gap:7,marginTop:8,fontSize:9,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}><span>{label}</span><input type="range" min="0" max={key==='w'||key==='h'?100:100-box[key==='w'?'w':key==='h'?'h':key==='x'?'w':'h']} step="0.25" value={box[key]} onChange={e=>updateSelected({[key]:Number(e.target.value)})} /><span style={{color:"var(--cyan)",textAlign:"right"}}>{Math.round(box[key])}%</span></label>)}
         <div style={{display:"flex",gap:7,marginTop:13,flexWrap:"wrap"}}><button onClick={save} disabled={busy} style={{...C.btnPrimary,opacity:busy?.6:1}}>{busy?"Saving…":"Save Layout"}</button><button onClick={()=>setLayout(defaults)} style={C.btnSecondary}>Reset</button></div>

@@ -3309,10 +3309,9 @@ def _fortuna_token_hash(token: str) -> str:
 
 FORTUNA_DEFAULT_OVERLAY_LAYOUT = {
     "reel": {"x": 14.0, "y": 18.0, "w": 72.0, "h": 54.0},
-    "small_timer": {
-        "x": 82.0, "y": 4.0, "w": 15.0, "h": 8.0, "color": "#28e5e1",
-    },
+    "small_timer": {"x": 82.0, "y": 4.0, "w": 15.0, "h": 8.0},
     "big_timer": {"x": 30.0, "y": 18.0, "w": 40.0, "h": 54.0},
+    "color": "#28e5e1",
 }
 
 
@@ -3325,7 +3324,8 @@ def _fortuna_normalize_overlay_layout(value) -> dict:
         "small_timer": (9.0, 5.0),
         "big_timer": (20.0, 20.0),
     }
-    for name, default in FORTUNA_DEFAULT_OVERLAY_LAYOUT.items():
+    for name in ("reel", "small_timer", "big_timer"):
+        default = FORTUNA_DEFAULT_OVERLAY_LAYOUT[name]
         raw = dict(incoming.get(name)) if isinstance(incoming.get(name), dict) else {}
         if name == "small_timer" and "color" not in raw:
             try:
@@ -3347,12 +3347,13 @@ def _fortuna_normalize_overlay_layout(value) -> dict:
             "x": round(x, 2), "y": round(y, 2),
             "w": round(width, 2), "h": round(height, 2),
         }
-        if name == "small_timer":
-            color = str(raw.get("color", default["color"])).strip()
-            normalized[name]["color"] = (
-                color.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", color)
-                else default["color"]
-            )
+    legacy_timer = incoming.get("small_timer")
+    legacy_color = legacy_timer.get("color") if isinstance(legacy_timer, dict) else None
+    color = str(incoming.get("color") or legacy_color or "#28e5e1").strip()
+    normalized["color"] = (
+        color.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", color)
+        else FORTUNA_DEFAULT_OVERLAY_LAYOUT["color"]
+    )
     return normalized
 
 
