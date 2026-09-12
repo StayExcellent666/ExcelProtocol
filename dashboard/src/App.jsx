@@ -4287,6 +4287,7 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
     big_timer:{x:30,y:18,w:40,h:54},
   };
   const names = {reel:"Name Reel",small_timer:"Small Timer",big_timer:"Final 10 Seconds"};
+  const timerColors = ["#28e5e1","#38bdf8","#9868ff","#ff4d8d","#ff5c35","#ffe45c","#39d98a","#ffffff"];
 
   useEffect(() => {
     let active = true;
@@ -4360,9 +4361,9 @@ function FortunaOverlayEditor({ guildId, connectedSources=0 }) {
       </div>
       <div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>{Object.keys(names).map(key=><button key={key} onClick={()=>setSelected(key)} style={{...C.btnSecondary,padding:"7px 5px",fontSize:9,borderColor:selected===key?"var(--cyan)":"var(--border)"}}>{names[key]}</button>)}</div>
+        {selected==="small_timer"&&<div style={{marginTop:10,padding:"10px 11px",border:`1px solid ${box.color||"#28e5e1"}`,borderRadius:7,background:"var(--bg2)"}}><div style={{fontSize:9,fontWeight:750,color:"var(--text)",fontFamily:"'JetBrains Mono',monospace",letterSpacing:.7}}>SMALL TIMER COLOR</div><div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",marginTop:8}}>{timerColors.map(color=><button key={color} onClick={()=>updateSelected({color})} title={color} aria-label={`Use ${color}`} style={{width:24,height:24,padding:0,borderRadius:6,background:color,border:(box.color||"#28e5e1").toLowerCase()===color.toLowerCase()?"3px solid #fff":"1px solid rgba(255,255,255,.3)",boxShadow:(box.color||"#28e5e1").toLowerCase()===color.toLowerCase()?`0 0 12px ${color}`:"none",cursor:"pointer"}} />)}<label title="Choose a custom color" style={{width:29,height:29,borderRadius:6,border:"1px solid var(--border)",overflow:"hidden",cursor:"pointer"}}><input aria-label="Custom small timer color" type="color" value={box.color||"#28e5e1"} onChange={e=>updateSelected({color:e.target.value})} style={{width:40,height:40,padding:0,border:0,transform:"translate(-5px,-5px)",cursor:"pointer"}} /></label></div></div>}
         <div style={{marginTop:12,fontSize:11,fontWeight:700,color:"var(--text)"}}>{names[selected]}</div>
         {[['x','Horizontal'],['y','Vertical'],['w','Width'],['h','Height']].map(([key,label])=><label key={key} style={{display:"grid",gridTemplateColumns:"64px 1fr 38px",alignItems:"center",gap:7,marginTop:8,fontSize:9,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}><span>{label}</span><input type="range" min="0" max={key==='w'||key==='h'?100:100-box[key==='w'?'w':key==='h'?'h':key==='x'?'w':'h']} step="0.25" value={box[key]} onChange={e=>updateSelected({[key]:Number(e.target.value)})} /><span style={{color:"var(--cyan)",textAlign:"right"}}>{Math.round(box[key])}%</span></label>)}
-        {selected==="small_timer"&&<label style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginTop:11,fontSize:9,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}><span>Accent color</span><input type="color" value={box.color||"#28e5e1"} onChange={e=>updateSelected({color:e.target.value})} style={{width:46,height:28,padding:2,border:"1px solid var(--border)",borderRadius:5,background:"var(--bg2)"}} /></label>}
         <div style={{display:"flex",gap:7,marginTop:13,flexWrap:"wrap"}}><button onClick={save} disabled={busy} style={{...C.btnPrimary,opacity:busy?.6:1}}>{busy?"Saving…":"Save Layout"}</button><button onClick={()=>setLayout(defaults)} style={C.btnSecondary}>Reset</button></div>
       </div>
     </div>

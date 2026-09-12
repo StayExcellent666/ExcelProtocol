@@ -31,20 +31,19 @@
       box-shadow:0 0 28px color-mix(in srgb,var(--cyan) 17%,transparent); }
     .reel-selector::before,.reel-selector::after { content:""; position:absolute; left:5%; right:5%; height:1px; background:color-mix(in srgb,var(--cyan) 54%,transparent); }
     .reel-selector::before { top:0; }.reel-selector::after { bottom:0; }
-    .reel-rows { position:absolute; inset:0; display:grid; grid-template-rows:repeat(5,1fr); align-items:center; }
+    .reel-rows { position:absolute; inset:0; display:grid; grid-template-rows:repeat(5,1fr); align-items:center; will-change:transform,filter; }
     .reel-row { text-align:center; color:rgba(244,248,255,.25); font-size:clamp(12px,1.6vw,26px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 8%; }
     .reel-row.near { color:rgba(244,248,255,.58); font-size:clamp(14px,2vw,31px); }
     .reel-row.focus { color:var(--text); font-size:clamp(20px,3.2vw,50px); font-weight:700; text-shadow:0 0 24px color-mix(in srgb,var(--cyan) 48%,transparent); }
     .reel-scan { position:absolute; z-index:4; top:33%; width:9%; height:2px; opacity:0; background:var(--accent); box-shadow:0 0 12px var(--accent); }
     #reel.spinning .reel-scan { opacity:1; animation:scan 1.05s linear infinite; }
-    #reel.spinning .reel-rows { animation:reel-shuffle .34s ease-in-out infinite alternate; }
+    #reel.spinning .reel-row { color:rgba(244,248,255,.58); font-size:clamp(15px,2vw,31px); font-weight:600; text-shadow:0 0 18px color-mix(in srgb,var(--cyan) 25%,transparent); }
     #reel.spinning .reel-shell { animation:reel-charge .7s ease-in-out infinite alternate; }
     #reel.winner .reel-selector { border-color:var(--accent); box-shadow:0 0 44px color-mix(in srgb,var(--accent) 34%,transparent); }
     .reel-result { position:absolute; z-index:5; left:0; right:0; bottom:3%; text-align:center; color:var(--accent); opacity:0;
       font-size:clamp(10px,1.15vw,18px); letter-spacing:.17em; text-transform:uppercase; transition:opacity .35s; }
     #reel.winner .reel-result { opacity:1; }
     @keyframes scan { from{left:6%} to{left:85%} }
-    @keyframes reel-shuffle { from{transform:translateY(-3px);filter:blur(0)} to{transform:translateY(3px);filter:blur(.7px)} }
     @keyframes reel-charge { from{filter:brightness(.92)} to{filter:brightness(1.12)} }
 
     #small-timer { --timer-color:#28e5e1; min-width:150px; min-height:54px; padding:7px 11px; border-radius:13px;
@@ -127,14 +126,21 @@
     function spin(event) {
       cancelAnimationFrame(spinFrame); hideAll(); layers.reel.className="layer visible spinning";
       document.getElementById("reel-title").textContent=title;
+      const reelRows=document.querySelector(".reel-rows");
+      reelRows.style.transform="translateY(0)"; reelRows.style.filter="none";
       const winner=Math.max(0,Math.min(entrants.length-1,Number(event.winner_index)||0));
       const duration=Math.max(2000,Math.min(30000,Number(event.spin_duration_ms)||8000));
-      const steps=Math.max(entrants.length*8,72)+winner; const started=performance.now();
+      const entrantCount=Math.max(1,entrants.length);
+      const laps=Math.max(10,Math.ceil(60/entrantCount));
+      const steps=laps*entrantCount+winner; const started=performance.now();
       const animate = now => {
-        const p=Math.min(1,(now-started)/duration), eased=1-Math.pow(1-p,5);
-        renderRows(Math.floor(steps*eased)%Math.max(1,entrants.length));
+        const p=Math.min(1,(now-started)/duration), eased=1-Math.pow(1-p,1.7);
+        const position=steps*eased, whole=Math.floor(position), fraction=position-whole;
+        renderRows(whole%entrantCount);
+        reelRows.style.transform=`translateY(${-fraction*20}%)`;
+        reelRows.style.filter=`blur(${Math.max(0,(1-p)*1.15)}px)`;
         if (p<1) spinFrame=requestAnimationFrame(animate);
-        else { renderRows(winner); layers.reel.className="layer visible winner"; }
+        else { reelRows.style.transform="translateY(0)"; reelRows.style.filter="none"; renderRows(winner); layers.reel.className="layer visible winner"; }
       };
       spinFrame=requestAnimationFrame(animate);
     }
@@ -149,7 +155,7 @@
         return;
       }
       if (event.type==="spin") { spin(event); return; }
-      if (event.type==="winner") { layers.reel.className="layer visible winner"; const i=entrants.findIndex(x=>x.id===String(event.winner_id)); if(i>=0)renderRows(i); return; }
+      if (event.type==="winner") { const reelRows=document.querySelector(".reel-rows"); reelRows.style.transform="translateY(0)"; reelRows.style.filter="none"; layers.reel.className="layer visible winner"; const i=entrants.findIndex(x=>x.id===String(event.winner_id)); if(i>=0)renderRows(i); return; }
       if (event.type==="cancelled") hideAll();
     }
     function connect() {
