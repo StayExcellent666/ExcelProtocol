@@ -31,6 +31,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_BOT_STATUSES = [
+    {"type": "watching", "text": "your community grow! 🌱"},
+    {"type": "listening", "text": "stream alerts across your servers 📡"},
+    {"type": "playing", "text": "excelprotocol.fly.dev 🎮"},
+]
+
 
 def health_tracked(name: str):
     """Record timing and uncaught errors without changing loop behaviour."""
@@ -74,6 +80,8 @@ class TwitchNotifierBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.db = Database()
         self.twitch = TwitchAPI()
+        self._bot_statuses = self.db.get_bot_statuses() or [dict(item) for item in DEFAULT_BOT_STATUSES]
+        self._bot_status_index = 0
 
         # Fly secrets bootstrap the chat bot. Rotated credentials are loaded
         # from the persistent SQLite volume so refreshes survive deployments
@@ -2702,19 +2710,25 @@ class TwitchNotifierBot(discord.Client):
     @health_tracked("rotate_status")
     async def rotate_status(self):
         """Rotate bot status messages"""
-        statuses = [
-            discord.Activity(
-                type=discord.ActivityType.watching,
-                name="watching your community grow! 🌱"
-            ),
-            discord.Activity(
-                type=discord.ActivityType.listening,
-                name="listening to stream alerts across your servers 📡"
-            ),
-            discord.Game(name="playing excelprotocol.fly.dev 🎮"),
-        ]
-        current = self.rotate_status.current_loop % len(statuses)
-        await self.change_presence(activity=statuses[current])
+        await self.apply_configured_status()
+
+    async def apply_configured_status(self):
+        """Apply the next configured activity and advance the rotation."""
+        statuses = self._bot_statuses or DEFAULT_BOT_STATUSES
+        entry = statuses[self._bot_status_index % len(statuses)]
+        activity_type = str(entry.get("type", "playing")).lower()
+        text = str(entry.get("text", "")).strip()
+        activity_types = {
+            "playing": discord.ActivityType.playing,
+            "watching": discord.ActivityType.watching,
+            "listening": discord.ActivityType.listening,
+        }
+        activity = discord.Activity(
+            type=activity_types.get(activity_type, discord.ActivityType.playing),
+            name=text,
+        )
+        await self.change_presence(activity=activity)
+        self._bot_status_index = (self._bot_status_index + 1) % len(statuses)
 
     @rotate_status.before_loop
     async def before_rotate_status(self):

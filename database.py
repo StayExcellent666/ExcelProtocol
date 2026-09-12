@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import logging
 import os
 import threading
@@ -887,6 +888,16 @@ class Database:
             )
         ''')
 
+        # Owner-managed Discord activity rotation. A single JSON document keeps
+        # the ordered status list atomic and easy to extend later.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bot_status_settings (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),
+                statuses_json TEXT NOT NULL,
+                updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         # Track kicked guilds for 7-day grace period before data wipe
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS kicked_guilds (
@@ -934,6 +945,37 @@ class Database:
         conn.commit()
         conn.close()
         logger.info(f"Database initialized at {self.db_path}")
+
+    def get_bot_statuses(self) -> List[Dict]:
+        """Return the owner-configured Discord activity rotation."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT statuses_json FROM bot_status_settings WHERE id = 1')
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return []
+        try:
+            statuses = json.loads(row[0])
+            return statuses if isinstance(statuses, list) else []
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid bot status settings JSON")
+            return []
+
+    def set_bot_statuses(self, statuses: List[Dict]):
+        """Atomically persist the ordered Discord activity rotation."""
+        payload = json.dumps(statuses, ensure_ascii=False, separators=(',', ':'))
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO bot_status_settings (id, statuses_json, updated_at)
+            VALUES (1, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                statuses_json = excluded.statuses_json,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (payload,))
+        conn.commit()
+        conn.close()
 
     # ----------------------------------------------------------------
     # Permission issues

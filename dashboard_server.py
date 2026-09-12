@@ -3299,6 +3299,52 @@ def _require_dev_or_admin(request):
         raise web.HTTPForbidden(reason="Owner or admin access required")
 
 
+def _require_owner(request):
+    """Restrict bot-wide configuration to the bot owner."""
+    if not request["session"].get("dev"):
+        raise web.HTTPForbidden(reason="Bot owner access required")
+
+
+async def get_bot_statuses(request):
+    """Return the persisted Discord activity rotation."""
+    _require_owner(request)
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    statuses = list(getattr(_bot_ref, "_bot_statuses", []) or [])
+    return web.json_response({"statuses": statuses, "rotation_seconds": 20})
+
+
+async def set_bot_statuses(request):
+    """Persist and immediately apply a new Discord activity rotation."""
+    _require_owner(request)
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    body = await request.json()
+    raw_statuses = body.get("statuses")
+    if not isinstance(raw_statuses, list) or not 1 <= len(raw_statuses) <= 10:
+        raise web.HTTPBadRequest(reason="Choose between 1 and 10 statuses")
+
+    allowed_types = {"playing", "watching", "listening"}
+    statuses = []
+    for raw in raw_statuses:
+        if not isinstance(raw, dict):
+            raise web.HTTPBadRequest(reason="Each status must include a type and text")
+        activity_type = str(raw.get("type", "")).strip().lower()
+        text = str(raw.get("text", "")).strip()
+        if activity_type not in allowed_types:
+            raise web.HTTPBadRequest(reason="Status type must be Playing, Watching, or Listening")
+        if not 1 <= len(text) <= 128:
+            raise web.HTTPBadRequest(reason="Status text must be between 1 and 128 characters")
+        statuses.append({"type": activity_type, "text": text})
+
+    await asyncio.to_thread(_bot_ref.db.set_bot_statuses, statuses)
+    _bot_ref._bot_statuses = statuses
+    _bot_ref._bot_status_index = 0
+    await _bot_ref.apply_configured_status()
+    logger.info("Owner updated the Discord status rotation (%d entries)", len(statuses))
+    return web.json_response({"ok": True, "statuses": statuses, "rotation_seconds": 20})
+
+
 _FORTUNA_HISTORY_DAYS = 30
 
 
@@ -6145,6 +6191,8 @@ def create_dashboard_app(bot=None):
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
     app.router.add_get("/api/me",        auth_me)
     app.router.add_get("/api/admin/audit-log", admin_audit_log)
+    app.router.add_get("/api/dev/bot-statuses", get_bot_statuses)
+    app.router.add_post("/api/dev/bot-statuses", set_bot_statuses)
     app.router.add_get("/api/admin/fortuna-control", get_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/start", start_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/spin", spin_fortuna_control)

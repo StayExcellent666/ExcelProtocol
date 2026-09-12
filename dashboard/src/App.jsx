@@ -4890,6 +4890,107 @@ function HealthCheckTab() {
   );
 }
 
+function BotStatusTab() {
+  const [statuses, setStatuses] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    apiFetch("/api/dev/bot-statuses")
+      .then(data => setStatuses(data.statuses || []))
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const update = (index, field, value) => {
+    setStatuses(current => current.map((item, i) => i === index ? { ...item, [field]: value } : item));
+    setSaved(false);
+  };
+
+  const move = (index, direction) => {
+    const target = index + direction;
+    if (target < 0 || target >= statuses.length) return;
+    setStatuses(current => {
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+    setSaved(false);
+  };
+
+  const save = async () => {
+    setSaving(true); setError(""); setSaved(false);
+    try {
+      const data = await apiFetch("/api/dev/bot-statuses", {
+        method:"POST", body:JSON.stringify({ statuses }),
+      });
+      setStatuses(data.statuses || statuses);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const prefixes = { playing:"Playing", watching:"Watching", listening:"Listening to" };
+  const invalid = statuses.length === 0 || statuses.some(s => !s.text?.trim() || s.text.trim().length > 128);
+
+  return (
+    <div>
+      <PageHeader title="Bot Status" subtitle="Owner-only control for the rotating Discord activity" />
+      <div style={{ ...C.card, marginBottom:14 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", gap:14, alignItems:"flex-start", marginBottom:16, flexWrap:"wrap" }}>
+          <div>
+            <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14, color:"var(--cyan)" }}>Discord Status Rotation</div>
+            <div style={{ color:"var(--text3)", fontSize:12, marginTop:5 }}>Rotates every 20 seconds. Saving applies the first entry immediately and persists across restarts.</div>
+          </div>
+          <button
+            onClick={() => { if (statuses.length < 10) setStatuses(s => [...s, { type:"playing", text:"" }]); setSaved(false); }}
+            disabled={statuses.length >= 10}
+            style={{ ...C.btnSecondary, opacity:statuses.length >= 10 ? 0.4 : 1 }}
+          >+ Add Status</button>
+        </div>
+
+        {loading ? <div style={{ display:"flex", justifyContent:"center", padding:30 }}><Spinner /></div> : (
+          <div style={{ display:"flex", flexDirection:"column", gap:9 }}>
+            {statuses.map((status, index) => (
+              <div key={index} style={{ display:"grid", gridTemplateColumns:"32px minmax(120px, 160px) 1fr auto", gap:9, alignItems:"center", padding:"11px", borderRadius:8, background:"rgba(8,11,15,0.65)", border:"1px solid var(--border)" }}>
+                <span style={{ color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", fontSize:11 }}>#{index + 1}</span>
+                <CyanSelect value={status.type} onChange={e => update(index, "type", e.target.value)}>
+                  <option value="playing">Playing</option>
+                  <option value="watching">Watching</option>
+                  <option value="listening">Listening to</option>
+                </CyanSelect>
+                <CyanInput maxLength={128} value={status.text} onChange={e => update(index, "text", e.target.value)} placeholder="Status text" />
+                <div style={{ display:"flex", gap:5 }}>
+                  <button onClick={() => move(index, -1)} disabled={index === 0} title="Move up" style={{ ...C.btnSecondary, padding:"6px 9px", opacity:index === 0 ? 0.35 : 1 }}>↑</button>
+                  <button onClick={() => move(index, 1)} disabled={index === statuses.length - 1} title="Move down" style={{ ...C.btnSecondary, padding:"6px 9px", opacity:index === statuses.length - 1 ? 0.35 : 1 }}>↓</button>
+                  <button onClick={() => { setStatuses(s => s.filter((_, i) => i !== index)); setSaved(false); }} disabled={statuses.length === 1} title="Remove" style={{ ...C.btnDanger, padding:"6px 9px", opacity:statuses.length === 1 ? 0.35 : 1 }}>✕</button>
+                </div>
+                <div style={{ gridColumn:"2 / -1", color:"var(--text3)", fontSize:11, fontFamily:"'JetBrains Mono',monospace" }}>
+                  Preview: <span style={{ color:"var(--text2)" }}>{prefixes[status.type]} {status.text || "…"}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {error && <div style={{ marginTop:12, color:"var(--red)", fontSize:12 }}>⚠️ {error}</div>}
+        <div style={{ display:"flex", justifyContent:"flex-end", alignItems:"center", gap:10, marginTop:16 }}>
+          {saved && <span style={{ color:"var(--green)", fontSize:12 }}>✓ Saved and applied live</span>}
+          <button onClick={save} disabled={loading || saving || invalid} style={{ ...C.btnPrimary, opacity:loading || saving || invalid ? 0.4 : 1 }}>
+            {saving ? "Saving…" : "Save Rotation"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AdminAuditLogTab() {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -5009,6 +5110,7 @@ export default function App() {
   const devTabs = effectivelyDev ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
+    { id:"botstatus",      icon:"/app/icons/message.png", label:"Bot Status"       },
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
     { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
   ] : (effectivelyAdmin || isAdmin) ? [
@@ -5165,6 +5267,7 @@ export default function App() {
               {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
               {activeTab==="globalstats"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <GlobalStatsTab />}
               {activeTab==="healthcheck"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <HealthCheckTab />}
+              {activeTab==="botstatus"     && effectivelyDev && <BotStatusTab />}
               {activeTab==="fortuna"       && <FortunaTab guildId={activeGuild} />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
               {activeTab==="auditlog"      && effectivelyDev && <AdminAuditLogTab />}
@@ -5207,6 +5310,7 @@ export default function App() {
             {effectivelyDev && <>
               <div style={{ fontSize:9, color:"var(--cyan)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Dev Only</div>
               <NavItem large icon="/app/icons/globe.png" label="Global Stats" active={activeTab==="globalstats"} onClick={() => { setActiveTab("globalstats"); setNavDrawerOpen(false); }} />
+              <NavItem large icon="/app/icons/message.png" label="Bot Status" active={activeTab==="botstatus"} onClick={() => { setActiveTab("botstatus"); setNavDrawerOpen(false); }} />
               <NavItem large icon="/app/icons/tools.png" label="DB Tools" active={activeTab==="dbtools"} onClick={() => { setActiveTab("dbtools"); setNavDrawerOpen(false); }} />
             </>}
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>

@@ -25,6 +25,15 @@ class TestSchema:
         conn.close()
         assert "ended_at" in cols
 
+    def test_bot_status_rotation_round_trip(self, db):
+        assert db.get_bot_statuses() == []
+        statuses = [
+            {"type": "watching", "text": "the dashboard"},
+            {"type": "playing", "text": "with alerts"},
+        ]
+        db.set_bot_statuses(statuses)
+        assert db.get_bot_statuses() == statuses
+
     def test_init_is_idempotent(self, tmp_db_path):
         """Calling init_database twice must not raise — migrations re-run safely."""
         from database import Database

@@ -292,6 +292,8 @@ class TestDevDashboardRoutes:
         assert ("GET", "/fortuna-overlay/{token}") in routes
         assert ("GET", "/fortuna-overlay/{token}/ws") in routes
         assert ("GET", "/auth/twitch/bot/login") in routes
+        assert ("GET", "/api/dev/bot-statuses") in routes
+        assert ("POST", "/api/dev/bot-statuses") in routes
 
     def test_fortuna_overlay_layout_is_clamped_to_canvas(self):
         layout = dashboard_server._fortuna_normalize_overlay_layout({
@@ -338,6 +340,43 @@ class TestDevDashboardRoutes:
         monkeypatch.setattr(dashboard_server, "get_session", lambda request: {"admin": True})
         with pytest.raises(web.HTTPForbidden):
             await dashboard_server.twitch_bot_login({"cookies": {}})
+
+    @pytest.mark.asyncio
+    async def test_bot_status_settings_are_owner_only_and_apply_live(self, monkeypatch):
+        from aiohttp import web
+
+        class FakeDatabase:
+            def __init__(self):
+                self.saved = None
+
+            def set_bot_statuses(self, statuses):
+                self.saved = statuses
+
+        class FakeBot:
+            def __init__(self):
+                self.db = FakeDatabase()
+                self._bot_statuses = []
+                self._bot_status_index = 5
+                self.applied = False
+
+            async def apply_configured_status(self):
+                self.applied = True
+                self._bot_status_index = 1
+
+        class FakeRequest(dict):
+            async def json(self):
+                return {"statuses": [{"type": "watching", "text": "the community"}]}
+
+        bot = FakeBot()
+        monkeypatch.setattr(dashboard_server, "_bot_ref", bot)
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.set_bot_statuses(FakeRequest(session={"admin": True}))
+
+        response = await dashboard_server.set_bot_statuses(FakeRequest(session={"dev": True}))
+        assert response.status == 200
+        assert bot.db.saved == [{"type": "watching", "text": "the community"}]
+        assert bot._bot_status_index == 1
+        assert bot.applied is True
 
     @pytest.mark.asyncio
     async def test_admin_global_stats_includes_all_leaderboards(self, monkeypatch):
