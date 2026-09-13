@@ -464,6 +464,12 @@ class TestDevDashboardRoutes:
         with pytest.raises(web.HTTPForbidden):
             await dashboard_server.twitch_bot_login({"cookies": {}})
 
+    def test_twitch_connect_button_requires_owner_view(self):
+        from pathlib import Path
+        source = (Path(__file__).parents[1] / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+        assert "ownerView && data.twitch_chat_token?.owner_can_connect" in source
+        assert "<HealthCheckTab ownerView={effectivelyDev} />" in source
+
     @pytest.mark.asyncio
     async def test_bot_status_settings_are_owner_only_and_apply_live(self, monkeypatch):
         from aiohttp import web

@@ -4760,7 +4760,7 @@ function FortunaTab({ guildId }) {
   );
 }
 
-function HealthCheckTab() {
+function HealthCheckTab({ ownerView = false }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -4832,7 +4832,7 @@ function HealthCheckTab() {
           <div style={{ ...C.card, padding:16 }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:12, marginBottom:10 }}>
               <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14 }}>Twitch Connectivity</div>
-              {data.twitch_chat_token?.owner_can_connect && <a href="/auth/twitch/bot/login" style={{ ...C.btnSecondary, textDecoration:"none", fontSize:10, padding:"7px 10px" }}>Connect Twitch Bot</a>}
+              {ownerView && data.twitch_chat_token?.owner_can_connect && <a href="/auth/twitch/bot/login" style={{ ...C.btnSecondary, textDecoration:"none", fontSize:10, padding:"7px 10px" }}>Connect Twitch Bot</a>}
             </div>
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, fontSize:12 }}>
               <span style={{ color:"var(--text3)" }}>Active / expected subscriptions</span><span style={{ color:"var(--cyan)", textAlign:"right" }}>{data.eventsub?.actual ?? "—"} / {data.eventsub?.expected ?? "—"}</span>
@@ -5337,7 +5337,7 @@ export default function App() {
               {activeTab==="safety"        && <SafetyTab           guildId={activeGuild} />}
               {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
               {activeTab==="globalstats"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <GlobalStatsTab />}
-              {activeTab==="healthcheck"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <HealthCheckTab />}
+              {activeTab==="healthcheck"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <HealthCheckTab ownerView={effectivelyDev} />}
               {activeTab==="serverinfo"    && effectivelyDev && <ServerInfoTab guildId={activeGuild} />}
               {activeTab==="botstatus"     && effectivelyDev && <BotStatusTab />}
               {activeTab==="adminmanager"  && effectivelyDev && <AdminManagerTab />}
