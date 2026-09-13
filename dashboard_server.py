@@ -3559,7 +3559,31 @@ async def get_owner_server_info(request):
         "notifications": {"last_24h": {"total": int(count_row.get("total") or 0), "sent": int(count_row.get("sent") or 0), "failed": int(count_row.get("failed") or 0)}, "recent": [{**dict(row), "channel": channel_info(row["channel_id"])} for row in notification_rows]},
         "dashboard_users": dashboard_users,
         "features": features,
+        "alerts": {
+            "permission_dm_muted": bool(await asyncio.to_thread(_bot_ref.db.get_permission_dm_muted, int(guild_id))),
+        },
     })
+
+
+async def set_owner_permission_dm_mute(request):
+    """Owner-only: mute or restore permission-problem DMs to one guild owner."""
+    _require_owner(request)
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    guild_id = str(request.match_info["guild_id"])
+    try:
+        guild_id_int = int(guild_id)
+    except ValueError:
+        raise web.HTTPBadRequest(reason="Invalid server ID")
+    if not _bot_ref.get_guild(guild_id_int):
+        raise web.HTTPNotFound(reason="Server is not available in the bot cache")
+    body = await request.json()
+    if not isinstance(body.get("muted"), bool):
+        raise web.HTTPBadRequest(reason="muted must be true or false")
+    muted = body["muted"]
+    await asyncio.to_thread(_bot_ref.db.set_permission_dm_muted, guild_id_int, muted)
+    logger.info("Owner %s permission DMs for guild %s", "muted" if muted else "restored", guild_id)
+    return web.json_response({"ok": True, "permission_dm_muted": muted})
 
 
 _FORTUNA_HISTORY_DAYS = 30
@@ -6417,6 +6441,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/api/dev/bot-statuses", get_bot_statuses)
     app.router.add_post("/api/dev/bot-statuses", set_bot_statuses)
     app.router.add_get("/api/dev/server-info/{guild_id}", get_owner_server_info)
+    app.router.add_patch("/api/dev/server-info/{guild_id}/permission-dm", set_owner_permission_dm_mute)
     app.router.add_get("/api/admin/fortuna-control", get_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/start", start_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/spin", spin_fortuna_control)

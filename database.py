@@ -936,6 +936,14 @@ class Database:
             ON suggestion_comments(suggestion_id, created_at)
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS guild_alert_settings (
+                guild_id             INTEGER PRIMARY KEY,
+                permission_dm_muted  INTEGER NOT NULL DEFAULT 0,
+                updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         # Track kicked guilds for 7-day grace period before data wipe
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS kicked_guilds (
@@ -945,6 +953,29 @@ class Database:
             )
         ''')
 
+        conn.commit()
+        conn.close()
+
+    def get_permission_dm_muted(self, guild_id: int) -> bool:
+        """Return whether permission-problem DMs to this guild owner are muted."""
+        conn = self.get_connection()
+        row = conn.execute(
+            "SELECT permission_dm_muted FROM guild_alert_settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        conn.close()
+        return bool(row and row[0])
+
+    def set_permission_dm_muted(self, guild_id: int, muted: bool):
+        """Persist the owner-controlled permission DM mute for a guild."""
+        conn = self.get_connection()
+        conn.execute('''
+            INSERT INTO guild_alert_settings (guild_id, permission_dm_muted, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                permission_dm_muted = excluded.permission_dm_muted,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (guild_id, 1 if muted else 0))
         conn.commit()
         conn.close()
 
@@ -2983,6 +3014,7 @@ class Database:
         cursor.execute('DELETE FROM active_vcs WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM safety_settings WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM safety_kicks WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM guild_alert_settings WHERE guild_id = ?', (guild_id,))
         
         conn.commit()
         conn.close()

@@ -295,6 +295,7 @@ class TestDevDashboardRoutes:
         assert ("GET", "/api/dev/bot-statuses") in routes
         assert ("POST", "/api/dev/bot-statuses") in routes
         assert ("GET", "/api/dev/server-info/{guild_id}") in routes
+        assert ("PATCH", "/api/dev/server-info/{guild_id}/permission-dm") in routes
         assert ("GET", "/api/dev/admins") in routes
         assert ("POST", "/api/dev/admins") in routes
         assert ("DELETE", "/api/dev/admins/{user_id}") in routes
@@ -433,7 +434,8 @@ class TestDevDashboardRoutes:
             get_member=lambda user_id: owner if user_id == 9 else None,
             get_channel=lambda channel_id: channel if channel_id == 30 else None,
         )
-        fake_bot = Object(get_guild=lambda guild_id: guild if guild_id == 100 else None)
+        fake_database = Object(get_permission_dm_muted=lambda guild_id: guild_id == 100)
+        fake_bot = Object(get_guild=lambda guild_id: guild if guild_id == 100 else None, db=fake_database)
 
         async def fake_fetch(query, params=()):
             if "FROM server_settings" in query:
@@ -456,6 +458,36 @@ class TestDevDashboardRoutes:
         assert payload["owner"]["username"] == "owner_name"
         assert payload["channels"]["Notification"][0]["name"] == "#live-alerts"
         assert payload["notifications"]["last_24h"] == {"total": 2, "sent": 2, "failed": 0}
+        assert payload["alerts"]["permission_dm_muted"] is True
+
+    @pytest.mark.asyncio
+    async def test_permission_dm_mute_is_owner_only_and_persists(self, monkeypatch):
+        from aiohttp import web
+
+        class FakeDatabase:
+            def __init__(self):
+                self.saved = None
+            def set_permission_dm_muted(self, guild_id, muted):
+                self.saved = (guild_id, muted)
+
+        class FakeBot:
+            def __init__(self):
+                self.db = FakeDatabase()
+            def get_guild(self, guild_id):
+                return object() if guild_id == 100 else None
+
+        class Request(dict):
+            match_info = {"guild_id": "100"}
+            async def json(self):
+                return {"muted": True}
+
+        fake_bot = FakeBot()
+        monkeypatch.setattr(dashboard_server, "_bot_ref", fake_bot)
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.set_owner_permission_dm_mute(Request(session={"admin": True}))
+        response = await dashboard_server.set_owner_permission_dm_mute(Request(session={"dev": True}))
+        assert response.status == 200
+        assert fake_bot.db.saved == (100, True)
 
     @pytest.mark.asyncio
     async def test_twitch_bot_login_is_owner_only(self, monkeypatch):

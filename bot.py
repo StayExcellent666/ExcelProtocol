@@ -2213,6 +2213,7 @@ class TwitchNotifierBot(discord.Client):
                 logger.debug(f"Skipping guild owner DM for {guild.name} — cooldown active")
                 return
         self.error_alerts_sent[error_key] = current_time
+        guild_dm_muted = self.db.get_permission_dm_muted(guild.id)
 
         admin_embed = discord.Embed(
             title="⚠️ ExcelProtocol Permission Issue",
@@ -2230,7 +2231,7 @@ class TwitchNotifierBot(discord.Client):
         admin_embed.set_footer(text="ExcelProtocol — Notification System")
 
         # DM guild owner
-        if guild_owner:
+        if guild_owner and not guild_dm_muted:
             try:
                 await guild_owner.send(embed=admin_embed)
                 logger.info(f"Sent permission issue DM to guild owner {guild_owner} in {guild.name}")
@@ -2243,11 +2244,12 @@ class TwitchNotifierBot(discord.Client):
                 owner_notified = False
 
         # DM bot owner — include whether guild owner was reached
-        owner_note = (
-            "Guild owner has been notified automatically."
-            if owner_notified else
-            "⚠️ Could not DM guild owner (DMs disabled) — you may need to reach out manually."
-        )
+        if guild_dm_muted:
+            owner_note = "Guild-owner permission DMs are muted from the owner dashboard."
+        elif owner_notified:
+            owner_note = "Guild owner has been notified automatically."
+        else:
+            owner_note = "⚠️ Could not DM guild owner (DMs disabled) — you may need to reach out manually."
 
         await self.send_owner_alert(
             "Permission Issue",

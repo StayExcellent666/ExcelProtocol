@@ -1391,3 +1391,10 @@ class TestDashboardAdministrationSchema:
         }
         conn.close()
         assert {"dashboard_admins", "dashboard_suggestions", "suggestion_comments"} <= tables
+
+    def test_permission_dm_mute_round_trip(self, db):
+        assert db.get_permission_dm_muted(100) is False
+        db.set_permission_dm_muted(100, True)
+        assert db.get_permission_dm_muted(100) is True
+        db.set_permission_dm_muted(100, False)
+        assert db.get_permission_dm_muted(100) is False
