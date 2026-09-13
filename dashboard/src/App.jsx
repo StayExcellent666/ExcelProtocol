@@ -4890,6 +4890,52 @@ function HealthCheckTab() {
   );
 }
 
+function ServerInfoTab({ guildId }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const load = useCallback(() => {
+    if (!guildId) return;
+    setLoading(true); setError("");
+    apiFetch(`/api/dev/server-info/${guildId}`).then(setData).catch(e=>setError(e.message)).finally(()=>setLoading(false));
+  }, [guildId]);
+  useEffect(load, [load]);
+
+  const dateText = value => value ? new Date(value).toLocaleString() : "Unavailable";
+  const installedFor = value => {
+    if (!value) return "Unavailable";
+    const days = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 86400000));
+    if (days >= 365) return `${Math.floor(days / 365)}y ${Math.floor((days % 365) / 30)}mo`;
+    if (days >= 30) return `${Math.floor(days / 30)}mo ${days % 30}d`;
+    return `${days} day${days === 1 ? "" : "s"}`;
+  };
+  const featureNames = { stream_notifications:"Stream notifications", reaction_roles:"Reaction roles", birthdays:"Birthdays", voice_rooms:"Voice rooms", cleanup_rules:"Cleanup rules", stats_channels:"Stats channels", twitch_chat:"Twitch chat", channel_rewards:"Channel rewards", fortuna:"Fortuna", safety:"Safety filter", welcome_goodbye:"Welcome & goodbye" };
+  const InfoCard = ({ title, children }) => <div style={{ ...C.card, padding:18 }}><div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:13, fontWeight:700, color:"var(--cyan)", marginBottom:14 }}>{title}</div>{children}</div>;
+  const Row = ({ label, value, mono=false }) => <div style={{ display:"flex", justifyContent:"space-between", gap:16, padding:"7px 0", borderBottom:"1px solid rgba(36,52,68,.55)", fontSize:12 }}><span style={{ color:"var(--text2)" }}>{label}</span><span style={{ color:"var(--text)", textAlign:"right", overflowWrap:"anywhere", fontFamily:mono?"'JetBrains Mono',monospace":undefined }}>{value ?? "Unavailable"}</span></div>;
+
+  if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:50 }}><Spinner /></div>;
+  if (error) return <><PageHeader title="Server Info" subtitle="Owner-only server inspection" /><div style={{...C.card,color:"var(--red)"}}>⚠️ {error}</div></>;
+  if (!data) return null;
+  const s=data.server, o=data.owner, counts=data.notifications.last_24h;
+  return <div>
+    <PageHeader title="Server Info" subtitle="Owner-only live Discord and configuration details" action={<button onClick={load} style={C.btnSecondary}>↻ Refresh</button>} />
+    <div style={{ ...C.card, display:"flex", alignItems:"center", gap:16, marginBottom:14, padding:18, flexWrap:"wrap" }}>
+      {s.icon_url ? <img src={s.icon_url} style={{width:64,height:64,borderRadius:16}} /> : <div style={{width:64,height:64,borderRadius:16,background:"var(--cyan-dim)",display:"grid",placeItems:"center",fontSize:24}}>◆</div>}
+      <div style={{flex:1,minWidth:180}}><div style={{fontFamily:"'Orbitron',sans-serif",fontSize:20,fontWeight:800}}>{s.name}</div><div style={{fontFamily:"'JetBrains Mono',monospace",color:"var(--text3)",fontSize:11,marginTop:5}}>{s.id}</div></div>
+      <div style={{display:"flex",gap:24,flexWrap:"wrap"}}><div><div style={{fontSize:10,color:"var(--text3)",letterSpacing:1}}>MEMBERS</div><div style={{fontSize:22,color:"var(--cyan)",fontWeight:700}}>{s.member_count?.toLocaleString() ?? "—"}</div></div><div><div style={{fontSize:10,color:"var(--text3)",letterSpacing:1}}>INSTALLED</div><div style={{fontSize:22,color:"var(--green)",fontWeight:700}}>{installedFor(s.bot_joined_at)}</div></div></div>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(290px,1fr))",gap:14,marginBottom:14}}>
+      <InfoCard title="Server & Owner"><Row label="Created" value={dateText(s.created_at)} /><Row label="Bot joined" value={dateText(s.bot_joined_at)} /><Row label="Owner display name" value={o.display_name} /><Row label="Owner username" value={o.username ? `@${o.username}` : null} /><Row label="Owner user ID" value={o.id} mono /></InfoCard>
+      <InfoCard title="Bot Role"><Row label="Highest role" value={data.bot_role.name ? `@${data.bot_role.name}` : null} /><Row label="Role ID" value={data.bot_role.id} mono /><Row label="Hierarchy position" value={data.bot_role.position != null ? `${data.bot_role.position} of ${Math.max(0,data.bot_role.role_count-1)}` : null} /></InfoCard>
+      <InfoCard title="Important Permissions"><div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{Object.values(data.permissions).map(p=><span key={p.label} style={{padding:"6px 9px",borderRadius:20,fontSize:11,color:p.granted?"var(--green)":"var(--red)",background:p.granted?"rgba(57,217,138,.09)":"var(--red-dim)",border:`1px solid ${p.granted?"rgba(57,217,138,.25)":"rgba(255,77,109,.3)"}`}}>{p.granted?"✓":"✕"} {p.label}</span>)}</div>{data.channel_permission_issues.length>0&&<div style={{marginTop:13,color:"var(--yellow)",fontSize:11}}>⚠ {data.channel_permission_issues.length} channel-specific issue{data.channel_permission_issues.length===1?"":"s"} currently detected</div>}</InfoCard>
+      <InfoCard title="Configured Channels">{Object.entries(data.channels).map(([label,items])=><Row key={label} label={label} value={items.filter(Boolean).length ? items.filter(Boolean).map(x=>`${x.name} (${x.id})`).join(", ") : "Not configured"} mono />)}</InfoCard>
+      <InfoCard title="Notification Delivery"><div style={{display:"flex",gap:10,marginBottom:12}}>{[["Sent",counts.sent,"var(--green)"],["Failed",counts.failed,"var(--red)"],["Total",counts.total,"var(--cyan)"]].map(([l,v,c])=><div key={l} style={{flex:1,padding:10,borderRadius:7,background:"rgba(8,11,15,.7)",textAlign:"center"}}><div style={{fontSize:19,fontWeight:700,color:c}}>{v}</div><div style={{fontSize:9,color:"var(--text3)"}}>{l.toUpperCase()} · 24H</div></div>)}</div>{data.notifications.recent.length ? data.notifications.recent.slice(0,5).map((n,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"6px 0",fontSize:11,borderBottom:"1px solid rgba(36,52,68,.45)"}}><span style={{color:"var(--text2)"}}>@{n.streamer_name} → {n.channel?.name}</span><span style={{color:n.status==="sent"?"var(--green)":"var(--red)"}}>{n.status} · {timeAgo(n.sent_at)}</span></div>) : <div style={{color:"var(--text3)",fontSize:11}}>No recent deliveries recorded.</div>}</InfoCard>
+      <InfoCard title="Dashboard Users"><div style={{color:"var(--text3)",fontSize:10,marginBottom:10}}>Currently authenticated sessions with access to this server.</div>{data.dashboard_users.length ? data.dashboard_users.map(u=><Row key={u.user_id} label={u.access} value={`${u.username} · ${u.user_id}`} mono />) : <div style={{color:"var(--text3)",fontSize:11}}>No active sessions found.</div>}</InfoCard>
+      <InfoCard title="Enabled Features"><div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{Object.entries(data.features).map(([key,count])=><span key={key} style={{padding:"7px 10px",borderRadius:7,fontSize:11,color:count?"var(--green)":"var(--text3)",background:count?"rgba(57,217,138,.08)":"rgba(8,11,15,.6)",border:"1px solid var(--border)"}}>{count?"✓":"○"} {featureNames[key]||key}{count>1?` (${count})`:""}</span>)}</div></InfoCard>
+    </div>
+  </div>;
+}
+
 function BotStatusTab() {
   const [statuses, setStatuses] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -5110,6 +5156,7 @@ export default function App() {
   const devTabs = effectivelyDev ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
+    { id:"serverinfo",     icon:"/app/icons/gear.png", label:"Server Info"         },
     { id:"botstatus",      icon:"/app/icons/message.png", label:"Bot Status"       },
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
     { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
@@ -5267,6 +5314,7 @@ export default function App() {
               {activeTab==="suggestions"   && <SuggestionsTab      guildId={activeGuild} />}
               {activeTab==="globalstats"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <GlobalStatsTab />}
               {activeTab==="healthcheck"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <HealthCheckTab />}
+              {activeTab==="serverinfo"    && effectivelyDev && <ServerInfoTab guildId={activeGuild} />}
               {activeTab==="botstatus"     && effectivelyDev && <BotStatusTab />}
               {activeTab==="fortuna"       && <FortunaTab guildId={activeGuild} />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
@@ -5310,6 +5358,7 @@ export default function App() {
             {effectivelyDev && <>
               <div style={{ fontSize:9, color:"var(--cyan)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Dev Only</div>
               <NavItem large icon="/app/icons/globe.png" label="Global Stats" active={activeTab==="globalstats"} onClick={() => { setActiveTab("globalstats"); setNavDrawerOpen(false); }} />
+              <NavItem large icon="/app/icons/gear.png" label="Server Info" active={activeTab==="serverinfo"} onClick={() => { setActiveTab("serverinfo"); setNavDrawerOpen(false); }} />
               <NavItem large icon="/app/icons/message.png" label="Bot Status" active={activeTab==="botstatus"} onClick={() => { setActiveTab("botstatus"); setNavDrawerOpen(false); }} />
               <NavItem large icon="/app/icons/tools.png" label="DB Tools" active={activeTab==="dbtools"} onClick={() => { setActiveTab("dbtools"); setNavDrawerOpen(false); }} />
             </>}

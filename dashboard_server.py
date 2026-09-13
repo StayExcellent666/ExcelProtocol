@@ -3345,6 +3345,116 @@ async def set_bot_statuses(request):
     return web.json_response({"ok": True, "statuses": statuses, "rotation_seconds": 20})
 
 
+async def get_owner_server_info(request):
+    """Return an owner-only operational profile for one connected guild."""
+    _require_owner(request)
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    guild_id = str(request.match_info["guild_id"])
+    try:
+        guild = _bot_ref.get_guild(int(guild_id))
+    except (TypeError, ValueError):
+        guild = None
+    if not guild:
+        raise web.HTTPNotFound(reason="Server is not available in the bot cache")
+
+    bot_member = getattr(guild, "me", None)
+    owner = getattr(guild, "owner", None)
+    if owner is None:
+        owner_id = getattr(guild, "owner_id", None)
+        owner = guild.get_member(owner_id) if owner_id else None
+
+    def iso(value):
+        return value.isoformat() if value else None
+
+    def channel_info(channel_id):
+        if not channel_id:
+            return None
+        channel = guild.get_channel(int(channel_id))
+        return {"id": str(channel_id), "name": f"#{channel.name}" if channel and getattr(channel, "name", None) else "Unavailable", "available": bool(channel)}
+
+    settings = await db_fetch("SELECT notification_channel_id FROM server_settings WHERE guild_id = ?", (guild_id,))
+    welcome = await db_fetch("SELECT welcome_channel_id, goodbye_channel_id, welcome_enabled, goodbye_enabled FROM welcome_settings WHERE guild_id = ?", (guild_id,))
+    birthday = await db_fetch("SELECT channel_id FROM birthday_channels WHERE guild_id = ?", (guild_id,))
+    stat_channels = await db_fetch("SELECT channel_id, format FROM stat_channels WHERE guild_id = ? ORDER BY channel_id", (guild_id,))
+    cleanup_channels = await db_fetch("SELECT channel_id FROM cleanup_configs WHERE guild_id = ? ORDER BY channel_id", (guild_id,))
+    permission_rows = await db_fetch("SELECT channel_id, missing, detected_at FROM permission_issues WHERE guild_id = ? ORDER BY detected_at DESC", (guild_id,))
+    notification_rows = await db_fetch("SELECT streamer_name, channel_id, status, sent_at FROM notification_log WHERE guild_id = ? ORDER BY sent_at DESC LIMIT 10", (guild_id,))
+    notification_counts = await db_fetch(
+        """SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+                  SUM(CASE WHEN status != 'sent' THEN 1 ELSE 0 END) AS failed
+           FROM notification_log WHERE guild_id = ? AND sent_at >= datetime('now', '-24 hours')""",
+        (guild_id,),
+    )
+
+    feature_queries = {
+        "stream_notifications": "SELECT COUNT(*) AS c FROM monitored_streamers WHERE guild_id = ?",
+        "reaction_roles": "SELECT COUNT(*) AS c FROM reaction_roles WHERE guild_id = ?",
+        "birthdays": "SELECT COUNT(*) AS c FROM birthdays WHERE guild_id = ?",
+        "voice_rooms": "SELECT COUNT(*) AS c FROM vc_settings WHERE guild_id = ?",
+        "cleanup_rules": "SELECT COUNT(*) AS c FROM cleanup_configs WHERE guild_id = ?",
+        "stats_channels": "SELECT COUNT(*) AS c FROM stat_channels WHERE guild_id = ?",
+        "twitch_chat": "SELECT COUNT(*) AS c FROM twitch_channels WHERE guild_id = ?",
+        "channel_rewards": "SELECT COUNT(*) AS c FROM broadcaster_tokens WHERE guild_id = ?",
+        "fortuna": "SELECT COUNT(*) AS c FROM fortuna_plugin_keys WHERE guild_id = ? AND revoked_at IS NULL",
+    }
+    features = {}
+    for key, query in feature_queries.items():
+        rows = await db_fetch(query, (guild_id,))
+        features[key] = int(rows[0]["c"] or 0) if rows else 0
+    safety_rows = await db_fetch("SELECT enabled FROM safety_settings WHERE guild_id = ?", (guild_id,))
+    features["safety"] = int(safety_rows[0]["enabled"] or 0) if safety_rows else 0
+    features["welcome_goodbye"] = int(bool(welcome and (welcome[0].get("welcome_enabled") or welcome[0].get("goodbye_enabled"))))
+
+    important_permissions = [
+        ("view_channel", "View Channels"), ("send_messages", "Send Messages"),
+        ("embed_links", "Embed Links"), ("attach_files", "Attach Files"),
+        ("read_message_history", "Read Message History"), ("manage_messages", "Manage Messages"),
+        ("manage_channels", "Manage Channels"), ("manage_roles", "Manage Roles"),
+        ("move_members", "Move Members"), ("view_audit_log", "View Audit Log"),
+    ]
+    guild_permissions = getattr(bot_member, "guild_permissions", None)
+    permission_map = {attr: {"label": label, "granted": bool(getattr(guild_permissions, attr, False))} for attr, label in important_permissions}
+
+    dashboard_users, seen_users = [], set()
+    for active_session in _sessions.values():
+        user_id = str(active_session.get("user_id", ""))
+        if not user_id or user_id in seen_users:
+            continue
+        guild_ids = {str(item.get("id")) for item in active_session.get("guilds", [])}
+        if guild_id not in guild_ids and not (active_session.get("dev") or active_session.get("admin")):
+            continue
+        seen_users.add(user_id)
+        dashboard_users.append({
+            "user_id": user_id, "username": active_session.get("username") or "Unknown",
+            "access": "Owner" if active_session.get("dev") else "Bot admin" if active_session.get("admin") else "Server manager",
+        })
+
+    top_role = getattr(bot_member, "top_role", None)
+    count_row = notification_counts[0] if notification_counts else {}
+    channel_groups = {
+        "Notification": [channel_info(settings[0]["notification_channel_id"])] if settings else [],
+        "Stats": [channel_info(row["channel_id"]) for row in stat_channels],
+        "Welcome": [channel_info(welcome[0]["welcome_channel_id"])] if welcome and welcome[0].get("welcome_channel_id") else [],
+        "Goodbye": [channel_info(welcome[0]["goodbye_channel_id"])] if welcome and welcome[0].get("goodbye_channel_id") else [],
+        "Birthday": [channel_info(birthday[0]["channel_id"])] if birthday else [],
+        "Moderation / cleanup": [channel_info(row["channel_id"]) for row in cleanup_channels],
+        "Log": [],  # The bot records logs in its database; no Discord log channel is configured.
+    }
+    return web.json_response({
+        "server": {"id": guild_id, "name": guild.name, "icon_url": str(guild.icon.url) if getattr(guild, "icon", None) else None, "member_count": getattr(guild, "member_count", None), "created_at": iso(getattr(guild, "created_at", None)), "bot_joined_at": iso(getattr(bot_member, "joined_at", None))},
+        "owner": {"id": str(getattr(guild, "owner_id", "")), "username": getattr(owner, "name", None), "display_name": getattr(owner, "display_name", None), "avatar_url": str(owner.display_avatar.url) if owner and getattr(owner, "display_avatar", None) else None},
+        "bot_role": {"id": str(getattr(top_role, "id", "")), "name": getattr(top_role, "name", None), "position": getattr(top_role, "position", None), "role_count": len(getattr(guild, "roles", []))},
+        "permissions": permission_map,
+        "channel_permission_issues": [{**dict(row), "channel": channel_info(row["channel_id"])} for row in permission_rows],
+        "channels": channel_groups,
+        "notifications": {"last_24h": {"total": int(count_row.get("total") or 0), "sent": int(count_row.get("sent") or 0), "failed": int(count_row.get("failed") or 0)}, "recent": [{**dict(row), "channel": channel_info(row["channel_id"])} for row in notification_rows]},
+        "dashboard_users": dashboard_users,
+        "features": features,
+    })
+
+
 _FORTUNA_HISTORY_DAYS = 30
 
 
@@ -6193,6 +6303,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/api/admin/audit-log", admin_audit_log)
     app.router.add_get("/api/dev/bot-statuses", get_bot_statuses)
     app.router.add_post("/api/dev/bot-statuses", set_bot_statuses)
+    app.router.add_get("/api/dev/server-info/{guild_id}", get_owner_server_info)
     app.router.add_get("/api/admin/fortuna-control", get_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/start", start_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/spin", spin_fortuna_control)

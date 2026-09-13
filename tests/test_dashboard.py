@@ -294,6 +294,7 @@ class TestDevDashboardRoutes:
         assert ("GET", "/auth/twitch/bot/login") in routes
         assert ("GET", "/api/dev/bot-statuses") in routes
         assert ("POST", "/api/dev/bot-statuses") in routes
+        assert ("GET", "/api/dev/server-info/{guild_id}") in routes
 
     def test_fortuna_overlay_layout_is_clamped_to_canvas(self):
         layout = dashboard_server._fortuna_normalize_overlay_layout({
@@ -333,6 +334,60 @@ class TestDevDashboardRoutes:
         from aiohttp import web
         with pytest.raises(web.HTTPForbidden):
             dashboard_server._require_dev_or_admin({"session": {}})
+
+    def test_server_info_is_owner_only(self):
+        from aiohttp import web
+        dashboard_server._require_owner({"session": {"dev": True}})
+        with pytest.raises(web.HTTPForbidden):
+            dashboard_server._require_owner({"session": {"admin": True}})
+
+    @pytest.mark.asyncio
+    async def test_server_info_returns_live_identity_and_configuration(self, monkeypatch):
+        import json
+        from datetime import datetime, timezone
+
+        class Object:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+
+        permissions = Object(view_channel=True, send_messages=True, embed_links=True)
+        bot_member = Object(
+            joined_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
+            guild_permissions=permissions,
+            top_role=Object(id=20, name="ExcelProtocol", position=3),
+        )
+        owner = Object(id=9, name="owner_name", display_name="Owner", display_avatar=None)
+        channel = Object(id=30, name="live-alerts")
+        guild = Object(
+            id=100, name="Test Server", icon=None, member_count=42,
+            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            owner_id=9, owner=owner, me=bot_member, roles=[1, 2, 3, 4],
+            get_member=lambda user_id: owner if user_id == 9 else None,
+            get_channel=lambda channel_id: channel if channel_id == 30 else None,
+        )
+        fake_bot = Object(get_guild=lambda guild_id: guild if guild_id == 100 else None)
+
+        async def fake_fetch(query, params=()):
+            if "FROM server_settings" in query:
+                return [{"notification_channel_id": 30}]
+            if "FROM notification_log" in query and "COUNT(*)" in query:
+                return [{"total": 2, "sent": 2, "failed": 0}]
+            if "COUNT(*) AS c" in query:
+                return [{"c": 0}]
+            return []
+
+        class Request(dict):
+            match_info = {"guild_id": "100"}
+
+        monkeypatch.setattr(dashboard_server, "_bot_ref", fake_bot)
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_fetch)
+        monkeypatch.setattr(dashboard_server, "_sessions", {})
+        response = await dashboard_server.get_owner_server_info(Request(session={"dev": True}))
+        payload = json.loads(response.text)
+        assert payload["server"]["name"] == "Test Server"
+        assert payload["owner"]["username"] == "owner_name"
+        assert payload["channels"]["Notification"][0]["name"] == "#live-alerts"
+        assert payload["notifications"]["last_24h"] == {"total": 2, "sent": 2, "failed": 0}
 
     @pytest.mark.asyncio
     async def test_twitch_bot_login_is_owner_only(self, monkeypatch):
