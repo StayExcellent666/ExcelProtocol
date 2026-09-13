@@ -898,6 +898,44 @@ class Database:
             )
         ''')
 
+        # Dashboard admins managed by the bot owner. Environment ADMIN_ID*
+        # values remain a deployment-level fallback and are merged at runtime.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS dashboard_admins (
+                user_id    TEXT PRIMARY KEY,
+                username   TEXT,
+                added_by   TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Suggestions persist independently of Discord DM delivery so the
+        # owner/admin inbox remains the source of truth.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS dashboard_suggestions (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    TEXT,
+                username   TEXT NOT NULL,
+                guild_id   TEXT,
+                text       TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS suggestion_comments (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                suggestion_id   INTEGER NOT NULL,
+                author_id       TEXT NOT NULL,
+                author_username TEXT NOT NULL,
+                text            TEXT NOT NULL,
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_suggestion_comments_suggestion
+            ON suggestion_comments(suggestion_id, created_at)
+        ''')
+
         # Track kicked guilds for 7-day grace period before data wipe
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS kicked_guilds (

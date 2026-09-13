@@ -646,7 +646,8 @@ async def auth_callback(request):
     logger.info(f"Auth: user has {len(guilds)} guilds, {len(managed)} managed, bot in {len(bot_guild_ids)} guilds")
     session_token = secrets.token_hex(32)
     is_owner = BOT_OWNER_ID and str(user["id"]) == str(BOT_OWNER_ID)
-    is_admin = not is_owner and str(user["id"]) in ADMIN_IDS
+    stored_admin = await db_fetch("SELECT 1 FROM dashboard_admins WHERE user_id = ?", (str(user["id"]),))
+    is_admin = not is_owner and (str(user["id"]) in ADMIN_IDS or bool(stored_admin))
     _sessions[session_token] = {
         "user_id":      user["id"],
         "username":     user["username"],
@@ -1279,51 +1280,157 @@ async def edit_reaction_role(request):
 
 # ── Suggestions ──────────────────────────────────────────────────────────────
 async def post_suggestion(request):
-    """Receive a suggestion from the dashboard and DM it to the bot owner."""
+    """Persist a dashboard suggestion and optionally notify the bot owner by DM."""
     session = request["session"]
     body = await request.json()
     text = body.get("text", "").strip()
+    guild_id = str(body.get("guild_id") or "").strip() or None
 
     if not text:
         raise web.HTTPBadRequest(reason="Suggestion text is required")
     if len(text) > 1000:
         raise web.HTTPBadRequest(reason="Suggestion must be under 1000 characters")
-    if not BOT_OWNER_ID or not DISCORD_TOKEN:
-        raise web.HTTPInternalServerError(reason="BOT_OWNER_ID or DISCORD_TOKEN not configured")
-
     sender = "Dev (dashboard)" if session.get("dev") else session.get("username", "Unknown")
     sender_id = None if session.get("dev") else session.get("user_id")
 
-    s = get_http_session()
-    dm_resp = await s.post(
-        f"{DISCORD_API}/users/@me/channels",
-        headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
-        json={"recipient_id": BOT_OWNER_ID},
+    suggestion_id = await db_insert(
+        "INSERT INTO dashboard_suggestions (user_id, username, guild_id, text) VALUES (?, ?, ?, ?)",
+        (str(sender_id) if sender_id else None, sender, guild_id, text),
     )
-    dm_data = await dm_resp.json()
-    dm_channel_id = dm_data.get("id")
-    if not dm_channel_id:
-        raise web.HTTPInternalServerError(reason="Failed to open DM channel")
 
-    embed = {
-        "title": "\U0001f4a1 New Dashboard Suggestion",
-        "description": text,
-        "color": 0x5865F2,
-        "fields": [
-            {"name": "From", "value": f"{sender}{f' (`{sender_id}`)' if sender_id else ''}", "inline": True},
-            {"name": "Via",  "value": "ExcelProtocol Dashboard", "inline": True},
-        ],
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "footer": {"text": "excelprotocol.fly.dev/app"},
-    }
-    msg_resp = await s.post(
-        f"{DISCORD_API}/channels/{dm_channel_id}/messages",
-        headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
-        json={"embeds": [embed]},
+    dm_sent = False
+    if BOT_OWNER_ID and DISCORD_TOKEN:
+        try:
+            s = get_http_session()
+            dm_resp = await s.post(
+                f"{DISCORD_API}/users/@me/channels",
+                headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+                json={"recipient_id": BOT_OWNER_ID},
+            )
+            dm_data = await dm_resp.json()
+            dm_channel_id = dm_data.get("id")
+            if dm_channel_id:
+                embed = {
+                    "title": "\U0001f4a1 New Dashboard Suggestion",
+                    "description": text,
+                    "color": 0x5865F2,
+                    "fields": [
+                        {"name": "From", "value": f"{sender}{f' (`{sender_id}`)' if sender_id else ''}", "inline": True},
+                        {"name": "Inbox ID", "value": f"`#{suggestion_id}`", "inline": True},
+                    ],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "footer": {"text": "View and comment in the ExcelProtocol dashboard"},
+                }
+                msg_resp = await s.post(
+                    f"{DISCORD_API}/channels/{dm_channel_id}/messages",
+                    headers={"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"},
+                    json={"embeds": [embed]},
+                )
+                dm_sent = msg_resp.status in (200, 201)
+        except Exception as exc:
+            logger.warning("Suggestion %s was saved but its DM notification failed: %s", suggestion_id, exc)
+
+    return web.json_response({"ok": True, "id": suggestion_id, "dm_sent": dm_sent})
+
+
+async def get_dashboard_admins(request):
+    """Owner-only list of secret fallback and database-managed dashboard admins."""
+    _require_owner(request)
+    rows = await db_fetch("SELECT user_id, username, added_by, created_at FROM dashboard_admins ORDER BY created_at")
+    managed = {str(row["user_id"]): dict(row) for row in rows}
+    admins = []
+    for user_id in sorted(ADMIN_IDS | set(managed)):
+        row = managed.get(user_id, {})
+        active = next((s for s in _sessions.values() if str(s.get("user_id")) == user_id), None)
+        admins.append({
+            "user_id": user_id,
+            "username": row.get("username") or (active or {}).get("username"),
+            "source": "Secret fallback" if user_id in ADMIN_IDS else "Dashboard",
+            "removable": user_id not in ADMIN_IDS,
+            "created_at": row.get("created_at"),
+        })
+    return web.json_response({"admins": admins})
+
+
+async def add_dashboard_admin(request):
+    """Owner-only: grant dashboard admin access without a redeploy."""
+    _require_owner(request)
+    body = await request.json()
+    user_id = str(body.get("user_id") or "").strip()
+    if not re.fullmatch(r"\d{17,20}", user_id):
+        raise web.HTTPBadRequest(reason="Enter a valid Discord user ID")
+    if user_id == str(BOT_OWNER_ID):
+        raise web.HTTPBadRequest(reason="The bot owner already has full access")
+    username = None
+    if _bot_ref:
+        try:
+            user = _bot_ref.get_user(int(user_id)) or await _bot_ref.fetch_user(int(user_id))
+            username = getattr(user, "name", None)
+        except Exception:
+            pass
+    await db_execute(
+        """INSERT INTO dashboard_admins (user_id, username, added_by) VALUES (?, ?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET username = COALESCE(excluded.username, dashboard_admins.username)""",
+        (user_id, username, str(request["session"].get("user_id") or BOT_OWNER_ID)),
     )
-    if msg_resp.status not in (200, 201):
-        raise web.HTTPInternalServerError(reason="Failed to send DM")
+    for active_session in _sessions.values():
+        if str(active_session.get("user_id")) == user_id:
+            active_session["admin"] = True
+    return web.json_response({"ok": True, "user_id": user_id, "username": username})
 
+
+async def delete_dashboard_admin(request):
+    """Owner-only: revoke a database-managed dashboard admin immediately."""
+    _require_owner(request)
+    user_id = str(request.match_info["user_id"])
+    if user_id in ADMIN_IDS:
+        raise web.HTTPBadRequest(reason="Secret fallback admins must be removed from Fly secrets")
+    await db_execute("DELETE FROM dashboard_admins WHERE user_id = ?", (user_id,))
+    for active_session in _sessions.values():
+        if str(active_session.get("user_id")) == user_id:
+            active_session["admin"] = False
+    return web.json_response({"ok": True})
+
+
+async def get_suggestion_inbox(request):
+    """Owner/admin suggestion inbox with internal comments."""
+    _require_dev_or_admin(request)
+    suggestions = await db_fetch(
+        "SELECT id, user_id, username, guild_id, text, created_at FROM dashboard_suggestions ORDER BY id DESC LIMIT 250"
+    )
+    comments = await db_fetch(
+        "SELECT id, suggestion_id, author_id, author_username, text, created_at FROM suggestion_comments ORDER BY id"
+    )
+    by_suggestion = {}
+    for comment in comments:
+        by_suggestion.setdefault(int(comment["suggestion_id"]), []).append(dict(comment))
+    return web.json_response([{**dict(item), "comments": by_suggestion.get(int(item["id"]), [])} for item in suggestions])
+
+
+async def add_suggestion_comment(request):
+    """Owner/admin: attach an internal comment to a suggestion."""
+    _require_dev_or_admin(request)
+    suggestion_id = int(request.match_info["suggestion_id"])
+    if not await db_fetch("SELECT 1 FROM dashboard_suggestions WHERE id = ?", (suggestion_id,)):
+        raise web.HTTPNotFound(reason="Suggestion not found")
+    body = await request.json()
+    text = str(body.get("text") or "").strip()
+    if not 1 <= len(text) <= 1000:
+        raise web.HTTPBadRequest(reason="Comment must be between 1 and 1000 characters")
+    session = request["session"]
+    comment_id = await db_insert(
+        "INSERT INTO suggestion_comments (suggestion_id, author_id, author_username, text) VALUES (?, ?, ?, ?)",
+        (suggestion_id, str(session.get("user_id") or "owner"), session.get("username") or "Owner", text),
+    )
+    return web.json_response({"ok": True, "id": comment_id})
+
+
+async def delete_suggestion(request):
+    """Owner/admin: delete a suggestion and all of its comments."""
+    _require_dev_or_admin(request)
+    suggestion_id = int(request.match_info["suggestion_id"])
+    await db_execute("DELETE FROM suggestion_comments WHERE suggestion_id = ?", (suggestion_id,))
+    await db_execute("DELETE FROM dashboard_suggestions WHERE id = ?", (suggestion_id,))
     return web.json_response({"ok": True})
 
 # ── Support ──────────────────────────────────────────────────────────────────
@@ -6301,6 +6408,12 @@ def create_dashboard_app(bot=None):
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
     app.router.add_get("/api/me",        auth_me)
     app.router.add_get("/api/admin/audit-log", admin_audit_log)
+    app.router.add_get("/api/dev/admins", get_dashboard_admins)
+    app.router.add_post("/api/dev/admins", add_dashboard_admin)
+    app.router.add_delete("/api/dev/admins/{user_id}", delete_dashboard_admin)
+    app.router.add_get("/api/admin/suggestions", get_suggestion_inbox)
+    app.router.add_post("/api/admin/suggestions/{suggestion_id}/comments", add_suggestion_comment)
+    app.router.add_delete("/api/admin/suggestions/{suggestion_id}", delete_suggestion)
     app.router.add_get("/api/dev/bot-statuses", get_bot_statuses)
     app.router.add_post("/api/dev/bot-statuses", set_bot_statuses)
     app.router.add_get("/api/dev/server-info/{guild_id}", get_owner_server_info)

@@ -295,6 +295,12 @@ class TestDevDashboardRoutes:
         assert ("GET", "/api/dev/bot-statuses") in routes
         assert ("POST", "/api/dev/bot-statuses") in routes
         assert ("GET", "/api/dev/server-info/{guild_id}") in routes
+        assert ("GET", "/api/dev/admins") in routes
+        assert ("POST", "/api/dev/admins") in routes
+        assert ("DELETE", "/api/dev/admins/{user_id}") in routes
+        assert ("GET", "/api/admin/suggestions") in routes
+        assert ("POST", "/api/admin/suggestions/{suggestion_id}/comments") in routes
+        assert ("DELETE", "/api/admin/suggestions/{suggestion_id}") in routes
 
     def test_fortuna_overlay_layout_is_clamped_to_canvas(self):
         layout = dashboard_server._fortuna_normalize_overlay_layout({
@@ -340,6 +346,68 @@ class TestDevDashboardRoutes:
         dashboard_server._require_owner({"session": {"dev": True}})
         with pytest.raises(web.HTTPForbidden):
             dashboard_server._require_owner({"session": {"admin": True}})
+
+    @pytest.mark.asyncio
+    async def test_dashboard_admin_add_applies_live_and_secret_fallback_cannot_be_removed(self, monkeypatch):
+        from aiohttp import web
+        executed = []
+
+        async def fake_execute(query, params=()):
+            executed.append((query, params))
+
+        class Request(dict):
+            match_info = {"user_id": "123456789012345678"}
+            async def json(self):
+                return {"user_id": "123456789012345678"}
+
+        session = {"user_id": "123456789012345678", "admin": False}
+        monkeypatch.setattr(dashboard_server, "_bot_ref", None)
+        monkeypatch.setattr(dashboard_server, "_sessions", {"active": session})
+        monkeypatch.setattr(dashboard_server, "db_execute", fake_execute)
+        response = await dashboard_server.add_dashboard_admin(Request(session={"dev": True, "user_id": "1"}))
+        assert response.status == 200
+        assert session["admin"] is True
+        assert executed[0][1][0] == "123456789012345678"
+
+        monkeypatch.setattr(dashboard_server, "ADMIN_IDS", {"123456789012345678"})
+        with pytest.raises(web.HTTPBadRequest):
+            await dashboard_server.delete_dashboard_admin(Request(session={"dev": True}))
+
+    @pytest.mark.asyncio
+    async def test_suggestion_inbox_allows_admin_but_admin_manager_is_owner_only(self, monkeypatch):
+        from aiohttp import web
+
+        async def fake_fetch(query, params=()):
+            return []
+
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_fetch)
+        response = await dashboard_server.get_suggestion_inbox({"session": {"admin": True}})
+        assert response.status == 200
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.get_dashboard_admins({"session": {"admin": True}})
+
+    @pytest.mark.asyncio
+    async def test_suggestion_is_saved_even_when_dm_is_not_configured(self, monkeypatch):
+        import json
+        captured = {}
+
+        async def fake_insert(query, params=()):
+            captured["query"] = query
+            captured["params"] = params
+            return 12
+
+        class Request(dict):
+            async def json(self):
+                return {"text": "Add a useful thing", "guild_id": "100"}
+
+        monkeypatch.setattr(dashboard_server, "db_insert", fake_insert)
+        monkeypatch.setattr(dashboard_server, "BOT_OWNER_ID", "")
+        response = await dashboard_server.post_suggestion(
+            Request(session={"user_id": "42", "username": "viewer"})
+        )
+        payload = json.loads(response.text)
+        assert payload == {"ok": True, "id": 12, "dm_sent": False}
+        assert captured["params"] == ("42", "viewer", "100", "Add a useful thing")
 
     @pytest.mark.asyncio
     async def test_server_info_returns_live_identity_and_configuration(self, monkeypatch):

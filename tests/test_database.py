@@ -1379,3 +1379,15 @@ class TestNotificationTrackingCleanup:
         ).fetchall()
         conn.close()
         assert rows == [(100, "kept")]
+
+
+class TestDashboardAdministrationSchema:
+    def test_admin_and_suggestion_tables_exist(self, db):
+        conn = db.get_connection()
+        tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        conn.close()
+        assert {"dashboard_admins", "dashboard_suggestions", "suggestion_comments"} <= tables

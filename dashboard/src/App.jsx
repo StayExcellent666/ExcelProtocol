@@ -1384,7 +1384,7 @@ function SuggestionsTab({ guildId }) {
     if (!suggestText.trim()) return;
     setSuggestStatus("sending");
     try {
-      await apiFetch("/api/suggest", { method:"POST", body:JSON.stringify({ text:suggestText.trim() }) });
+      await apiFetch("/api/suggest", { method:"POST", body:JSON.stringify({ text:suggestText.trim(), guild_id:guildId }) });
       setSuggestStatus("sent"); setSuggestText(""); setTimeout(()=>setSuggestStatus(null),4000);
     } catch(e) { setSuggestStatus("error"); setTimeout(()=>setSuggestStatus(null),4000); }
   };
@@ -4890,6 +4890,27 @@ function HealthCheckTab() {
   );
 }
 
+function AdminManagerTab() {
+  const [admins,setAdmins]=useState([]), [userId,setUserId]=useState(""), [loading,setLoading]=useState(true), [error,setError]=useState("");
+  const load=useCallback(()=>{setLoading(true);apiFetch("/api/dev/admins").then(d=>setAdmins(d.admins||[])).catch(e=>setError(e.message)).finally(()=>setLoading(false));},[]);
+  useEffect(load,[load]);
+  const add=async()=>{if(!userId.trim())return;setError("");try{await apiFetch("/api/dev/admins",{method:"POST",body:JSON.stringify({user_id:userId.trim()})});setUserId("");load();}catch(e){setError(e.message);}};
+  const remove=async admin=>{if(!admin.removable||!window.confirm(`Remove ${admin.username||admin.user_id} as a dashboard admin?`))return;try{await apiFetch(`/api/dev/admins/${admin.user_id}`,{method:"DELETE"});load();}catch(e){setError(e.message);}};
+  return <div><PageHeader title="Dashboard Admins" subtitle="Owner-only access management; Fly secret IDs remain protected fallbacks" />
+    <div style={{...C.card,marginBottom:14}}><div style={{display:"flex",gap:9,flexWrap:"wrap"}}><CyanInput value={userId} onChange={e=>setUserId(e.target.value.replace(/\D/g,""))} placeholder="Discord user ID" maxLength={20} style={{flex:1,minWidth:240}}/><button onClick={add} disabled={!/^\d{17,20}$/.test(userId)} style={{...C.btnPrimary,opacity:/^\d{17,20}$/.test(userId)?1:.4}}>Add Admin</button></div><div style={{fontSize:11,color:"var(--text3)",marginTop:9}}>Access applies immediately if they are logged in; otherwise it applies on their next dashboard login.</div>{error&&<div style={{color:"var(--red)",fontSize:12,marginTop:10}}>⚠️ {error}</div>}</div>
+    {loading?<div style={{display:"flex",justifyContent:"center",padding:30}}><Spinner/></div>:<div style={{display:"flex",flexDirection:"column",gap:9}}>{admins.map(a=><div key={a.user_id} style={{...C.card,display:"flex",alignItems:"center",gap:12,padding:"13px 16px",flexWrap:"wrap"}}><div style={{flex:1,minWidth:200}}><div style={{color:"var(--text)",fontWeight:600}}>{a.username?`@${a.username}`:"Unknown Discord user"}</div><div style={{color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace",fontSize:10,marginTop:3}}>{a.user_id}</div></div><Badge text={a.source} color={a.removable?"var(--cyan)":"var(--yellow)"}/><button onClick={()=>remove(a)} disabled={!a.removable} style={{...C.btnDanger,opacity:a.removable?1:.4}}>{a.removable?"Remove":"Fly secret"}</button></div>)}{!admins.length&&<div style={{...C.card,color:"var(--text3)",textAlign:"center"}}>No dashboard admins configured.</div>}</div>}
+  </div>;
+}
+
+function SuggestionInboxTab() {
+  const [items,setItems]=useState([]),[loading,setLoading]=useState(true),[error,setError]=useState(""),[drafts,setDrafts]=useState({});
+  const load=useCallback(()=>{setLoading(true);apiFetch("/api/admin/suggestions").then(setItems).catch(e=>setError(e.message)).finally(()=>setLoading(false));},[]);
+  useEffect(load,[load]);
+  const comment=async id=>{const text=(drafts[id]||"").trim();if(!text)return;try{await apiFetch(`/api/admin/suggestions/${id}/comments`,{method:"POST",body:JSON.stringify({text})});setDrafts(d=>({...d,[id]:""}));load();}catch(e){setError(e.message);}};
+  const remove=async item=>{if(!window.confirm(`Delete suggestion #${item.id} and its comments?`))return;try{await apiFetch(`/api/admin/suggestions/${item.id}`,{method:"DELETE"});load();}catch(e){setError(e.message);}};
+  return <div><PageHeader title="Suggestion Inbox" subtitle="Suggestions submitted through the dashboard" action={<button onClick={load} style={C.btnSecondary}>↻ Refresh</button>}/>{error&&<div style={{...C.card,color:"var(--red)",marginBottom:12}}>⚠️ {error}</div>}{loading?<div style={{display:"flex",justifyContent:"center",padding:40}}><Spinner/></div>:<div style={{display:"flex",flexDirection:"column",gap:12}}>{items.map(item=><div key={item.id} style={{...C.card,padding:18}}><div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"flex-start",flexWrap:"wrap"}}><div><span style={{color:"var(--cyan)",fontFamily:"'Orbitron',sans-serif",fontWeight:700}}>Suggestion #{item.id}</span><div style={{color:"var(--text3)",fontSize:10,marginTop:4,fontFamily:"'JetBrains Mono',monospace"}}>@{item.username} · {item.user_id||"owner"}{item.guild_id?` · server ${item.guild_id}`:""} · {timeAgo(item.created_at)}</div></div><button onClick={()=>remove(item)} style={C.btnDanger}>Delete</button></div><div style={{color:"var(--text)",fontSize:13,lineHeight:1.55,margin:"14px 0",whiteSpace:"pre-wrap"}}>{item.text}</div>{item.comments?.map(c=><div key={c.id} style={{background:"rgba(8,11,15,.65)",borderLeft:"2px solid var(--cyan2)",padding:"9px 11px",marginBottom:7}}><div style={{color:"var(--text2)",fontSize:11,whiteSpace:"pre-wrap"}}>{c.text}</div><div style={{color:"var(--text3)",fontSize:9,marginTop:5}}>{c.author_username} · {timeAgo(c.created_at)}</div></div>)}<div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}><CyanInput value={drafts[item.id]||""} onChange={e=>setDrafts(d=>({...d,[item.id]:e.target.value}))} placeholder="Add an internal comment…" maxLength={1000} style={{flex:1,minWidth:220}}/><button onClick={()=>comment(item.id)} disabled={!drafts[item.id]?.trim()} style={{...C.btnSecondary,opacity:drafts[item.id]?.trim()?1:.4}}>Comment</button></div></div>)}{!items.length&&<div style={{...C.card,textAlign:"center",padding:50,color:"var(--text3)"}}>💡 No suggestions yet.</div>}</div>}</div>;
+}
+
 function ServerInfoTab({ guildId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -5158,11 +5179,14 @@ export default function App() {
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
     { id:"serverinfo",     icon:"/app/icons/gear.png", label:"Server Info"         },
     { id:"botstatus",      icon:"/app/icons/message.png", label:"Bot Status"       },
+    { id:"adminmanager",   icon:"/app/icons/people.png", label:"Dashboard Admins"  },
+    { id:"suggestioninbox",icon:"/app/icons/bulb.png", label:"Suggestion Inbox"    },
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
     { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
   ] : (effectivelyAdmin || isAdmin) ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
+    { id:"suggestioninbox",icon:"/app/icons/bulb.png", label:"Suggestion Inbox"   },
   ] : [];
   const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
 
@@ -5316,6 +5340,8 @@ export default function App() {
               {activeTab==="healthcheck"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <HealthCheckTab />}
               {activeTab==="serverinfo"    && effectivelyDev && <ServerInfoTab guildId={activeGuild} />}
               {activeTab==="botstatus"     && effectivelyDev && <BotStatusTab />}
+              {activeTab==="adminmanager"  && effectivelyDev && <AdminManagerTab />}
+              {activeTab==="suggestioninbox" && (effectivelyDev || effectivelyAdmin || isAdmin) && <SuggestionInboxTab />}
               {activeTab==="fortuna"       && <FortunaTab guildId={activeGuild} />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
               {activeTab==="auditlog"      && effectivelyDev && <AdminAuditLogTab />}
@@ -5355,13 +5381,7 @@ export default function App() {
             
             <NavGroup large icon="/app/icons/wizard.png" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavItem large key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
-            {effectivelyDev && <>
-              <div style={{ fontSize:9, color:"var(--cyan)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Dev Only</div>
-              <NavItem large icon="/app/icons/globe.png" label="Global Stats" active={activeTab==="globalstats"} onClick={() => { setActiveTab("globalstats"); setNavDrawerOpen(false); }} />
-              <NavItem large icon="/app/icons/gear.png" label="Server Info" active={activeTab==="serverinfo"} onClick={() => { setActiveTab("serverinfo"); setNavDrawerOpen(false); }} />
-              <NavItem large icon="/app/icons/message.png" label="Bot Status" active={activeTab==="botstatus"} onClick={() => { setActiveTab("botstatus"); setNavDrawerOpen(false); }} />
-              <NavItem large icon="/app/icons/tools.png" label="DB Tools" active={activeTab==="dbtools"} onClick={() => { setActiveTab("dbtools"); setNavDrawerOpen(false); }} />
-            </>}
+            {devTabs.length>0&&<><div style={{fontSize:9,color:effectivelyAdmin?"#f5b432":"var(--cyan)",textTransform:"uppercase",letterSpacing:1.5,padding:"10px 6px 6px",fontFamily:"'JetBrains Mono',monospace"}}>{effectivelyAdmin||isAdmin?"Admin Only":"Dev Only"}</div>{devTabs.map(t=><NavItem large key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={()=>{setActiveTab(t.id);setNavDrawerOpen(false);}}/>)}</>}
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>
             </div>
