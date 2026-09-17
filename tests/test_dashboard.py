@@ -743,6 +743,26 @@ class TestDevDashboardRoutes:
         assert '`/api/guild/${guildId}/fortuna/overlay`' in source
         assert "/api/admin/fortuna" not in source
         assert 'label:"Fortuna"' in source
+
+    def test_dashboard_navigation_uses_reorganized_sections(self):
+        from pathlib import Path
+
+        source = (Path(__file__).parent.parent / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+        assert 'label="Overview"' in source
+        assert 'label="Streaming & Twitch"' in source
+        assert 'label="Server Settings"' in source
+        assert '>Administration</div>' in source
+        assert 'label="Help & Support"' in source
+        assert 'label="Contact"' not in source
+
+    def test_established_servers_use_guarded_configuration_assistant(self):
+        from pathlib import Path
+
+        source = (Path(__file__).parent.parent / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+        assert 'serverEstablished === false && <NavItem' in source
+        assert 'id:"advancedsettings"' in source
+        assert 'Configuration Assistant' in source
+        assert 'It never deletes existing content' in source
         assert 'LIVE · ${obsSourceCount} ONLINE' in source
         assert "No plugin installation or pairing key is needed" in source
         assert "Run 15s Overlay Test" in source

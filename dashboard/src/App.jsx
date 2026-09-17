@@ -1411,7 +1411,7 @@ function SuggestionsTab({ guildId }) {
 
   return (
     <div>
-      <PageHeader title="Contact" subtitle="Suggestions & support for ExcelProtocol" />
+      <PageHeader title="Help & Support" subtitle="Suggestions and problem reports for ExcelProtocol" />
 
       {/* Suggestion card */}
       <div style={{ ...C.card, marginBottom:16, borderColor:"var(--border2)" }}>
@@ -3499,7 +3499,7 @@ function StreamEventsViewer() {
 }
 
 // ── Set Up Server Wizard ──────────────────────────────────────────────────────
-function SetupWizardTab({ guildId, isDev }) {
+function SetupWizardTab({ guildId, isDev, established=false }) {
   const TEMPLATES = [
     { id: "aesthetic",  label: "Aesthetic",  desc: "Curated channels with emoji prefixes for a polished, vibe-y feel." },
     { id: "simplistic", label: "Simplistic", desc: "Bare minimum: welcome, rules, general, live notifications, and one voice channel." },
@@ -3624,7 +3624,7 @@ function SetupWizardTab({ guildId, isDev }) {
 
   return (
     <div>
-      <PageHeader title="Set Up Server" subtitle="Walk through a guided template setup for this server" />
+      <PageHeader title={established ? "Configuration Assistant" : "Initial Setup"} subtitle={established ? "Preview and carefully apply a server template" : "Create a starter structure for this server"} />
 
       {/* Step indicator */}
       <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:24 }}>
@@ -5184,13 +5184,102 @@ function AdminAuditLogTab() {
   );
 }
 
+function DashboardOverviewTab({ guildId, guild, onNavigate, established }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    Promise.allSettled([
+      apiFetch(`/api/guild/${guildId}`),
+      apiFetch(`/api/guild/${guildId}/permission-issues`),
+      apiFetch(`/api/guild/${guildId}/twitch`),
+      apiFetch(`/api/guild/${guildId}/unresolvable-streamers`),
+    ]).then(results => {
+      if (!active) return;
+      const value = i => results[i].status === "fulfilled" ? results[i].value : null;
+      const summary = value(0) || { streamers:[], reaction_roles:[], notif_log:[] };
+      const permissionIssues = value(1) || [];
+      const twitch = value(2) || { linked:false };
+      const unresolvable = value(3) || [];
+      setData({ summary, permissionIssues, twitch, unresolvable });
+    }).finally(() => active && setLoading(false));
+    return () => { active = false; };
+  }, [guildId]);
+
+  if (loading || !data) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
+
+  const issues = [];
+  if (data.permissionIssues.length) issues.push({
+    icon:"/app/icons/shield.png", title:`${data.permissionIssues.length} channel permission issue${data.permissionIssues.length===1?"":"s"}`,
+    detail:"One or more configured channels are missing permissions ExcelProtocol needs.", target:"settings",
+  });
+  if (data.twitch.clip_enabled && data.twitch.clip_scope_status !== "granted") issues.push({
+    icon:"/app/icons/twitch.png", title:"Twitch clip permission needs attention",
+    detail:"Reconnect Twitch so the enabled !clip command can create clips.", target:"twitch",
+  });
+  if (data.unresolvable.length) issues.push({
+    icon:"/app/icons/streams.png", title:`${data.unresolvable.length} Twitch account${data.unresolvable.length===1?"":"s"} cannot be resolved`,
+    detail:"Review the affected streamer names so live notifications continue working.", target:"streamers",
+  });
+  const recent = (data.summary.notif_log || []).slice(0, 5);
+  const quickActions = [
+    ["/app/icons/streams.png", "Add Streamer", "streamers"],
+    ["/app/icons/message.png", "Chat Commands", "twitch"],
+    ["/app/icons/rewards.png", "Start Giveaway", "fortuna"],
+    ["/app/icons/reactionroles.png", "Reaction Roles", "roles"],
+  ];
+
+  return <div>
+    <PageHeader title="Overview" subtitle={`Status and recent activity for ${guild?.name || "this server"}`} />
+
+    <div style={{ ...C.card, marginBottom:16, borderColor:issues.length?"rgba(245,180,50,.45)":"rgba(57,217,138,.35)" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:issues.length?14:0 }}>
+        <span style={{ width:10, height:10, borderRadius:"50%", background:issues.length?"var(--yellow)":"var(--green)", boxShadow:`0 0 12px ${issues.length?"var(--yellow)":"var(--green)"}` }} />
+        <div>
+          <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:15, color:issues.length?"var(--yellow)":"var(--green)" }}>{issues.length?`${issues.length} issue${issues.length===1?"":"s"} need attention`:"All configured features are healthy"}</div>
+          <div style={{ fontSize:11, color:"var(--text3)", marginTop:3 }}>Only actionable problems are shown here.</div>
+        </div>
+      </div>
+      {issues.map(issue => <button key={issue.title} onClick={()=>onNavigate(issue.target)} style={{ width:"100%", display:"flex", alignItems:"center", gap:11, padding:"10px 12px", marginTop:7, borderRadius:8, border:"1px solid var(--border)", background:"rgba(8,11,15,.55)", color:"var(--text)", cursor:"pointer", textAlign:"left" }}>
+        <NavIcon icon={issue.icon} size={20}/><span style={{flex:1}}><span style={{display:"block",fontSize:12,fontWeight:700}}>{issue.title}</span><span style={{display:"block",fontSize:11,color:"var(--text3)",marginTop:2}}>{issue.detail}</span></span><span style={{color:"var(--cyan)"}}>→</span>
+      </button>)}
+    </div>
+
+    {established === false && <div style={{ ...C.card, marginBottom:16, borderColor:"rgba(0,245,212,.35)", display:"flex", alignItems:"center", justifyContent:"space-between", gap:16, flexWrap:"wrap" }}>
+      <div><div style={{fontFamily:"'Orbitron',sans-serif",fontWeight:700,color:"var(--cyan)",fontSize:14}}>New server?</div><div style={{fontSize:12,color:"var(--text3)",marginTop:4}}>Use Initial Setup to create a starter channel and role structure. Nothing is applied without a preview and confirmation.</div></div>
+      <button onClick={()=>onNavigate("setupwizard")} style={C.btnPrimary}>Start Initial Setup</button>
+    </div>}
+
+    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:10, marginBottom:16 }}>
+      {quickActions.map(([icon,label,target])=><button key={target} onClick={()=>onNavigate(target)} style={{...C.card,padding:"13px 14px",display:"flex",alignItems:"center",gap:10,color:"var(--text2)",cursor:"pointer",textAlign:"left"}}><NavIcon icon={icon} size={22}/><span style={{fontSize:12,fontWeight:700}}>{label}</span><span style={{marginLeft:"auto",color:"var(--cyan)"}}>→</span></button>)}
+    </div>
+
+    <div style={C.card}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><div style={{fontFamily:"'Orbitron',sans-serif",fontWeight:700,fontSize:14}}>Recent Notification Activity</div><button onClick={()=>onNavigate("notiflog")} style={{...C.btnSecondary,padding:"5px 10px",fontSize:10}}>View all</button></div>
+      {recent.length ? recent.map((entry,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderTop:i?"1px solid var(--border)":"none"}}><NavIcon icon="/app/icons/bell.png" size={18}/><span style={{fontSize:12,color:"var(--text2)",flex:1}}><strong>{entry.twitch_username}</strong> · {entry.event || "sent"}</span><span style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>{timeAgo(entry.timestamp)}</span></div>) : <div style={{padding:"18px 0",textAlign:"center",fontSize:12,color:"var(--text3)"}}>No notification activity in the last 30 days.</div>}
+    </div>
+  </div>;
+}
+
+function AdvancedServerSettingsTab({ onOpenAssistant }) {
+  return <div>
+    <PageHeader title="Advanced Server Settings" subtitle="Rare and potentially broad configuration actions" />
+    <div style={{...C.card,borderColor:"rgba(245,180,50,.35)"}}>
+      <div style={{display:"flex",gap:12,alignItems:"flex-start"}}><NavIcon icon="/app/icons/wizard.png" size={28}/><div style={{flex:1}}><div style={{fontFamily:"'Orbitron',sans-serif",fontWeight:700,fontSize:14,color:"var(--yellow)"}}>Configuration Assistant</div><div style={{fontSize:12,color:"var(--text3)",lineHeight:1.6,marginTop:6}}>The assistant can create roles and channels and adjust permissions. It never deletes existing content, previews changes first, and requires explicit confirmation for established servers.</div><button onClick={onOpenAssistant} style={{...C.btnSecondary,marginTop:14}}>Open Configuration Assistant</button></div></div>
+    </div>
+  </div>;
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [user, setUser] = useState(null);
   const [guilds, setGuilds] = useState([]);
   const [activeGuild, setActiveGuild] = useState(null);
-  const [activeTab, setActiveTab] = useState("settings");
+  const [activeTab, setActiveTab] = useState("overview");
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [serverEstablished, setServerEstablished] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loggedIn, setLoggedIn] = useState(false);
   const [navDrawerOpen, setNavDrawerOpen] = useState(false);
@@ -5216,11 +5305,33 @@ export default function App() {
     }).catch(()=>{ /* not logged in */ }).finally(()=>setLoading(false));
   },[]);
 
+  useEffect(() => {
+    if (!activeGuild) return;
+    let active = true;
+    Promise.allSettled([
+      apiFetch(`/api/guild/${activeGuild}`),
+      apiFetch(`/api/guild/${activeGuild}/channels`),
+      apiFetch(`/api/guild/${activeGuild}/twitch`),
+    ]).then(results => {
+      if (!active) return;
+      const summary = results[0].status === "fulfilled" ? results[0].value : {streamers:[],reaction_roles:[]};
+      const channelData = results[1].status === "fulfilled" ? results[1].value : {channels:[],voice_channels:[]};
+      const twitch = results[2].status === "fulfilled" ? results[2].value : {linked:false};
+      const channelCount = (channelData.channels || []).length + (channelData.voice_channels || []).length;
+      const selectedGuild = guilds.find(g => g.id === activeGuild);
+      setServerEstablished(
+        channelCount > 5 || Number(selectedGuild?.approximate_member_count || 0) > 10 ||
+        (summary.streamers || []).length > 0 || (summary.reaction_roles || []).length > 0 || !!twitch.linked
+      );
+    });
+    return () => { active = false; };
+  }, [activeGuild, guilds]);
+
   const logout = async () => {
     try { await apiFetch("/auth/logout", { method:"POST" }); } catch(e) {}
     setLoggedIn(false); setUser(null);
   };
-  const switchGuild = (id) => { setActiveGuild(id); localStorage.setItem("ep_last_guild",id); setDropdownOpen(false); setActiveTab("settings"); };
+  const switchGuild = (id) => { setActiveGuild(id); localStorage.setItem("ep_last_guild",id); setDropdownOpen(false); setServerEstablished(null); setActiveTab("overview"); };
 
   if (loading) return <div style={{ height:"100vh", background:"var(--bg)", display:"flex", alignItems:"center", justifyContent:"center" }}><Spinner size={32} /></div>;
   if (!loggedIn) return <LoginScreen />;
@@ -5230,14 +5341,12 @@ export default function App() {
   const isAdmin = user?.is_admin === true;
   const effectivelyDev   = isActuallyDev && viewMode === "dev";
   const effectivelyAdmin = isActuallyDev && viewMode === "admin";
-  const notificationsTabs = [
-    { id:"streamers",      icon:"/app/icons/streams.png", label:"Streams"           },
-    { id:"notiflog",       icon:"/app/icons/log.png", label:"Notification Log"  },
-  ];
-  const twitchTabs = [
-    { id:"twitch",         icon:"/app/icons/message.png", label:"Chat Commands"     },
-    { id:"rewards",        icon:"/app/icons/rewards.png", label:"Channel Rewards"   },
-    { id:"fortuna",        icon:"/app/icons/rewards.png", label:"Fortuna"          },
+  const streamingTabs = [
+    { id:"streamers",      icon:"/app/icons/streams.png", label:"Live Alerts"          },
+    { id:"notiflog",       icon:"/app/icons/log.png", label:"Notification History"  },
+    { id:"twitch",         icon:"/app/icons/message.png", label:"Chat Commands"        },
+    { id:"rewards",        icon:"/app/icons/rewards.png", label:"Channel Rewards"      },
+    { id:"fortuna",        icon:"/app/icons/rewards.png", label:"Fortuna"              },
   ];
   const communityTabs = [
     { id:"roles",          icon:"/app/icons/reactionroles.png", label:"Reaction Roles"    },
@@ -5250,27 +5359,27 @@ export default function App() {
     { id:"cleanuprules",   icon:"/app/icons/cleanup.png", label:"Cleanup Rules"     },
   ];
   const serverConfigTabs = [
-    { id:"settings",       icon:"/app/icons/gear.png", label:"General Settings"  },
-    { id:"statstab",       icon:"/app/icons/stats.png", label:"Stats Channel"     },
+    { id:"settings",       icon:"/app/icons/gear.png", label:"General"  },
+    { id:"statstab",       icon:"/app/icons/stats.png", label:"Stats Channel" },
+    ...(serverEstablished ? [{ id:"advancedsettings", icon:"/app/icons/tools.png", label:"Advanced" }] : []),
   ];
-  const setupWizardTabs = [
-    { id:"setupwizard",    icon:"/app/icons/wizard.png", label:"Set Up Server"     },
-  ];
-  const devTabs = effectivelyDev ? [
+  const operationsTabs = (effectivelyDev || effectivelyAdmin || isAdmin) ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
+  ] : [];
+  const managementTabs = effectivelyDev ? [
     { id:"serverinfo",     icon:"/app/icons/gear.png", label:"Server Info"         },
     { id:"botstatus",      icon:"/app/icons/message.png", label:"Bot Status"       },
     { id:"adminmanager",   icon:"/app/icons/people.png", label:"Dashboard Admins"  },
+  ] : [];
+  const feedbackTabs = (effectivelyDev || effectivelyAdmin || isAdmin) ? [
     { id:"suggestioninbox",icon:"/app/icons/bulb.png", label:"Suggestion Inbox"    },
+  ] : [];
+  const advancedAdminTabs = effectivelyDev ? [
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
     { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
-  ] : (effectivelyAdmin || isAdmin) ? [
-    { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
-    { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
-    { id:"suggestioninbox",icon:"/app/icons/bulb.png", label:"Suggestion Inbox"   },
   ] : [];
-  const tabs = [...notificationsTabs, ...twitchTabs, ...communityTabs, ...moderationTabs, ...serverConfigTabs, ...setupWizardTabs];
+  const hasAdminNav = operationsTabs.length + managementTabs.length + feedbackTabs.length + advancedAdminTabs.length > 0;
 
   return (
     <div style={{ height:"100vh", width:"100vw", background:"var(--bg)", color:"var(--text)", fontFamily:"'Outfit',sans-serif", display:"flex", flexDirection:"column", overflow:"hidden", position:"relative" }}>
@@ -5336,7 +5445,7 @@ export default function App() {
         <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:10 }}>
           {isActuallyDev && !isMobile && (
             <button
-              onClick={() => { setViewMode(m => m==="dev"?"admin":m==="admin"?"user":"dev"); setActiveTab("settings"); }}
+              onClick={() => { setViewMode(m => m==="dev"?"admin":m==="admin"?"user":"dev"); setActiveTab("overview"); }}
               title="Cycle view: DEV → ADMIN → USER"
               style={{ padding:"4px 10px", borderRadius:7, border:`1px solid ${viewMode==="dev" ? "rgba(245,200,66,0.4)" : viewMode==="admin" ? "rgba(245,180,50,0.4)" : "var(--border)"}`, background: viewMode==="dev" ? "rgba(245,200,66,0.1)" : viewMode==="admin" ? "rgba(245,180,50,0.1)" : "transparent", color: viewMode==="dev" ? "#f5c842" : viewMode==="admin" ? "#f5b432" : "var(--text3)", fontSize:11, cursor:"pointer", fontFamily:"'JetBrains Mono',monospace", fontWeight:600, letterSpacing:0.5 }}
             >
@@ -5356,9 +5465,15 @@ export default function App() {
             onClick={() => setNavDrawerOpen(true)}
             style={{ background:"transparent", border:"1px solid var(--border2)", borderRadius:8, color:"var(--text2)", padding:"10px 14px", cursor:"pointer", fontSize:20, lineHeight:1, minWidth:44, minHeight:44, display:"flex", alignItems:"center", justifyContent:"center" }}
           >☰</button>}
-          <UserAvatar user={user} size={28} />
-          {!isMobile && <span style={{ fontSize:13, color:"var(--text2)", fontWeight:500, fontFamily:"'Outfit',sans-serif" }}>{user?.username}</span>}
-          {!isMobile && <button onClick={logout} style={{ ...C.btnSecondary, padding:"4px 10px", fontSize:11 }}>Log out</button>}
+          {!isMobile && <div style={{position:"relative"}}>
+            <button onClick={()=>setProfileOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:7,border:"1px solid var(--border)",background:"var(--bg2)",borderRadius:20,padding:"3px 9px 3px 4px",color:"var(--text2)",cursor:"pointer"}}>
+              <UserAvatar user={user} size={28} /><span style={{fontSize:13,fontWeight:500,fontFamily:"'Outfit',sans-serif"}}>{user?.username}</span><span style={{fontSize:9,color:"var(--text3)"}}>▼</span>
+            </button>
+            {profileOpen && <div style={{position:"absolute",right:0,top:"calc(100% + 7px)",width:210,padding:6,zIndex:100,background:"linear-gradient(160deg,rgba(18,26,38,.99),rgba(11,17,26,.99))",border:"1px solid var(--border2)",borderRadius:10,boxShadow:"0 10px 30px rgba(0,0,0,.65)"}}>
+              <button onClick={()=>{setActiveTab("suggestions");setProfileOpen(false)}} style={{display:"flex",alignItems:"center",gap:9,width:"100%",padding:"9px 10px",border:"none",borderRadius:7,background:"transparent",color:"var(--text2)",cursor:"pointer",textAlign:"left"}}><NavIcon icon="/app/icons/bulb.png" size={19}/><span><span style={{display:"block",fontSize:12,fontWeight:700}}>Help &amp; Support</span><span style={{display:"block",fontSize:10,color:"var(--text3)",marginTop:2}}>Suggestions and problem reports</span></span></button>
+              <button onClick={logout} style={{display:"flex",alignItems:"center",gap:9,width:"100%",padding:"9px 10px",border:"none",borderRadius:7,background:"transparent",color:"var(--text2)",cursor:"pointer",textAlign:"left"}}><NavIcon icon="/app/icons/gear.png" size={19}/><span style={{fontSize:12,fontWeight:700}}>Log out</span></button>
+            </div>}
+          </div>}
         </div>
       </div>
 
@@ -5378,18 +5493,19 @@ export default function App() {
             </div>
           )}
           <div style={{ position:"relative", zIndex:1, fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-          <NavGroup icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
-<NavGroup icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={setActiveTab} />
-          <NavGroup icon="/app/icons/twitch.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={setActiveTab} />
+          <NavItem icon="/app/icons/stats.png" label="Overview" active={activeTab==="overview"} onClick={()=>setActiveTab("overview")} />
+          {serverEstablished === false && <NavItem icon="/app/icons/wizard.png" label="Initial Setup" active={activeTab==="setupwizard"} onClick={()=>setActiveTab("setupwizard")} />}
+          <NavGroup icon="/app/icons/twitch.png" label="Streaming & Twitch" activeTab={activeTab} tabs={streamingTabs} onSelect={setActiveTab} />
           <NavGroup icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={setActiveTab} />
           <NavGroup icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={setActiveTab} />
-          
-          <NavGroup icon="/app/icons/wizard.png" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={setActiveTab} />
-          <NavItem key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={()=>setActiveTab("suggestions")} count={null} />
-          {devTabs.length > 0 && (
+          <NavGroup icon="/app/icons/gear.png" label="Server Settings" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
+          {hasAdminNav && (
             <>
-              <div style={{ position:"relative", zIndex:1, fontSize:9, color: effectivelyAdmin ? "#f5b432" : "var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>{effectivelyAdmin ? "Admin Only" : "Dev Only"}</div>
-              {devTabs.map(t=><NavItem key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={()=>setActiveTab(t.id)} count={null} />)}
+              <div style={{ position:"relative", zIndex:1, fontSize:9, color: effectivelyAdmin ? "#f5b432" : "var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>Administration</div>
+              {operationsTabs.length>0&&<NavGroup icon="/app/icons/shield.png" label="Operations" activeTab={activeTab} tabs={operationsTabs} onSelect={setActiveTab}/>}
+              {managementTabs.length>0&&<NavGroup icon="/app/icons/people.png" label="Management" activeTab={activeTab} tabs={managementTabs} onSelect={setActiveTab}/>}
+              {feedbackTabs.length>0&&<NavGroup icon="/app/icons/bulb.png" label="Feedback" activeTab={activeTab} tabs={feedbackTabs} onSelect={setActiveTab}/>}
+              {advancedAdminTabs.length>0&&<NavGroup icon="/app/icons/tools.png" label="Advanced" activeTab={activeTab} tabs={advancedAdminTabs} onSelect={setActiveTab}/>}
             </>
           )}
           <div style={{ marginTop:"auto", padding:"0 6px 0", position:"relative", zIndex:1 }}>
@@ -5404,8 +5520,10 @@ export default function App() {
         <div className="mob-main-pad" style={{ flex:1, minWidth:0, width:0, padding:"24px 28px", overflowY:"auto" }}>
           {!activeGuild ? <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div> : (
             <>
+              {activeTab==="overview"      && <DashboardOverviewTab key={activeGuild} guildId={activeGuild} guild={guild} onNavigate={setActiveTab} established={serverEstablished} />}
               {activeTab==="settings"      && <GeneralSettingsTab  guildId={activeGuild} />}
-              {activeTab==="setupwizard"   && <SetupWizardTab      guildId={activeGuild} isDev={effectivelyDev} />}
+              {activeTab==="setupwizard"   && <SetupWizardTab      guildId={activeGuild} isDev={effectivelyDev} established={serverEstablished===true} />}
+              {activeTab==="advancedsettings" && <AdvancedServerSettingsTab onOpenAssistant={()=>setActiveTab("setupwizard")} />}
               {activeTab==="statstab"      && <ServerStatsTab      guildId={activeGuild} />}
               {activeTab==="streamers"     && <StreamersTab        guildId={activeGuild} isDev={effectivelyDev} />}
               {activeTab==="roles"         && <ReactionRolesTab    guildId={activeGuild} />}
@@ -5432,7 +5550,7 @@ export default function App() {
         </div>
       </div>
 
-      {dropdownOpen && <div onClick={()=>setDropdownOpen(false)} style={{ position:"fixed", inset:0, zIndex:50 }} />}
+      {(dropdownOpen || profileOpen) && <div onClick={()=>{setDropdownOpen(false);setProfileOpen(false)}} style={{ position:"fixed", inset:0, zIndex:50 }} />}
 
       {/* Mobile nav drawer */}
       {navDrawerOpen && (
@@ -5455,16 +5573,19 @@ export default function App() {
               </div>
             )}
             <div style={{ fontSize:9, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1.5, padding:"0 6px 6px", fontFamily:"'JetBrains Mono',monospace" }}>Navigation</div>
-            <NavGroup large icon="/app/icons/gear.png" label="Server Config" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-<NavGroup large icon="/app/icons/bell.png" label="Notifications" activeTab={activeTab} tabs={notificationsTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavGroup large icon="/app/icons/twitch.png" label="Twitch" activeTab={activeTab} tabs={twitchTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavItem large icon="/app/icons/stats.png" label="Overview" active={activeTab==="overview"} onClick={()=>{setActiveTab("overview");setNavDrawerOpen(false)}} />
+            {serverEstablished === false && <NavItem large icon="/app/icons/wizard.png" label="Initial Setup" active={activeTab==="setupwizard"} onClick={()=>{setActiveTab("setupwizard");setNavDrawerOpen(false)}} />}
+            <NavGroup large icon="/app/icons/twitch.png" label="Streaming & Twitch" activeTab={activeTab} tabs={streamingTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup large icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup large icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            
-            <NavGroup large icon="/app/icons/wizard.png" label="Setup Wizard" activeTab={activeTab} tabs={setupWizardTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
-            <NavItem large key="suggestions" icon="/app/icons/bulb.png" label="Contact" active={activeTab==="suggestions"} onClick={() => { setActiveTab("suggestions"); setNavDrawerOpen(false); }} count={null} />
-            {devTabs.length>0&&<><div style={{fontSize:9,color:effectivelyAdmin?"#f5b432":"var(--cyan)",textTransform:"uppercase",letterSpacing:1.5,padding:"10px 6px 6px",fontFamily:"'JetBrains Mono',monospace"}}>{effectivelyAdmin||isAdmin?"Admin Only":"Dev Only"}</div>{devTabs.map(t=><NavItem large key={t.id} icon={t.icon} label={t.label} active={activeTab===t.id} onClick={()=>{setActiveTab(t.id);setNavDrawerOpen(false);}}/>)}</>}
+            <NavGroup large icon="/app/icons/gear.png" label="Server Settings" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            {hasAdminNav&&<><div style={{fontSize:9,color:effectivelyAdmin?"#f5b432":"var(--cyan)",textTransform:"uppercase",letterSpacing:1.5,padding:"10px 6px 6px",fontFamily:"'JetBrains Mono',monospace"}}>Administration</div>
+              {operationsTabs.length>0&&<NavGroup large icon="/app/icons/shield.png" label="Operations" activeTab={activeTab} tabs={operationsTabs} onSelect={(id)=>{setActiveTab(id);setNavDrawerOpen(false)}}/>}
+              {managementTabs.length>0&&<NavGroup large icon="/app/icons/people.png" label="Management" activeTab={activeTab} tabs={managementTabs} onSelect={(id)=>{setActiveTab(id);setNavDrawerOpen(false)}}/>}
+              {feedbackTabs.length>0&&<NavGroup large icon="/app/icons/bulb.png" label="Feedback" activeTab={activeTab} tabs={feedbackTabs} onSelect={(id)=>{setActiveTab(id);setNavDrawerOpen(false)}}/>}
+              {advancedAdminTabs.length>0&&<NavGroup large icon="/app/icons/tools.png" label="Advanced" activeTab={activeTab} tabs={advancedAdminTabs} onSelect={(id)=>{setActiveTab(id);setNavDrawerOpen(false)}}/>}</>}
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
+              <NavItem large icon="/app/icons/bulb.png" label="Help & Support" active={activeTab==="suggestions"} onClick={()=>{setActiveTab("suggestions");setNavDrawerOpen(false)}} />
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>
             </div>
           </div>
