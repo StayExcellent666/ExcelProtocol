@@ -752,7 +752,7 @@ class TestDevDashboardRoutes:
         assert 'label="Streaming & Twitch"' in source
         assert 'label="Server Settings"' in source
         assert '>Administration</div>' in source
-        assert 'label="Help & Support"' in source
+        assert source.count('label="Suggestions & Support"') == 2
         assert 'label="Contact"' not in source
 
     def test_established_servers_use_guarded_configuration_assistant(self):

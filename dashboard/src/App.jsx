@@ -1411,7 +1411,7 @@ function SuggestionsTab({ guildId }) {
 
   return (
     <div>
-      <PageHeader title="Help & Support" subtitle="Suggestions and problem reports for ExcelProtocol" />
+      <PageHeader title="Suggestions & Support" subtitle="Share ideas or report a problem with ExcelProtocol" />
 
       {/* Suggestion card */}
       <div style={{ ...C.card, marginBottom:16, borderColor:"var(--border2)" }}>
@@ -5278,7 +5278,6 @@ export default function App() {
   const [activeGuild, setActiveGuild] = useState(null);
   const [activeTab, setActiveTab] = useState("overview");
   const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [profileOpen, setProfileOpen] = useState(false);
   const [serverEstablished, setServerEstablished] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loggedIn, setLoggedIn] = useState(false);
@@ -5465,15 +5464,9 @@ export default function App() {
             onClick={() => setNavDrawerOpen(true)}
             style={{ background:"transparent", border:"1px solid var(--border2)", borderRadius:8, color:"var(--text2)", padding:"10px 14px", cursor:"pointer", fontSize:20, lineHeight:1, minWidth:44, minHeight:44, display:"flex", alignItems:"center", justifyContent:"center" }}
           >☰</button>}
-          {!isMobile && <div style={{position:"relative"}}>
-            <button onClick={()=>setProfileOpen(o=>!o)} style={{display:"flex",alignItems:"center",gap:7,border:"1px solid var(--border)",background:"var(--bg2)",borderRadius:20,padding:"3px 9px 3px 4px",color:"var(--text2)",cursor:"pointer"}}>
-              <UserAvatar user={user} size={28} /><span style={{fontSize:13,fontWeight:500,fontFamily:"'Outfit',sans-serif"}}>{user?.username}</span><span style={{fontSize:9,color:"var(--text3)"}}>▼</span>
-            </button>
-            {profileOpen && <div style={{position:"absolute",right:0,top:"calc(100% + 7px)",width:210,padding:6,zIndex:100,background:"linear-gradient(160deg,rgba(18,26,38,.99),rgba(11,17,26,.99))",border:"1px solid var(--border2)",borderRadius:10,boxShadow:"0 10px 30px rgba(0,0,0,.65)"}}>
-              <button onClick={()=>{setActiveTab("suggestions");setProfileOpen(false)}} style={{display:"flex",alignItems:"center",gap:9,width:"100%",padding:"9px 10px",border:"none",borderRadius:7,background:"transparent",color:"var(--text2)",cursor:"pointer",textAlign:"left"}}><NavIcon icon="/app/icons/bulb.png" size={19}/><span><span style={{display:"block",fontSize:12,fontWeight:700}}>Help &amp; Support</span><span style={{display:"block",fontSize:10,color:"var(--text3)",marginTop:2}}>Suggestions and problem reports</span></span></button>
-              <button onClick={logout} style={{display:"flex",alignItems:"center",gap:9,width:"100%",padding:"9px 10px",border:"none",borderRadius:7,background:"transparent",color:"var(--text2)",cursor:"pointer",textAlign:"left"}}><NavIcon icon="/app/icons/gear.png" size={19}/><span style={{fontSize:12,fontWeight:700}}>Log out</span></button>
-            </div>}
-          </div>}
+          {!isMobile && <UserAvatar user={user} size={28} />}
+          {!isMobile && <span style={{ fontSize:13, color:"var(--text2)", fontWeight:500, fontFamily:"'Outfit',sans-serif" }}>{user?.username}</span>}
+          {!isMobile && <button onClick={logout} style={{ ...C.btnSecondary, padding:"4px 10px", fontSize:11 }}>Log out</button>}
         </div>
       </div>
 
@@ -5499,6 +5492,7 @@ export default function App() {
           <NavGroup icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={setActiveTab} />
           <NavGroup icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={setActiveTab} />
           <NavGroup icon="/app/icons/gear.png" label="Server Settings" activeTab={activeTab} tabs={serverConfigTabs} onSelect={setActiveTab} />
+          <NavItem icon="/app/icons/bulb.png" label="Suggestions & Support" active={activeTab==="suggestions"} onClick={()=>setActiveTab("suggestions")} />
           {hasAdminNav && (
             <>
               <div style={{ position:"relative", zIndex:1, fontSize:9, color: effectivelyAdmin ? "#f5b432" : "var(--yellow)", textTransform:"uppercase", letterSpacing:1.5, padding:"10px 6px 4px", fontFamily:"'JetBrains Mono',monospace", opacity:0.7 }}>Administration</div>
@@ -5550,7 +5544,7 @@ export default function App() {
         </div>
       </div>
 
-      {(dropdownOpen || profileOpen) && <div onClick={()=>{setDropdownOpen(false);setProfileOpen(false)}} style={{ position:"fixed", inset:0, zIndex:50 }} />}
+      {dropdownOpen && <div onClick={()=>setDropdownOpen(false)} style={{ position:"fixed", inset:0, zIndex:50 }} />}
 
       {/* Mobile nav drawer */}
       {navDrawerOpen && (
@@ -5579,13 +5573,13 @@ export default function App() {
             <NavGroup large icon="/app/icons/people.png" label="Community" activeTab={activeTab} tabs={communityTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup large icon="/app/icons/shield.png" label="Moderation" activeTab={activeTab} tabs={moderationTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
             <NavGroup large icon="/app/icons/gear.png" label="Server Settings" activeTab={activeTab} tabs={serverConfigTabs} onSelect={(id) => { setActiveTab(id); setNavDrawerOpen(false); }} />
+            <NavItem large icon="/app/icons/bulb.png" label="Suggestions & Support" active={activeTab==="suggestions"} onClick={()=>{setActiveTab("suggestions");setNavDrawerOpen(false)}} />
             {hasAdminNav&&<><div style={{fontSize:9,color:effectivelyAdmin?"#f5b432":"var(--cyan)",textTransform:"uppercase",letterSpacing:1.5,padding:"10px 6px 6px",fontFamily:"'JetBrains Mono',monospace"}}>Administration</div>
               {operationsTabs.length>0&&<NavGroup large icon="/app/icons/shield.png" label="Operations" activeTab={activeTab} tabs={operationsTabs} onSelect={(id)=>{setActiveTab(id);setNavDrawerOpen(false)}}/>}
               {managementTabs.length>0&&<NavGroup large icon="/app/icons/people.png" label="Management" activeTab={activeTab} tabs={managementTabs} onSelect={(id)=>{setActiveTab(id);setNavDrawerOpen(false)}}/>}
               {feedbackTabs.length>0&&<NavGroup large icon="/app/icons/bulb.png" label="Feedback" activeTab={activeTab} tabs={feedbackTabs} onSelect={(id)=>{setActiveTab(id);setNavDrawerOpen(false)}}/>}
               {advancedAdminTabs.length>0&&<NavGroup large icon="/app/icons/tools.png" label="Advanced" activeTab={activeTab} tabs={advancedAdminTabs} onSelect={(id)=>{setActiveTab(id);setNavDrawerOpen(false)}}/>}</>}
             <div style={{ marginTop:"auto", paddingTop:12, borderTop:"1px solid var(--border)" }}>
-              <NavItem large icon="/app/icons/bulb.png" label="Help & Support" active={activeTab==="suggestions"} onClick={()=>{setActiveTab("suggestions");setNavDrawerOpen(false)}} />
               <button onClick={logout} style={{ ...C.btnSecondary, width:"100%", justifyContent:"center" }}>Log out</button>
             </div>
           </div>
