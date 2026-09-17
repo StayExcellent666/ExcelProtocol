@@ -204,11 +204,24 @@ class TwitchChatBot(commands.Bot):
                 await message.channel.send(f"{channel_name} is not currently live.")
             return True
 
+        if command_name == "!clip":
+            config = self.db.get_clip_config(channel_name)
+            if not config:
+                return False
+            if not await self._check_cooldown(
+                channel_name, "!clip", int(config.get("cooldown", 60))
+            ):
+                return True
+            await self._create_clip(message, config)
+            return True
+
         if command_name == "!commands":
             if not await self._check_cooldown(channel_name, "!commands", 60):
                 return True
             custom_cmds = self.db.get_twitch_commands(channel_name)
             builtin = "!uptime !game !title !viewers !so !commands"
+            if self.db.get_clip_config(channel_name):
+                builtin += " !clip"
             if self.db.is_play_enabled(channel_name):
                 builtin += " !play !stop !skip"
             if custom_cmds:
@@ -219,6 +232,44 @@ class TwitchChatBot(commands.Bot):
             return True
 
         return False
+
+    async def _create_clip(self, message, config: dict):
+        """Create a Twitch clip with the connected broadcaster's OAuth token."""
+        duration = max(5, min(60, int(config.get("duration", 45))))
+        try:
+            session = await self.twitch_api.get_session()
+            async with session.post(
+                "https://api.twitch.tv/helix/clips",
+                headers={
+                    "Authorization": f"Bearer {config['access_token']}",
+                    "Client-Id": TWITCH_CLIENT_ID,
+                },
+                params={
+                    "broadcaster_id": config["broadcaster_id"],
+                    "duration": duration,
+                },
+            ) as resp:
+                payload = await resp.json(content_type=None)
+                if resp.status != 202:
+                    detail = payload.get("message", f"HTTP {resp.status}") if isinstance(payload, dict) else f"HTTP {resp.status}"
+                    logger.warning("!clip failed for %s: %s", message.channel.name, detail)
+                    if resp.status in (401, 403):
+                        await message.channel.send("❌ Clip permission is missing. A server manager needs to reconnect Twitch in the ExcelProtocol dashboard.")
+                    else:
+                        await message.channel.send("❌ Twitch could not create that clip right now.")
+                    return
+
+            clips = payload.get("data", []) if isinstance(payload, dict) else []
+            clip_id = clips[0].get("id") if clips else None
+            if not clip_id:
+                raise RuntimeError("Twitch returned no clip ID")
+            await message.channel.send(
+                f"🎬 @{message.author.name} clipped the last {duration} seconds: "
+                f"https://clips.twitch.tv/{clip_id}"
+            )
+        except Exception as e:
+            logger.error("!clip creation failed for %s: %s", message.channel.name, e, exc_info=True)
+            await message.channel.send("❌ Twitch could not create that clip right now.")
 
     async def _do_shoutout(self, channel, target_login: str):
         try:

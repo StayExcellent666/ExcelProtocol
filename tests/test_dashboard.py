@@ -1334,3 +1334,68 @@ class TestOperationalSafetyRegressions:
         assert fake._last_pruned_subscriptions == 2
         assert fake._eventsub_sync_stats["actual"] == 2
         assert fake._eventsub_sync_stats["expected"] == 2
+class TestTwitchClipCommand:
+    @pytest.mark.asyncio
+    async def test_clip_uses_saved_cooldown_and_config(self):
+        from twitch_bot import TwitchChatBot
+
+        config = {
+            "guild_id": 1, "duration": 45, "cooldown": 60,
+            "broadcaster_id": "22", "access_token": "token",
+        }
+        calls = []
+
+        class FakeDb:
+            def get_clip_config(self, channel):
+                assert channel == "streamer"
+                return config
+
+        class FakeAuthor:
+            is_mod = False
+            name = "viewer"
+
+        class FakeMessage:
+            author = FakeAuthor()
+
+        class FakeBot:
+            db = FakeDb()
+
+            async def _check_cooldown(self, channel, command, seconds):
+                calls.append((channel, command, seconds))
+                return True
+
+            async def _create_clip(self, message, received_config):
+                calls.append((message, received_config))
+
+        message = FakeMessage()
+        handled = await TwitchChatBot._handle_builtin(
+            FakeBot(), message, "!clip", "", "streamer"
+        )
+
+        assert handled is True
+        assert calls == [
+            ("streamer", "!clip", 60),
+            (message, config),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_disabled_clip_falls_through_to_custom_commands(self):
+        from twitch_bot import TwitchChatBot
+
+        class FakeDb:
+            def get_clip_config(self, _channel):
+                return None
+
+        class FakeAuthor:
+            is_mod = False
+            name = "viewer"
+
+        class FakeMessage:
+            author = FakeAuthor()
+
+        class FakeBot:
+            db = FakeDb()
+
+        assert await TwitchChatBot._handle_builtin(
+            FakeBot(), FakeMessage(), "!clip", "", "streamer"
+        ) is False

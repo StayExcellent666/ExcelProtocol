@@ -25,6 +25,17 @@ class TestSchema:
         conn.close()
         assert "ended_at" in cols
 
+    def test_twitch_channels_has_clip_defaults(self, db):
+        conn = db.get_connection()
+        cols = {
+            r[1]: r[4]
+            for r in conn.execute("PRAGMA table_info(twitch_channels)").fetchall()
+        }
+        conn.close()
+        assert cols["clip_enabled"] == "0"
+        assert cols["clip_duration"] == "45"
+        assert cols["clip_cooldown"] == "60"
+
     def test_bot_status_rotation_round_trip(self, db):
         assert db.get_bot_statuses() == []
         statuses = [
@@ -1398,3 +1409,25 @@ class TestDashboardAdministrationSchema:
         assert db.get_permission_dm_muted(100) is True
         db.set_permission_dm_muted(100, False)
         assert db.get_permission_dm_muted(100) is False
+class TestTwitchClipSettings:
+    def test_enabled_clip_config_round_trip(self, db):
+        db.set_twitch_channel(123, "Streamer")
+        db.set_broadcaster_token(
+            123, "456", "streamer", "access-token", "refresh-token",
+            "2099-01-01T00:00:00+00:00",
+        )
+
+        assert db.get_clip_config("streamer") is None
+        db.set_clip_settings(123, True, 45, 60)
+
+        channel = db.get_twitch_channel(123)
+        assert channel["clip_enabled"] is True
+        assert channel["clip_duration"] == 45
+        assert channel["clip_cooldown"] == 60
+        assert db.get_clip_config("STREAMER") == {
+            "guild_id": 123,
+            "duration": 45,
+            "cooldown": 60,
+            "broadcaster_id": "456",
+            "access_token": "access-token",
+        }

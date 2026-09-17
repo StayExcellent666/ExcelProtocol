@@ -2458,6 +2458,8 @@ function TwitchTab({ guildId, isDev }) {
   const [form, setForm] = useState({ command_name:"", response:"", permission:"everyone", cooldown_seconds:0 });
   const [saving, setSaving]       = useState(false);
   const [savingPlay, setSavingPlay] = useState(false);
+  const [savingClip, setSavingClip] = useState(false);
+  const [clipForm, setClipForm] = useState({ enabled:false, duration:45, cooldown:60 });
   const [err, setErr]             = useState(null);
 
   const PERMS = ["everyone","subscriber","mod","broadcaster"];
@@ -2467,6 +2469,7 @@ function TwitchTab({ guildId, isDev }) {
     { command_name:"!title",    description:"Current stream title",               permission:"everyone", cooldown_seconds:30 },
     { command_name:"!viewers",  description:"Current viewer count",               permission:"everyone", cooldown_seconds:60 },
     { command_name:"!so",       description:"Shoutout another streamer",          permission:"mod",      cooldown_seconds:0  },
+    { command_name:"!clip",     description:"Create and share a clip of the latest stream moment", permission:"everyone", cooldown_seconds:info?.clip_cooldown ?? 60 },
     { command_name:"!commands", description:"Lists all available commands",       permission:"everyone", cooldown_seconds:60 },
   ];
 
@@ -2476,6 +2479,11 @@ function TwitchTab({ guildId, isDev }) {
       const data = await apiFetch(`/api/guild/${guildId}/twitch`);
       setInfo(data);
       setNewLimit(data.limit || 50);
+      setClipForm({
+        enabled: !!data.clip_enabled,
+        duration: data.clip_duration || 45,
+        cooldown: data.clip_cooldown || 60,
+      });
     } catch(e) { console.error(e); }
     setLoading(false);
   }, [guildId]);
@@ -2519,6 +2527,22 @@ function TwitchTab({ guildId, isDev }) {
       setEditLimit(false);
     } catch(e) { alert("Failed: " + e.message); }
     setSavingLimit(false);
+  };
+
+  const saveClipSettings = async () => {
+    setSavingClip(true);
+    try {
+      const saved = await apiFetch(`/api/guild/${guildId}/twitch/clip-settings`, {
+        method:"POST",
+        body: JSON.stringify({
+          enabled: clipForm.enabled,
+          duration: Number(clipForm.duration),
+          cooldown: Number(clipForm.cooldown),
+        }),
+      });
+      setInfo(p => ({ ...p, ...saved }));
+    } catch(e) { alert("Failed: " + e.message); }
+    setSavingClip(false);
   };
 
   if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
@@ -2628,6 +2652,57 @@ function TwitchTab({ guildId, isDev }) {
             <div style={{ position:"absolute", top:3, left: info.play_enabled ? 22 : 3, width:18, height:18,
               borderRadius:"50%", background:"#fff", transition:"left 0.2s" }} />
           </button>
+        </div>
+      </div>
+
+      {/* !clip command settings */}
+      <div style={{ ...C.card, marginBottom:16 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:16, flexWrap:"wrap" }}>
+          <div style={{ flex:1, minWidth:240 }}>
+            <div style={{ fontWeight:800, fontSize:14, fontFamily:"'Orbitron',sans-serif", color:"var(--text2)", marginBottom:4 }}>
+              !clip Command
+            </div>
+            <div style={{ fontSize:12, color:"var(--text3)", fontFamily:"'Outfit',sans-serif" }}>
+              Viewers can type <code style={{ color:"var(--cyan)", fontFamily:"'JetBrains Mono',monospace" }}>!clip</code> to create and share the latest stream moment.
+            </div>
+          </div>
+          <button
+            onClick={()=>setClipForm(p=>({...p, enabled:!p.enabled}))}
+            disabled={info.clip_scope_status!=="granted" && !clipForm.enabled}
+            aria-label="Enable clip command"
+            style={{ width:44, height:24, borderRadius:12, border:"none", cursor:info.clip_scope_status==="granted"||clipForm.enabled?"pointer":"not-allowed",
+              background:clipForm.enabled?"var(--cyan)":"var(--border2)", position:"relative", transition:"background 0.2s", flexShrink:0,
+              boxShadow:clipForm.enabled?"0 0 10px rgba(0,245,212,0.4)":"none", opacity:info.clip_scope_status==="granted"||clipForm.enabled?1:0.45 }}>
+            <div style={{ position:"absolute", top:3, left:clipForm.enabled?22:3, width:18, height:18, borderRadius:"50%", background:"#fff", transition:"left 0.2s" }} />
+          </button>
+        </div>
+
+        {info.clip_scope_status !== "granted" && (
+          <div style={{ marginTop:14, padding:"10px 12px", borderRadius:7, border:"1px solid rgba(255,204,51,0.35)", background:"rgba(255,204,51,0.07)", color:"var(--yellow)", fontSize:12 }}>
+            {info.clip_scope_status === "unknown"
+              ? "Twitch clip permission could not be checked right now. Refresh this page to try again."
+              : "Reconnect Twitch once to grant clip creation permission."}
+            {info.clip_scope_status !== "unknown" && <a href={`/auth/twitch/login/${guildId}`} style={{ ...C.btnSecondary, display:"inline-flex", textDecoration:"none", marginLeft:10, padding:"5px 10px", fontSize:10 }}>Reconnect Twitch</a>}
+          </div>
+        )}
+
+        <div style={{ display:"flex", alignItems:"flex-end", gap:12, flexWrap:"wrap", marginTop:14 }}>
+          <Field label="Clip Length">
+            <CyanSelect value={clipForm.duration} onChange={e=>setClipForm(p=>({...p, duration:Number(e.target.value)}))}>
+              {[15,30,45,60].map(seconds=><option key={seconds} value={seconds}>{seconds} seconds</option>)}
+            </CyanSelect>
+          </Field>
+          <Field label="Cooldown (seconds)">
+            <CyanInput type="number" min={15} max={3600} value={clipForm.cooldown}
+              onChange={e=>setClipForm(p=>({...p, cooldown:e.target.value}))} style={{ width:150 }} />
+          </Field>
+          <button onClick={saveClipSettings} disabled={savingClip || (clipForm.enabled && info.clip_scope_status!=="granted")}
+            style={{ ...C.btnPrimary, marginBottom:16, opacity:savingClip||(clipForm.enabled&&info.clip_scope_status!=="granted")?0.45:1 }}>
+            {savingClip?"Saving...":"Save Clip Settings"}
+          </button>
+        </div>
+        <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+          Default: the last 45 seconds · one clip per channel every 60 seconds
         </div>
       </div>
 

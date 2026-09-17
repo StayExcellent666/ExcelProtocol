@@ -472,6 +472,20 @@ class Database:
         except Exception:
             pass  # Column already exists
 
+        # Twitch clip command settings. Disabled by default so adding the
+        # feature never changes chat behaviour until a server enables it.
+        for column_sql, column_name in (
+            ('ALTER TABLE twitch_channels ADD COLUMN clip_enabled INTEGER NOT NULL DEFAULT 0', 'clip_enabled'),
+            ('ALTER TABLE twitch_channels ADD COLUMN clip_duration INTEGER NOT NULL DEFAULT 45', 'clip_duration'),
+            ('ALTER TABLE twitch_channels ADD COLUMN clip_cooldown INTEGER NOT NULL DEFAULT 60', 'clip_cooldown'),
+        ):
+            try:
+                cursor.execute(column_sql)
+                conn.commit()
+                logger.info("Migration: added %s to twitch_channels", column_name)
+            except Exception:
+                pass  # Column already exists
+
         # Custom chat commands per Twitch channel
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS twitch_commands (
@@ -2652,13 +2666,19 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            'SELECT guild_id, twitch_channel, play_enabled FROM twitch_channels WHERE guild_id = ?',
+            '''SELECT guild_id, twitch_channel, play_enabled,
+                      clip_enabled, clip_duration, clip_cooldown
+               FROM twitch_channels WHERE guild_id = ?''',
             (guild_id,)
         )
         row = cursor.fetchone()
         conn.close()
         if row:
-            return {'guild_id': row[0], 'twitch_channel': row[1], 'play_enabled': bool(row[2])}
+            return {
+                'guild_id': row[0], 'twitch_channel': row[1],
+                'play_enabled': bool(row[2]), 'clip_enabled': bool(row[3]),
+                'clip_duration': row[4], 'clip_cooldown': row[5],
+            }
         return None
 
     def set_play_enabled(self, guild_id: int, enabled: bool):
@@ -2683,6 +2703,39 @@ class Database:
         row = cursor.fetchone()
         conn.close()
         return bool(row[0]) if row else False
+
+    def set_clip_settings(self, guild_id: int, enabled: bool, duration: int, cooldown: int):
+        """Persist !clip settings for one Discord server's Twitch channel."""
+        conn = self.get_connection()
+        conn.execute(
+            '''UPDATE twitch_channels
+               SET clip_enabled = ?, clip_duration = ?, clip_cooldown = ?
+               WHERE guild_id = ?''',
+            (1 if enabled else 0, duration, cooldown, guild_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_clip_config(self, twitch_channel: str) -> Optional[Dict]:
+        """Return an enabled clip configuration for a linked Twitch channel."""
+        conn = self.get_connection()
+        row = conn.execute(
+            '''SELECT tc.guild_id, tc.clip_duration, tc.clip_cooldown,
+                      bt.twitch_user_id, bt.access_token
+               FROM twitch_channels tc
+               JOIN broadcaster_tokens bt ON bt.guild_id = tc.guild_id
+               WHERE tc.twitch_channel = ? AND tc.clip_enabled = 1
+               ORDER BY tc.guild_id
+               LIMIT 1''',
+            (twitch_channel.lower(),),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            'guild_id': row[0], 'duration': row[1], 'cooldown': row[2],
+            'broadcaster_id': row[3], 'access_token': row[4],
+        }
 
     def remove_twitch_channel(self, guild_id: int):
         """Unlink a Discord guild from its Twitch channel"""

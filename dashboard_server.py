@@ -1825,7 +1825,7 @@ async def get_twitch_info(request):
         None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id))
     )
     broadcaster_rows = await db_fetch(
-        "SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,)
+        "SELECT twitch_login, access_token FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,)
     )
     if broadcaster_rows:
         twitch_login = str(broadcaster_rows[0]["twitch_login"]).lower()
@@ -1848,6 +1848,29 @@ async def get_twitch_info(request):
     channel = row["twitch_channel"]
     commands = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_commands(channel))
     limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_limit(int(guild_id)))
+
+    # Validate the broadcaster token when this settings page is opened. Stored
+    # tokens created before clips were introduced do not gain clips:edit until
+    # the broadcaster reconnects Twitch.
+    clip_scope_status = "missing"
+    if broadcaster_rows:
+        try:
+            sess = get_http_session()
+            async with sess.get(
+                "https://id.twitch.tv/oauth2/validate",
+                headers={"Authorization": f"OAuth {broadcaster_rows[0]['access_token']}"},
+            ) as scope_resp:
+                scope_data = await scope_resp.json(content_type=None)
+                if scope_resp.status == 200:
+                    clip_scope_status = (
+                        "granted" if "clips:edit" in set(scope_data.get("scopes", []))
+                        else "missing"
+                    )
+                else:
+                    clip_scope_status = "invalid"
+        except Exception as e:
+            clip_scope_status = "unknown"
+            logger.warning("Could not validate Twitch clip scope for guild %s: %s", guild_id, e)
 
     # Check if bot is modded in the channel
     bot_is_modded = False
@@ -1886,6 +1909,10 @@ async def get_twitch_info(request):
         "limit": limit,
         "bot_is_modded": bot_is_modded,
         "play_enabled": row.get("play_enabled", False) if row else False,
+        "clip_enabled": row.get("clip_enabled", False) if row else False,
+        "clip_duration": row.get("clip_duration", 45) if row else 45,
+        "clip_cooldown": row.get("clip_cooldown", 60) if row else 60,
+        "clip_scope_status": clip_scope_status,
         "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100,
     })
 
@@ -1900,6 +1927,51 @@ async def set_play_enabled(request):
     else:
         await db_execute("UPDATE twitch_channels SET play_enabled = ? WHERE guild_id = ?", (int(enabled), guild_id))
     return web.json_response({"ok": True, "play_enabled": enabled})
+
+
+async def set_clip_settings(request):
+    """Save !clip duration/cooldown and enable it only with valid OAuth scope."""
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    enabled = bool(body.get("enabled", False))
+    try:
+        duration = int(body.get("duration", 45))
+        cooldown = int(body.get("cooldown", 60))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="Duration and cooldown must be numbers")
+    if duration not in (15, 30, 45, 60):
+        raise web.HTTPBadRequest(reason="Clip duration must be 15, 30, 45, or 60 seconds")
+    if not 15 <= cooldown <= 3600:
+        raise web.HTTPBadRequest(reason="Clip cooldown must be between 15 and 3600 seconds")
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="The bot is not ready")
+
+    import asyncio as _asyncio
+    token = await _asyncio.get_event_loop().run_in_executor(
+        None, lambda: _bot_ref.db.get_broadcaster_token(int(guild_id))
+    )
+    if not token:
+        raise web.HTTPBadRequest(reason="Connect this server's Twitch account first")
+    if enabled:
+        sess = get_http_session()
+        async with sess.get(
+            "https://id.twitch.tv/oauth2/validate",
+            headers={"Authorization": f"OAuth {token['access_token']}"},
+        ) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status != 200 or "clips:edit" not in set(data.get("scopes", [])):
+                raise web.HTTPForbidden(
+                    reason="Reconnect Twitch to grant clip creation permission before enabling !clip"
+                )
+
+    await _asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: _bot_ref.db.set_clip_settings(int(guild_id), enabled, duration, cooldown),
+    )
+    return web.json_response({
+        "ok": True, "clip_enabled": enabled,
+        "clip_duration": duration, "clip_cooldown": cooldown,
+    })
 
 
 async def set_overlay_volume(request):
@@ -2075,7 +2147,7 @@ async def twitch_broadcaster_login(request):
         "client_id":    TWITCH_CLIENT_ID,
         "redirect_uri": TWITCH_REDIRECT_URI,
         "response_type": "code",
-        "scope":        "channel:read:redemptions channel:manage:redemptions moderator:manage:chat_messages user:write:chat",
+        "scope":        "channel:read:redemptions channel:manage:redemptions moderator:manage:chat_messages user:write:chat clips:edit",
         "state":        state,
         "force_verify": "true",
     })
@@ -6422,6 +6494,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get   ("/overlay/{guild_id}/ws",                         overlay_ws)
     app.router.add_get   ("/api/guild/{guild_id}/twitch",                    get_twitch_info)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/play-enabled",       set_play_enabled)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/clip-settings",      set_clip_settings)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/overlay-volume",      set_overlay_volume)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/play-test",           play_test_overlay)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/hotkey-test",          hotkey_test)
