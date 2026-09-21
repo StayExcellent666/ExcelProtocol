@@ -861,6 +861,9 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
   const [savingLimit, setSavingLimit] = useState(false);
   const [search, setSearch]       = useState("");
   const [sortBy, setSortBy]       = useState("added");
+  const [sortOpen, setSortOpen]   = useState(false);
+  const [showActiveHelp, setShowActiveHelp] = useState(false);
+  const sortMenuRef = useRef(null);
   const [unresolvable, setUnresolvable] = useState(new Set());
 
   const load = useCallback(async () => {
@@ -882,6 +885,14 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
   }, [guildId]);
 
   useEffect(()=>{ load(); },[load]);
+  useEffect(() => {
+    if (!sortOpen) return;
+    const closeOnOutsideClick = event => {
+      if (sortMenuRef.current && !sortMenuRef.current.contains(event.target)) setSortOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [sortOpen]);
 
   const remove = async username => {
     if (!confirm(`Remove ${username}?`)) return;
@@ -927,6 +938,12 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
     }
     return Number(a.id) - Number(b.id);
   });
+  const sortLabels = { added:"Order added", alphabetical:"Alphabetical", active:"Most active" };
+  const chooseSort = value => {
+    setSortBy(value);
+    setSortOpen(false);
+    setShowActiveHelp(false);
+  };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%" }}>
@@ -961,17 +978,49 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
               onFocus={e=>e.target.style.borderColor="var(--cyan)"}
               onBlur={e=>e.target.style.borderColor="var(--border)"}
             />
-            <select
-              value={sortBy}
-              onChange={e=>setSortBy(e.target.value)}
-              className="mob-full"
-              aria-label="Sort tracked streamers"
-              style={{ padding:"6px 10px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg2)", color:"var(--text)", fontSize:12, fontFamily:"'Outfit',sans-serif", outline:"none" }}
-            >
-              <option value="added">Order added</option>
-              <option value="alphabetical">Alphabetical</option>
-              <option value="active">Most active</option>
-            </select>
+            <div ref={sortMenuRef} className="mob-full" style={{ position:"relative" }}>
+              <button
+                type="button"
+                onClick={()=>setSortOpen(open=>!open)}
+                aria-haspopup="listbox"
+                aria-expanded={sortOpen}
+                style={{ minWidth:142, width:"100%", padding:"7px 10px", borderRadius:7, border:`1px solid ${sortOpen ? "var(--cyan)" : "var(--border)"}`, background:sortOpen ? "rgba(0,245,212,0.07)" : "var(--bg2)", color:"var(--text)", fontSize:12, fontFamily:"'Outfit',sans-serif", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, boxShadow:sortOpen ? "0 0 14px rgba(0,245,212,0.1)" : "none" }}
+              >
+                <span style={{ display:"flex", alignItems:"center", gap:7 }}><span style={{ color:"var(--cyan)", fontSize:11 }}>⇅</span>{sortLabels[sortBy]}</span>
+                <span style={{ color:"var(--text3)", fontSize:9, transform:sortOpen ? "rotate(180deg)" : "none", transition:"transform .15s" }}>▼</span>
+              </button>
+              {sortOpen && (
+                <div role="listbox" aria-label="Sort tracked streamers" style={{ position:"absolute", zIndex:120, top:"calc(100% + 6px)", right:0, minWidth:180, padding:5, borderRadius:9, border:"1px solid var(--border2)", background:"#101925", boxShadow:"0 12px 32px rgba(0,0,0,.55), 0 0 18px rgba(0,245,212,.08)" }}>
+                  {[
+                    ["added", "Order added", "Original tracking order"],
+                    ["alphabetical", "Alphabetical", "A to Z by display name"],
+                    ["active", "Most active", "Most live sessions first"],
+                  ].map(([value, label, detail]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="option"
+                      aria-selected={sortBy===value}
+                      onClick={()=>chooseSort(value)}
+                      onMouseEnter={()=>value==="active"&&setShowActiveHelp(true)}
+                      onMouseLeave={()=>value==="active"&&setShowActiveHelp(false)}
+                      onFocus={()=>value==="active"&&setShowActiveHelp(true)}
+                      onBlur={()=>value==="active"&&setShowActiveHelp(false)}
+                      style={{ position:"relative", width:"100%", border:0, borderRadius:6, padding:"8px 10px", background:sortBy===value ? "rgba(0,245,212,.1)" : "transparent", color:sortBy===value ? "var(--cyan)" : "var(--text)", cursor:"pointer", textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, fontFamily:"'Outfit',sans-serif" }}
+                    >
+                      <span><span style={{ display:"block", fontSize:12, fontWeight:600 }}>{label}{value==="active"&&<span style={{ marginLeft:6, color:"var(--cyan2)" }}>ⓘ</span>}</span><span style={{ display:"block", marginTop:1, color:"var(--text3)", fontSize:10 }}>{detail}</span></span>
+                      {sortBy===value && <span style={{ color:"var(--cyan)", fontSize:12 }}>✓</span>}
+                      {value==="active" && showActiveHelp && (
+                        <span role="tooltip" style={{ position:"absolute", right:"calc(100% + 10px)", top:"50%", transform:"translateY(-50%)", width:240, padding:"10px 12px", borderRadius:8, border:"1px solid rgba(0,245,212,.3)", background:"#0b121c", color:"var(--text2)", fontSize:11, fontWeight:400, lineHeight:1.5, boxShadow:"0 10px 28px rgba(0,0,0,.55), 0 0 16px rgba(0,245,212,.08)", pointerEvents:"none" }}>
+                          <strong style={{ display:"block", marginBottom:3, color:"var(--cyan)", fontSize:12 }}>How “Most active” works</strong>
+                          Sorts by recorded live sessions for this server during the current and previous calendar month. Ties stay in the order the streamers were added.
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button onClick={()=>setShowAdd(true)} disabled={atLimit && !isDev} className="mob-full" style={{ ...C.btnPrimary, opacity:atLimit && !isDev?0.4:1, cursor:atLimit && !isDev?"not-allowed":"pointer" }}>+ Add Streamer</button>
           </div>
         </div>
