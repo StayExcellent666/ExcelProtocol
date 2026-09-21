@@ -847,7 +847,18 @@ async def get_guild_summary(request):
 async def get_streamers(request):
     guild_id = request.match_info["guild_id"]
     rows = await db_fetch(
-        "SELECT id, guild_id, streamer_name AS twitch_username, channel_id, custom_channel_id, discord_user_id FROM monitored_streamers WHERE guild_id = ?",
+        """
+        SELECT ms.id, ms.guild_id, ms.streamer_name AS twitch_username,
+               ms.channel_id, ms.custom_channel_id, ms.discord_user_id,
+               ms.added_at, COUNT(se.id) AS stream_count
+        FROM monitored_streamers AS ms
+        LEFT JOIN stream_events AS se
+          ON se.guild_id = ms.guild_id
+         AND lower(se.streamer_name) = lower(ms.streamer_name)
+        WHERE ms.guild_id = ?
+        GROUP BY ms.id
+        ORDER BY ms.id ASC
+        """,
         (guild_id,)
     )
     usernames = [r["twitch_username"] for r in rows]

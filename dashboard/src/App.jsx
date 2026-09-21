@@ -860,6 +860,7 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
   const [newLimit, setNewLimit]   = useState(75);
   const [savingLimit, setSavingLimit] = useState(false);
   const [search, setSearch]       = useState("");
+  const [sortBy, setSortBy]       = useState("added");
   const [unresolvable, setUnresolvable] = useState(new Set());
 
   const load = useCallback(async () => {
@@ -884,8 +885,18 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
 
   const remove = async username => {
     if (!confirm(`Remove ${username}?`)) return;
-    await apiFetch(`/api/guild/${guildId}/streamers/${encodeURIComponent(username)}`, { method:"DELETE" });
-    load();
+    try {
+      await apiFetch(`/api/guild/${guildId}/streamers/${encodeURIComponent(username)}`, { method:"DELETE" });
+      setStreamers(current => current.filter(s => s.twitch_username !== username));
+      setCount(current => Math.max(0, current - 1));
+      setUnresolvable(current => {
+        const next = new Set(current);
+        next.delete(username.toLowerCase());
+        return next;
+      });
+    } catch (e) {
+      alert("Failed to remove streamer: " + e.message);
+    }
   };
 
   const saveLimit = async () => {
@@ -903,6 +914,19 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
   const filtered = search.trim()
     ? streamers.filter(s => (s.display_name||s.twitch_username).toLowerCase().includes(search.toLowerCase()))
     : streamers;
+  const sortedStreamers = [...filtered].sort((a, b) => {
+    if (sortBy === "alphabetical") {
+      return (a.display_name || a.twitch_username).localeCompare(
+        b.display_name || b.twitch_username,
+        undefined,
+        { sensitivity:"base" },
+      );
+    }
+    if (sortBy === "active") {
+      return (Number(b.stream_count) - Number(a.stream_count)) || (Number(a.id) - Number(b.id));
+    }
+    return Number(a.id) - Number(b.id);
+  });
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%" }}>
@@ -937,6 +961,17 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
               onFocus={e=>e.target.style.borderColor="var(--cyan)"}
               onBlur={e=>e.target.style.borderColor="var(--border)"}
             />
+            <select
+              value={sortBy}
+              onChange={e=>setSortBy(e.target.value)}
+              className="mob-full"
+              aria-label="Sort tracked streamers"
+              style={{ padding:"6px 10px", borderRadius:7, border:"1px solid var(--border)", background:"var(--bg2)", color:"var(--text)", fontSize:12, fontFamily:"'Outfit',sans-serif", outline:"none" }}
+            >
+              <option value="added">Order added</option>
+              <option value="alphabetical">Alphabetical</option>
+              <option value="active">Most active</option>
+            </select>
             <button onClick={()=>setShowAdd(true)} disabled={atLimit && !isDev} className="mob-full" style={{ ...C.btnPrimary, opacity:atLimit && !isDev?0.4:1, cursor:atLimit && !isDev?"not-allowed":"pointer" }}>+ Add Streamer</button>
           </div>
         </div>
@@ -946,15 +981,15 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
       <div style={{ flex:1, overflowY:"auto", minHeight:0, paddingRight:4 }}>
         {loading ? <div style={{ display:"flex", justifyContent:"center", padding:40 }}><Spinner /></div> : (
           <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-            {filtered.map((s,i)=>{
+            {sortedStreamers.map(s=>{
               const isUnresolvable = unresolvable.has((s.twitch_username||"").toLowerCase());
               return (
-              <div key={i} style={{ ...C.card, display:"flex", alignItems:"center", gap:14, padding:"14px 18px", border: isUnresolvable ? "1px solid rgba(255,193,7,0.4)" : C.card.border, flexWrap:"wrap" }}>
-                <TwitchAvatar s={s} size={44} />
+              <div key={s.id || s.twitch_username} style={{ ...C.card, display:"flex", alignItems:"center", gap:10, padding:"8px 12px", border: isUnresolvable ? "1px solid rgba(255,193,7,0.4)" : C.card.border, flexWrap:"wrap" }}>
+                <TwitchAvatar s={s} size={34} />
                 <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:3, flexWrap:"wrap" }}>
-                    <span style={{ fontWeight:700, fontSize:15, fontFamily:"'Orbitron',sans-serif", color:"var(--text)" }}>{s.display_name||s.twitch_username}</span>
-                    <a href={`https://twitch.tv/${s.twitch_username}`} target="_blank" rel="noreferrer" style={{ fontSize:12, color:"var(--cyan2)", textDecoration:"none", fontFamily:"'JetBrains Mono',monospace", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:160 }}>↗ twitch.tv/{s.twitch_username}</a>
+                  <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:2, flexWrap:"wrap" }}>
+                    <span style={{ fontWeight:700, fontSize:13, fontFamily:"'Orbitron',sans-serif", color:"var(--text)" }}>{s.display_name||s.twitch_username}</span>
+                    <a href={`https://twitch.tv/${s.twitch_username}`} target="_blank" rel="noreferrer" style={{ fontSize:11, color:"var(--cyan2)", textDecoration:"none", fontFamily:"'JetBrains Mono',monospace", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:150 }}>↗ twitch.tv/{s.twitch_username}</a>
                     {isUnresolvable && (
                       <span style={{ position:"relative", display:"inline-flex", alignItems:"center" }}
                         onMouseEnter={e=>e.currentTarget.querySelector(".rr-tip").style.opacity="1"}
@@ -975,20 +1010,20 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
                       </span>
                     )}
                   </div>
-                  {s.description && <div style={{ fontSize:12, color:"var(--text3)", marginBottom:3, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"70%" }}>{s.description}</div>}
-                  <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
-                    <div style={{ fontSize:12, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>📢 {s.effective_channel_name||s.channel_name||s.channel_id}</div>
+                  {s.description && <div style={{ fontSize:11, color:"var(--text3)", marginBottom:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"70%" }}>{s.description}</div>}
+                  <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                    <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>📢 {s.effective_channel_name||s.channel_name||s.channel_id}</div>
                     {s.discord_user_id && <div style={{ fontSize:11, color:"var(--cyan2)", fontFamily:"'JetBrains Mono',monospace", background:"rgba(0,245,212,0.06)", border:"1px solid rgba(0,245,212,0.15)", borderRadius:4, padding:"1px 6px" }}>🎮 {s.discord_display_name||s.discord_user_id}</div>}
                   </div>
                 </div>
                 <div style={{ display:"flex", gap:6, flexShrink:0 }}>
-                  <button onClick={()=>setEditS(s)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12 }}>Edit</button>
-                  <button onClick={()=>remove(s.twitch_username)} style={C.btnDanger}>Remove</button>
+                  <button onClick={()=>setEditS(s)} style={{ ...C.btnSecondary, padding:"4px 10px", fontSize:11 }}>Edit</button>
+                  <button onClick={()=>remove(s.twitch_username)} style={{ ...C.btnDanger, padding:"4px 10px", fontSize:11 }}>Remove</button>
                 </div>
               </div>
               );
             })}
-            {!filtered.length && <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}><div style={{ fontSize:32, marginBottom:12 }}>{search ? "🔍" : "📺"}</div><div style={{ fontFamily:"'Outfit',sans-serif", fontSize:13 }}>{search ? `No streamers matching "${search}"` : "No streamers tracked yet"}</div></div>}
+            {!sortedStreamers.length && <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}><div style={{ fontSize:32, marginBottom:12 }}>{search ? "🔍" : "📺"}</div><div style={{ fontFamily:"'Outfit',sans-serif", fontSize:13 }}>{search ? `No streamers matching "${search}"` : "No streamers tracked yet"}</div></div>}
           </div>
         )}
       </div>
