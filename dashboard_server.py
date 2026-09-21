@@ -1631,6 +1631,74 @@ async def save_welcome_settings(request):
     )
     return web.json_response({"ok": True})
 
+async def get_welcome_preview(request):
+    """Render a private welcome/goodbye preview for the dashboard user."""
+    import welcome_banner
+
+    guild_id = request.match_info["guild_id"]
+    action = request.rel_url.query.get("action", "welcome").lower()
+    if action not in ("welcome", "goodbye"):
+        raise web.HTTPBadRequest(reason="action must be 'welcome' or 'goodbye'")
+
+    guild = _bot_ref.get_guild(int(guild_id)) if _bot_ref else None
+    if not guild:
+        raise web.HTTPNotFound(reason="Discord server is not available")
+
+    session = request["session"]
+    member = guild.get_member(int(session["user_id"]))
+    username = (member.display_name if member else None) or session.get("username") or "Preview User"
+
+    avatar_bytes = None
+    if member:
+        try:
+            avatar_bytes = await member.display_avatar.with_size(256).read()
+        except Exception as exc:
+            logger.debug("Preview avatar fetch failed for guild %s: %s", guild_id, exc)
+    elif session.get("avatar"):
+        # Owners/admins may preview servers they are not members of. In that
+        # case use their OAuth avatar directly from Discord's CDN.
+        avatar_url = (
+            f"https://cdn.discordapp.com/avatars/{session['user_id']}/"
+            f"{session['avatar']}.png?size=256"
+        )
+        try:
+            async with get_http_session().get(avatar_url) as response:
+                if response.status == 200:
+                    avatar_bytes = await response.read()
+        except Exception as exc:
+            logger.debug("Dashboard preview avatar fetch failed: %s", exc)
+
+    settings_rows, color_rows = await asyncio.gather(
+        db_fetch(
+            "SELECT welcome_message, goodbye_message FROM welcome_settings WHERE guild_id = ?",
+            (int(guild_id),),
+        ),
+        db_fetch(
+            "SELECT embed_color FROM server_settings WHERE guild_id = ?",
+            (int(guild_id),),
+        ),
+    )
+    settings = settings_rows[0] if settings_rows else {}
+    accent_color = color_rows[0].get("embed_color") if color_rows else None
+    custom_message = settings.get(f"{action}_message")
+
+    png = await welcome_banner.render_welcome_banner(
+        username=username,
+        server_name=guild.name,
+        avatar_bytes=avatar_bytes,
+        accent_color=accent_color or 0x00F5D4,
+        action=action,
+        custom_message=custom_message,
+    )
+    if not png:
+        raise web.HTTPInternalServerError(reason="Banner preview could not be generated")
+
+    return web.Response(
+        body=png,
+        content_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
 # ── Server Settings ───────────────────────────────────────────────────────────
 async def get_server_settings(request):
     guild_id = request.match_info["guild_id"]
@@ -6563,6 +6631,7 @@ def create_dashboard_app(bot=None):
     app.router.add_post ("/api/guild/{guild_id}/birthdays",              add_birthday)
     app.router.add_get  ("/api/guild/{guild_id}/welcome-settings",       get_welcome_settings)
     app.router.add_post ("/api/guild/{guild_id}/welcome-settings",       save_welcome_settings)
+    app.router.add_get  ("/api/guild/{guild_id}/welcome-preview",        get_welcome_preview)
     app.router.add_delete("/api/guild/{guild_id}/birthdays/{user_id}",  delete_birthday)
     app.router.add_get  ("/api/guild/{guild_id}/settings",              get_server_settings)
     app.router.add_patch("/api/guild/{guild_id}/settings",              patch_server_settings)

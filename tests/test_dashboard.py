@@ -7,10 +7,80 @@ Covers:
 """
 import hmac as _hmac
 import hashlib as _hashlib
+from types import SimpleNamespace
 import pytest
 
 # Import after conftest sets env vars
 import dashboard_server
+
+
+class _FakeDashboardRequest(dict):
+    @property
+    def match_info(self):
+        return self["match_info"]
+
+    @property
+    def rel_url(self):
+        return SimpleNamespace(query=self.get("query", {}))
+
+
+class TestWelcomePreview:
+    @pytest.mark.asyncio
+    async def test_renders_png_for_accessible_guild(self, monkeypatch):
+        class FakeGuild:
+            name = "Preview Server"
+
+            @staticmethod
+            def get_member(_user_id):
+                return None
+
+        class FakeBot:
+            @staticmethod
+            def get_guild(guild_id):
+                return FakeGuild() if guild_id == 100 else None
+
+        async def fake_fetch(query, params=()):
+            assert params == (100,)
+            if "welcome_settings" in query:
+                return [{"welcome_message": "Hello {user}", "goodbye_message": None}]
+            if "server_settings" in query:
+                return [{"embed_color": 0x123456}]
+            raise AssertionError(f"Unexpected query: {query}")
+
+        async def fake_render(**kwargs):
+            assert kwargs["username"] == "previewer"
+            assert kwargs["server_name"] == "Preview Server"
+            assert kwargs["accent_color"] == 0x123456
+            assert kwargs["action"] == "welcome"
+            assert kwargs["custom_message"] == "Hello {user}"
+            return b"\x89PNG\r\n\x1a\npreview"
+
+        monkeypatch.setattr(dashboard_server, "_bot_ref", FakeBot())
+        monkeypatch.setattr(dashboard_server, "db_fetch", fake_fetch)
+        monkeypatch.setattr("welcome_banner.render_welcome_banner", fake_render)
+        request = _FakeDashboardRequest({
+            "session": {"user_id": "42", "username": "previewer", "avatar": None},
+            "match_info": {"guild_id": "100"},
+            "query": {"action": "welcome"},
+        })
+
+        response = await dashboard_server.get_welcome_preview(request)
+
+        assert response.content_type == "image/png"
+        assert response.body.startswith(b"\x89PNG")
+        assert response.headers["Cache-Control"] == "no-store"
+
+    @pytest.mark.asyncio
+    async def test_rejects_unknown_preview_action(self):
+        from aiohttp import web
+
+        request = _FakeDashboardRequest({
+            "session": {"user_id": "42", "username": "previewer"},
+            "match_info": {"guild_id": "100"},
+            "query": {"action": "surprise"},
+        })
+        with pytest.raises(web.HTTPBadRequest):
+            await dashboard_server.get_welcome_preview(request)
 
 
 # ── HMAC signature verification ───────────────────────────────────────────────
