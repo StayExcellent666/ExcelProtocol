@@ -2675,7 +2675,7 @@ function TwitchTab({ guildId, isDev }) {
       />
 
       {atLimit && !isDev && <div style={{ marginBottom:12, padding:"10px 14px", borderRadius:8, border:"1px solid rgba(255,77,109,0.3)", background:"var(--red-dim)", color:"var(--red)", fontSize:12, fontFamily:"'Outfit',sans-serif" }}>⚠️ Command limit reached ({info.count}/{info.limit}). Contact the bot owner to increase your limit.</div>}
-      <div style={{ marginBottom:12, padding:"10px 14px", borderRadius:8, border:"1px solid var(--border2)", background:"rgba(8,11,15,0.6)", color:"var(--text3)", fontSize:12, fontFamily:"'Outfit',sans-serif", display:"flex", alignItems:"center", gap:8 }}>💡 Make sure ExcelProtocol is modded in your Twitch chat — type <code style={{ fontFamily:"'JetBrains Mono',monospace", color:"var(--cyan)", background:"rgba(0,0,0,0.3)", padding:"1px 5px", borderRadius:3 }}>/mod ExcelProtocol</code> if you haven't already.</div>
+      <div style={{ marginBottom:12, padding:"10px 14px", borderRadius:8, border:"1px solid var(--border2)", background:"rgba(8,11,15,0.6)", color:"var(--text3)", fontSize:12, fontFamily:"'Outfit',sans-serif", display:"flex", alignItems:"center", gap:8 }}>💡 Make sure ExcelProtocol is modded in your Twitch chat — type <code style={{ fontFamily:"'JetBrains Mono',monospace", color:"var(--cyan)", background:"rgba(0,0,0,0.3)", padding:"1px 5px", borderRadius:3 }}>/mod ExcelTwitch</code> if you haven't already.</div>
 
       {/* Custom commands */}
       <div style={{ ...C.card, marginBottom:16 }}>
