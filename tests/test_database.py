@@ -881,11 +881,16 @@ class TestServerLeaderboard:
             f"Two same-day sessions = 1 day, got {rows[0]['stream_count']}"
 
     def test_counts_distinct_days(self, db):
-        """Sessions on different days each count as a separate day."""
+        """Sessions on different days in the current month each count once."""
         now = datetime.now(timezone.utc)
-        self._insert_session(db, 100, "alice", now - timedelta(days=2))
-        self._insert_session(db, 100, "alice", now - timedelta(days=1))
-        self._insert_session(db, 100, "alice", now)
+        # Use explicit days in the current month instead of subtracting from
+        # today. The old version crossed into the previous month when CI ran
+        # on the first or second day of a month, while this leaderboard is
+        # intentionally scoped to the current calendar month.
+        month_start = now.replace(day=1, hour=12, minute=0, second=0, microsecond=0)
+        self._insert_session(db, 100, "alice", month_start)
+        self._insert_session(db, 100, "alice", month_start + timedelta(days=1))
+        self._insert_session(db, 100, "alice", month_start + timedelta(days=2))
         rows = db.get_server_leaderboard(guild_id=100)
         assert rows[0]["stream_count"] == 3
 
@@ -1121,7 +1126,10 @@ class TestGetStreamEvents:
         # >48h old NULL row → orphan
         s1 = (_dt.now(timezone.utc) - _td(hours=60)).strftime('%Y-%m-%d %H:%M:%S')
         self._insert(db, "alice", s1)
-        rows = db.get_stream_events()
+        # The event log defaults to the current calendar month. Scope this
+        # status-specific test to the month containing the deliberately old
+        # row so it remains valid at the start of a new month.
+        rows = db.get_stream_events(month=s1[:7])
         assert len(rows) == 1
         assert rows[0]['status'] == 'orphan'
 
