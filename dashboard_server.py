@@ -2538,7 +2538,7 @@ async def eventsub_callback(request):
             for row in rows:
                 guild_id = str(row["guild_id"])
                 trigger_rows = await db_fetch(
-                    "SELECT video_url, volume FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
+                    "SELECT video_url, volume, audio_only, start_seconds, end_seconds FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
                     (guild_id, reward_id)
                 )
                 if trigger_rows:
@@ -2548,7 +2548,9 @@ async def eventsub_callback(request):
                         "type": "play",
                         "video_url": trigger["video_url"],
                         "volume": trigger["volume"],
-                        "redeemer": redeemer,
+                        "audio_only": bool(trigger.get("audio_only")),
+                        "start_seconds": trigger.get("start_seconds") or 0,
+                        "end_seconds": trigger.get("end_seconds"),
                     })
                     dead = set()
                     for ws in _overlay_connections.get(guild_id, set()):
@@ -2694,6 +2696,8 @@ let ytReady = false;
 let savedVolume = 100;
 let progressInterval = null;
 let playbackRecoveryTimer = null;
+let currentStart = 0;
+let currentEnd = null;
 
 
 function formatTime(seconds) {{
@@ -2707,12 +2711,18 @@ function startProgress() {{
   progressInterval = setInterval(() => {{
     if (!player || typeof player.getCurrentTime !== "function") return;
     const current = player.getCurrentTime();
-    const duration = player.getDuration();
-    if (!duration || duration <= 0) return;
-    const remaining = Math.max(0, duration - current);
-    const pct = Math.min(100, (current / duration) * 100);
+    const videoDuration = player.getDuration();
+    if (!videoDuration || videoDuration <= 0) return;
+    const segmentEnd = currentEnd && currentEnd > currentStart ? Math.min(currentEnd, videoDuration) : videoDuration;
+    const segmentDuration = Math.max(0.1, segmentEnd - currentStart);
+    const remaining = Math.max(0, segmentEnd - current);
+    const pct = Math.min(100, Math.max(0, ((current - currentStart) / segmentDuration) * 100));
     progressFill.style.width = pct + "%";
     progressTimer.textContent = formatTime(remaining);
+    if (currentEnd && current >= currentEnd - 0.15 && playing) {{
+      player.stopVideo();
+      finishCurrent(500);
+    }}
   }}, 500);
 }}
 
@@ -2750,6 +2760,7 @@ function finishCurrent(delay = 500) {{
   if (playbackRecoveryTimer) clearTimeout(playbackRecoveryTimer);
   playbackRecoveryTimer = null;
   frameWrap.style.display = "none";
+  frameWrap.style.opacity = "1";
   rdm.style.display = "none";
   stopProgress();
   playing = false;
@@ -2821,18 +2832,23 @@ function processQueue() {{
     if (player) player.stopVideo();
     finishCurrent(250);
   }}, 12000);
-  const volume = savedVolume;
-  rdm.textContent = item.redeemer ? item.redeemer + " redeemed!" : "";
-  rdm.style.display = item.redeemer ? "block" : "none";
+  const itemVolume = Math.min(1, Math.max(0, Number(item.volume ?? 1)));
+  const volume = Math.round(savedVolume * itemVolume);
+  currentStart = Math.max(0, Number(item.start_seconds || 0));
+  const requestedEnd = Number(item.end_seconds || 0);
+  currentEnd = requestedEnd > currentStart ? requestedEnd : null;
+  rdm.textContent = "";
+  rdm.style.display = "none";
   frameWrap.style.display = "flex";
+  frameWrap.style.opacity = item.audio_only ? "0" : "1";
   if (player) {{
-    player.loadVideoById(videoId);
+    player.loadVideoById({{ videoId, startSeconds: currentStart, ...(currentEnd ? {{ endSeconds: currentEnd }} : {{}}) }});
     player.setVolume(volume);
   }} else {{
     player = new YT.Player("yt-player", {{
       height: "100%", width: "100%",
       videoId: videoId,
-      playerVars: {{ autoplay: 1, controls: 0, disablekb: 1, modestbranding: 1, rel: 0, iv_load_policy: 3 }},
+      playerVars: {{ autoplay: 1, controls: 0, disablekb: 1, modestbranding: 1, rel: 0, iv_load_policy: 3, start: currentStart, ...(currentEnd ? {{ end: currentEnd }} : {{}}) }},
       events: {{
         onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
         onStateChange: onPlayerStateChange,
@@ -2894,7 +2910,7 @@ async def get_broadcaster_info(request):
         logger.error(f"Error fetching rewards for guild {guild_id}: {e}")
 
     # Get existing triggers
-    triggers = await db_fetch("SELECT reward_id, reward_title, video_url, volume FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+    triggers = await db_fetch("SELECT reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds FROM reward_triggers WHERE guild_id = ?", (guild_id,))
 
     return web.json_response({
         "connected": True,
@@ -2913,12 +2929,21 @@ async def upsert_reward_trigger(request):
     reward_title = body.get("reward_title", "").strip()
     video_url    = body.get("video_url", "").strip()
     volume       = float(body.get("volume", 1.0))
+    hotkey       = body.get("hotkey") or None
+    audio_only   = bool(body.get("audio_only", False))
+    start_seconds = max(0.0, float(body.get("start_seconds") or 0))
+    end_value    = body.get("end_seconds")
+    end_seconds  = float(end_value) if end_value not in (None, "", 0, "0") else None
     if not reward_id or not video_url:
         raise web.HTTPBadRequest(reason="reward_id and video_url are required")
+    if not 0 <= volume <= 1:
+        raise web.HTTPBadRequest(reason="volume must be between 0 and 1")
+    if end_seconds is not None and end_seconds <= start_seconds:
+        raise web.HTTPBadRequest(reason="end time must be after start time")
     await db_execute(
-        "INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume) VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(guild_id, reward_id) DO UPDATE SET reward_title=excluded.reward_title, video_url=excluded.video_url, volume=excluded.volume",
-        (guild_id, reward_id, reward_title, video_url, volume)
+        "INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(guild_id, reward_id) DO UPDATE SET reward_title=excluded.reward_title, video_url=excluded.video_url, volume=excluded.volume, hotkey=excluded.hotkey, audio_only=excluded.audio_only, start_seconds=excluded.start_seconds, end_seconds=excluded.end_seconds",
+        (guild_id, reward_id, reward_title, video_url, volume, hotkey, 1 if audio_only else 0, start_seconds, end_seconds)
     )
     return web.json_response({"ok": True})
 

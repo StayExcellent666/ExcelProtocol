@@ -2966,7 +2966,7 @@ function ChannelRewardsTab({ guildId }) {
   const [loading, setLoading]     = useState(true);
   const [triggerModal, setTriggerModal] = useState(null);
   const [rewardModal, setRewardModal]   = useState(null);
-  const [triggerForm, setTriggerForm]   = useState({ video_url:"", volume:1.0, hotkey:"" });
+  const [triggerForm, setTriggerForm]   = useState({ video_url:"", volume:1.0, hotkey:"", audio_only:false, start_seconds:0, end_seconds:"" });
   const [rewardForm, setRewardForm]     = useState({ title:"", cost:100, is_enabled:true });
   const [saving, setSaving]       = useState(false);
   const [copied, setCopied]       = useState(false);
@@ -2995,7 +2995,14 @@ function ChannelRewardsTab({ guildId }) {
 
   const openTrigger = (reward) => {
     const existing = bcast?.triggers?.find(t => t.reward_id === reward.id);
-    setTriggerForm({ video_url: existing?.video_url || "", volume: existing?.volume ?? 1.0, hotkey: existing?.hotkey || "" });
+    setTriggerForm({
+      video_url: existing?.video_url || "",
+      volume: existing?.volume ?? 1.0,
+      hotkey: existing?.hotkey || "",
+      audio_only: Boolean(existing?.audio_only),
+      start_seconds: Number(existing?.start_seconds || 0),
+      end_seconds: existing?.end_seconds ?? "",
+    });
     setTriggerModal(reward);
   };
 
@@ -3008,6 +3015,9 @@ function ChannelRewardsTab({ guildId }) {
           video_url:    triggerForm.video_url.trim(),
           volume:       Number(triggerForm.volume),
           hotkey:       triggerForm.hotkey.trim() || null,
+          audio_only:   triggerForm.audio_only,
+          start_seconds:Number(triggerForm.start_seconds || 0),
+          end_seconds:  triggerForm.end_seconds === "" ? null : Number(triggerForm.end_seconds),
         })});
       setTriggerModal(null); load();
     } catch(e) { alert("Failed: " + e.message); }
@@ -3198,7 +3208,7 @@ function ChannelRewardsTab({ guildId }) {
                     </div>
                     <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginTop:2 }}>
                       {trigger?.video_url ? (
-                        <span style={{ fontSize:11, color:"var(--green)", fontFamily:"'JetBrains Mono',monospace" }}>🎬 Video</span>
+                        <span style={{ fontSize:11, color:"var(--green)", fontFamily:"'JetBrains Mono',monospace" }}>{trigger.audio_only?"🔊 Audio":"🎬 Video"}{(trigger.start_seconds||trigger.end_seconds)?` · ${Math.floor(Number(trigger.start_seconds||0)/60)}:${String(Math.floor(Number(trigger.start_seconds||0)%60)).padStart(2,"0")}–${trigger.end_seconds?`${Math.floor(Number(trigger.end_seconds)/60)}:${String(Math.floor(Number(trigger.end_seconds)%60)).padStart(2,"0")}`:"end"}`:""}</span>
                       ) : null}
                       {trigger?.hotkey ? (
                         <span style={{ fontSize:11, color:"var(--cyan)", fontFamily:"'JetBrains Mono',monospace", background:"rgba(0,245,212,0.08)", padding:"1px 6px", borderRadius:4, border:"1px solid rgba(0,245,212,0.2)" }}>⌨ {trigger.hotkey}</span>
@@ -3236,6 +3246,23 @@ function ChannelRewardsTab({ guildId }) {
                 style={{ flex:1, accentColor:"var(--cyan)" }} />
               <span style={{ fontSize:12, color:"var(--cyan)", fontFamily:"'JetBrains Mono',monospace", width:32 }}>{Number(triggerForm.volume).toFixed(2)}</span>
             </div>
+          </Field>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid var(--border)", borderBottom:"1px solid var(--border)" }}>
+            <div><div style={{fontSize:13,color:"var(--text)"}}>Audio only</div><div style={{fontSize:10,color:"var(--text3)",marginTop:3}}>Plays through OBS without showing the video or progress bar.</div></div>
+            <button type="button" onClick={()=>setTriggerForm(p=>({...p,audio_only:!p.audio_only}))} style={{width:48,height:26,borderRadius:14,border:`1px solid ${triggerForm.audio_only?"var(--cyan)":"var(--border2)"}`,background:triggerForm.audio_only?"var(--cyan-dim)":"var(--bg3)",padding:2,cursor:"pointer",display:"flex",justifyContent:triggerForm.audio_only?"flex-end":"flex-start",alignItems:"center"}}><span style={{width:20,height:20,borderRadius:"50%",background:triggerForm.audio_only?"var(--cyan)":"var(--text3)",boxShadow:triggerForm.audio_only?"0 0 8px rgba(0,245,212,.5)":"none"}} /></button>
+          </div>
+          <Field label="Video segment">
+            {(() => {
+              const start=Number(triggerForm.start_seconds||0), end=triggerForm.end_seconds===""?null:Number(triggerForm.end_seconds);
+              const max=Math.max(600,Math.ceil(Math.max(start+60,end||0)/60)*60);
+              const time=v=>`${Math.floor(Number(v||0)/60)}:${String(Math.floor(Number(v||0)%60)).padStart(2,"0")}`;
+              return <div style={{display:"grid",gap:12}}>
+                <div><div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--text3)",marginBottom:4}}><span>Start</span><span style={{color:"var(--cyan)",fontFamily:"'JetBrains Mono',monospace"}}>{time(start)}</span></div><input type="range" min={0} max={Math.max(1,max-1)} step={1} value={Math.min(start,max-1)} onChange={e=>setTriggerForm(p=>({...p,start_seconds:Number(e.target.value),end_seconds:p.end_seconds!==""&&Number(p.end_seconds)<=Number(e.target.value)?Number(e.target.value)+1:p.end_seconds}))} style={{width:"100%",accentColor:"var(--cyan)"}} /></div>
+                <div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11,color:"var(--text3)",marginBottom:4}}><span>End</span><span style={{display:"flex",alignItems:"center",gap:8}}><button type="button" onClick={()=>setTriggerForm(p=>({...p,end_seconds:p.end_seconds===""?Math.max(Number(p.start_seconds||0)+1,60):""}))} style={{...C.btnSecondary,padding:"2px 7px",fontSize:10}}>{end===null?"Set end":"Use full video"}</button><span style={{color:"var(--cyan)",fontFamily:"'JetBrains Mono',monospace",minWidth:34,textAlign:"right"}}>{end===null?"Full":time(end)}</span></span></div><input type="range" min={Math.min(max, start+1)} max={max} step={1} value={end===null?max:Math.max(start+1,Math.min(end,max))} disabled={end===null} onChange={e=>setTriggerForm(p=>({...p,end_seconds:Number(e.target.value)}))} style={{width:"100%",accentColor:"var(--cyan)",opacity:end===null ? .35 : 1}} /></div>
+                <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>Slider range expands automatically for longer timestamps. Exact seconds can be adjusted below.</div>
+                <div style={{display:"flex",gap:10}}><CyanInput type="number" min={0} step={1} value={triggerForm.start_seconds} onChange={e=>setTriggerForm(p=>({...p,start_seconds:Math.max(0,Number(e.target.value)||0)}))} aria-label="Start seconds" placeholder="Start seconds" /><CyanInput type="number" min={start+1} step={1} value={triggerForm.end_seconds} onChange={e=>setTriggerForm(p=>({...p,end_seconds:e.target.value===""?"":Math.max(start+1,Number(e.target.value)||start+1)}))} aria-label="End seconds" placeholder="End (full video)" /></div>
+              </div>;
+            })()}
           </Field>
           <Field label="Companion Hotkey">
             <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:6 }}>

@@ -654,6 +654,9 @@ class Database:
                 video_url  TEXT NOT NULL DEFAULT \'\',
                 volume     REAL NOT NULL DEFAULT 1.0,
                 hotkey     TEXT,
+                audio_only INTEGER NOT NULL DEFAULT 0,
+                start_seconds REAL NOT NULL DEFAULT 0,
+                end_seconds REAL,
                 UNIQUE(guild_id, reward_id)
             )
         ''')
@@ -664,6 +667,16 @@ class Database:
             cursor.execute("ALTER TABLE reward_triggers ADD COLUMN hotkey TEXT")
         except Exception:
             pass  # Column already exists
+        for column_sql in (
+            "ALTER TABLE reward_triggers ADD COLUMN audio_only INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE reward_triggers ADD COLUMN start_seconds REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE reward_triggers ADD COLUMN end_seconds REAL",
+        ):
+            try:
+                cursor.execute(column_sql)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
         # Migrate: make video_url nullable (was NOT NULL)
         # SQLite can't ALTER column constraints, but new rows will use DEFAULT ''
@@ -3006,38 +3019,46 @@ class Database:
 
     # ── Reward triggers ──────────────────────────────────────────────────────────
 
-    def set_reward_trigger(self, guild_id: int, reward_id: str, reward_title: str, video_url: str, volume: float = 1.0, hotkey: str = None):
+    def set_reward_trigger(self, guild_id: int, reward_id: str, reward_title: str,
+                           video_url: str, volume: float = 1.0, hotkey: str = None,
+                           audio_only: bool = False, start_seconds: float = 0,
+                           end_seconds: float = None):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume, hotkey)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO reward_triggers
+                (guild_id, reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, reward_id) DO UPDATE SET
                 reward_title = excluded.reward_title,
                 video_url    = excluded.video_url,
                 volume       = excluded.volume,
-                hotkey       = excluded.hotkey
-        """, (guild_id, reward_id, reward_title, video_url, volume, hotkey))
+                hotkey       = excluded.hotkey,
+                audio_only   = excluded.audio_only,
+                start_seconds = excluded.start_seconds,
+                end_seconds  = excluded.end_seconds
+        """, (guild_id, reward_id, reward_title, video_url, volume, hotkey,
+              1 if audio_only else 0, start_seconds, end_seconds))
         conn.commit()
         conn.close()
 
     def get_reward_triggers(self, guild_id: int) -> List[Dict]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds FROM reward_triggers WHERE guild_id = ?", (guild_id,))
         rows = cursor.fetchall()
         conn.close()
-        return [{"reward_id": r[0], "reward_title": r[1], "video_url": r[2], "volume": r[3], "hotkey": r[4]} for r in rows]
+        return [{"reward_id": r[0], "reward_title": r[1], "video_url": r[2], "volume": r[3], "hotkey": r[4], "audio_only": bool(r[5]), "start_seconds": r[6] or 0, "end_seconds": r[7]} for r in rows]
 
     def get_reward_trigger(self, guild_id: int, reward_id: str) -> Optional[Dict]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
         row = cursor.fetchone()
         conn.close()
         if not row:
             return None
-        return {"reward_id": row[0], "reward_title": row[1], "video_url": row[2], "volume": row[3], "hotkey": row[4]}
+        return {"reward_id": row[0], "reward_title": row[1], "video_url": row[2], "volume": row[3], "hotkey": row[4], "audio_only": bool(row[5]), "start_seconds": row[6] or 0, "end_seconds": row[7]}
 
     def delete_reward_trigger(self, guild_id: int, reward_id: str):
         conn = self.get_connection()
@@ -3050,10 +3071,10 @@ class Database:
         """Get all triggers across all guilds -- used for EventSub routing."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT guild_id, reward_id, reward_title, video_url, volume, hotkey FROM reward_triggers")
+        cursor.execute("SELECT guild_id, reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds FROM reward_triggers")
         rows = cursor.fetchall()
         conn.close()
-        return [{"guild_id": r[0], "reward_id": r[1], "reward_title": r[2], "video_url": r[3], "volume": r[4], "hotkey": r[5]} for r in rows]
+        return [{"guild_id": r[0], "reward_id": r[1], "reward_title": r[2], "video_url": r[3], "volume": r[4], "hotkey": r[5], "audio_only": bool(r[6]), "start_seconds": r[7] or 0, "end_seconds": r[8]} for r in rows]
 
     def get_overlay_volume(self, guild_id: int) -> int:
         """Get the saved overlay volume (0-100) for a guild."""
