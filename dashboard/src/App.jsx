@@ -446,7 +446,7 @@ function ChannelSelect({ guildId, value, onChange }) {
   }, [guildId]);
   if (loading) return <div style={{ color:"var(--text3)", fontSize:12, padding:"8px 0" }}>Loading channels...</div>;
   return (
-    <CyanSelect value={String(value||"")} onChange={e=>onChange(e.target.value)}>
+    <CyanSelect value={String(value||"")} onChange={e=>onChange(e.target.value, channels.find(c=>String(c.id)===String(e.target.value))||null)}>
       <option value="">Select a channel...</option>
       {channels.map(c=><option key={c.id} value={c.id}>#{c.name}</option>)}
     </CyanSelect>
@@ -599,7 +599,7 @@ function MemberPicker({ guildId, value, onChange }) {
                 onError={e=>{ if(!e.target.dataset.err){e.target.dataset.err=1;e.target.src="https://cdn.discordapp.com/embed/avatars/0.png";}}} />
             </div>
             <span style={{ fontSize:13, color:"var(--cyan)", fontWeight:500 }}>{selected.display_name}</span>
-            <button onClick={() => onChange(null)} style={{ marginLeft:"auto", ...C.btnDanger, padding:"2px 8px", fontSize:11 }}>✕</button>
+            <button onClick={() => onChange(null, null)} style={{ marginLeft:"auto", ...C.btnDanger, padding:"2px 8px", fontSize:11 }}>✕</button>
           </div>
         )}
         <div style={{ display:"flex", gap:6 }}>
@@ -611,12 +611,12 @@ function MemberPicker({ guildId, value, onChange }) {
         </div>
       </div>
       <div style={{ maxHeight:200, overflowY:"auto" }}>
-        <div onClick={() => onChange(null)}
+        <div onClick={() => onChange(null, null)}
           style={{ padding:"6px 12px", cursor:"pointer", color:"var(--text3)", fontSize:12, borderBottom:"1px solid var(--border)" }}
           onMouseEnter={e=>e.currentTarget.style.background="var(--bg2)"}
           onMouseLeave={e=>e.currentTarget.style.background="transparent"}>— No link</div>
         {filtered.map(m => (
-          <div key={m.id} onClick={() => onChange(m.id)}
+          <div key={m.id} onClick={() => onChange(m.id, m)}
             style={{ padding:"6px 12px", cursor:"pointer", display:"flex", alignItems:"center", gap:8, background:String(m.id)===String(value)?"rgba(0,245,212,0.08)":"transparent" }}
             onMouseEnter={e=>{ if(String(m.id)!==String(value)) e.currentTarget.style.background="var(--bg2)"; }}
             onMouseLeave={e=>{ e.currentTarget.style.background=String(m.id)===String(value)?"rgba(0,245,212,0.08)":"transparent"; }}>
@@ -640,7 +640,9 @@ function MemberPicker({ guildId, value, onChange }) {
 function EditStreamerModal({ guildId, streamer, onClose, onSaved }) {
   const originalChannelId = String(streamer.custom_channel_id||streamer.channel_id||"");
   const [channelId, setChannelId]         = useState(originalChannelId);
+  const [channelName, setChannelName]     = useState(streamer.effective_channel_name||streamer.channel_name||null);
   const [discordUserId, setDiscordUserId] = useState(streamer.discord_user_id || null);
+  const [discordDisplayName, setDiscordDisplayName] = useState(streamer.discord_display_name || null);
   const [loading, setLoading]             = useState(false);
   const save = async () => {
     setLoading(true);
@@ -649,7 +651,14 @@ function EditStreamerModal({ guildId, streamer, onClose, onSaved }) {
         await apiFetch(`/api/guild/${guildId}/streamers/${encodeURIComponent(streamer.twitch_username)}`, { method:"PATCH", body:JSON.stringify({ channel_id:channelId }) });
       }
       await apiFetch(`/api/guild/${guildId}/streamers/${encodeURIComponent(streamer.twitch_username)}/discord`, { method:"PATCH", body:JSON.stringify({ discord_user_id: discordUserId || null }) });
-      onSaved(); onClose();
+      onSaved({
+        ...streamer,
+        custom_channel_id: channelId || streamer.custom_channel_id,
+        effective_channel_name: channelName || streamer.effective_channel_name,
+        discord_user_id: discordUserId || null,
+        discord_display_name: discordUserId ? discordDisplayName : null,
+      });
+      onClose();
     } catch(e) { console.error(e); }
     setLoading(false);
   };
@@ -662,9 +671,9 @@ function EditStreamerModal({ guildId, streamer, onClose, onSaved }) {
           <div style={{ fontSize:11, color:"var(--cyan2)", fontFamily:"'JetBrains Mono',monospace" }}>twitch.tv/{streamer.twitch_username}</div>
         </div>
       </div>
-      <Field label="Notification Channel"><ChannelSelect guildId={guildId} value={channelId} onChange={setChannelId} /></Field>
+      <Field label="Notification Channel"><ChannelSelect guildId={guildId} value={channelId} onChange={(id,channel)=>{setChannelId(id);if(channel)setChannelName(`#${channel.name}`);}} /></Field>
       <Field label="Discord Member (for Live Role)">
-        <MemberPicker guildId={guildId} value={discordUserId} onChange={setDiscordUserId} />
+        <MemberPicker guildId={guildId} value={discordUserId} onChange={(id,member)=>{setDiscordUserId(id);setDiscordDisplayName(member?.display_name||null);}} />
         <div style={{ fontSize:11, color:"var(--text3)", marginTop:4, fontFamily:"'JetBrains Mono',monospace" }}>Link to assign the live role when they go live</div>
       </Field>
       <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
@@ -956,7 +965,7 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%" }}>
       {(showAdd || showAddProp) && <AddStreamerModal guildId={guildId} onClose={()=>{ setShowAdd(false); onAddClose&&onAddClose(); }} onAdded={load} />}
-      {editS && <EditStreamerModal guildId={guildId} streamer={editS} onClose={()=>setEditS(null)} onSaved={load} />}
+      {editS && <EditStreamerModal guildId={guildId} streamer={editS} onClose={()=>setEditS(null)} onSaved={updated=>setStreamers(current=>current.map(s=>(s.id||s.twitch_username)===(updated.id||updated.twitch_username)?updated:s))} />}
       {/* Static header — never scrolls */}
       <div style={{ flexShrink:0, paddingBottom:12, marginBottom:-4 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
@@ -987,8 +996,8 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
               onBlur={e=>e.target.style.borderColor="var(--border)"}
             />
             <CyanSelect value={linkFilter} onChange={e=>setLinkFilter(e.target.value)} className="mob-full" style={{ width:145, padding:"6px 10px", fontSize:12 }} aria-label="Filter by Discord Live Role link">
-              <option value="all">All Live Role links</option>
-              <option value="linked">Discord linked</option>
+              <option value="all">All</option>
+              <option value="linked">Linked</option>
               <option value="unlinked">Not linked</option>
             </CyanSelect>
             <div ref={sortMenuRef} className="mob-full" style={{ position:"relative" }}>
@@ -2132,29 +2141,25 @@ function BirthdaysTab({ guildId }) {
   const [settings, setSettings]   = useState(null);
   const [channels, setChannels]   = useState([]);
   const [birthdays, setBirthdays] = useState([]);
-  const [members, setMembers]     = useState([]);
   const [loading, setLoading]     = useState(true);
   const [saving, setSaving]       = useState({});
   const [showBdayModal, setShowBdayModal] = useState(false);
   const [bdayForm, setBdayForm]   = useState({ user_id:"", day:1, month:1, year:"" });
   const [bdayEditId, setBdayEditId] = useState(null);
-  const [memberSearch, setMemberSearch] = useState("");
 
   const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, ch, bd, mb] = await Promise.all([
+      const [s, ch, bd] = await Promise.all([
         apiFetch(`/api/guild/${guildId}/settings`),
         apiFetch(`/api/guild/${guildId}/channels`),
         apiFetch(`/api/guild/${guildId}/birthdays`),
-        apiFetch(`/api/guild/${guildId}/members`),
       ]);
       setSettings(s);
       setChannels(ch.channels || []);
       setBirthdays(bd);
-      setMembers(Array.isArray(mb) ? mb : (mb?.members || []));
     } catch(e) { console.error(e); }
     finally { setLoading(false); }
   }, [guildId]);
@@ -2172,7 +2177,6 @@ function BirthdaysTab({ guildId }) {
 
   const openAddBday = () => {
     setBdayEditId(null);
-    setMemberSearch("");
     setBdayForm({ user_id:"", day:1, month:1, year:"" });
     setShowBdayModal(true);
   };
@@ -2251,14 +2255,7 @@ function BirthdaysTab({ guildId }) {
           </div>
           {!bdayEditId && (
             <Field label="Member">
-              <CyanInput value={memberSearch} onChange={e=>setMemberSearch(e.target.value)} placeholder="Search by name or username…" autoFocus />
-              <CyanSelect value={bdayForm.user_id} onChange={e => setBdayForm(p => ({ ...p, user_id: e.target.value }))}>
-                <option value="">Select member...</option>
-                {members.filter(m => {
-                  const q=memberSearch.trim().toLowerCase();
-                  return !q || (m.display_name||"").toLowerCase().includes(q) || (m.username||"").toLowerCase().includes(q);
-                }).map(m => <option key={m.id} value={m.id}>{m.display_name}{m.display_name!==m.username?` (@${m.username})`:""}</option>)}
-              </CyanSelect>
+              <MemberPicker guildId={guildId} value={bdayForm.user_id} onChange={id=>setBdayForm(p=>({...p,user_id:id||""}))} />
             </Field>
           )}
           {bdayEditId && (
