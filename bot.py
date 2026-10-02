@@ -2251,15 +2251,21 @@ class TwitchNotifierBot(discord.Client):
         else:
             owner_note = "⚠️ Could not DM guild owner (DMs disabled) — you may need to reach out manually."
 
-        await self.send_owner_alert(
-            "Permission Issue",
-            f"**Bot cannot send notifications!**\n\n"
-            f"**Server:** {guild.name} (`{guild.id}`)\n"
-            f"**Channel:** <#{channel_id}>\n"
-            f"**Issue:** {issue}\n\n"
-            f"{owner_note}",
-            guild_id=guild.id
-        )
+        bot_owner_dm_muted = getattr(
+            self.db, "get_bot_owner_permission_dm_muted", lambda _guild_id: False
+        )(guild.id)
+        if not bot_owner_dm_muted:
+            await self.send_owner_alert(
+                "Permission Issue",
+                f"**Bot cannot send notifications!**\n\n"
+                f"**Server:** {guild.name} (`{guild.id}`)\n"
+                f"**Channel:** <#{channel_id}>\n"
+                f"**Issue:** {issue}\n\n"
+                f"{owner_note}",
+                guild_id=guild.id
+            )
+        else:
+            logger.info("Bot-owner permission DM muted for guild %s; log-channel alert retained", guild.id)
         await self.log_to_channel(
             "❌", "Notification Failed — Permission Issue",
             f"**Server:** {guild.name}\n**Channel:** <#{channel_id}>\n**Issue:** {issue}",

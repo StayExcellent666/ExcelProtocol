@@ -92,6 +92,7 @@
     const entrants = [];
     let title = "Fortuna Giveaway";
     let spinFrame = 0;
+    let winnerHideTimer = 0;
     const layers = {reel:document.getElementById("reel"),small_timer:document.getElementById("small-timer"),big_timer:document.getElementById("big-timer")};
     function applyLayout(nextLayout) {
       const themeColor=nextLayout?.color||nextLayout?.small_timer?.color||"#28e5e1";
@@ -105,7 +106,14 @@
     applyLayout(layout);
     const clock = value => { const n=Math.max(0,Number(value)||0),m=Math.floor(n/60),s=Math.floor(n%60); return `${m}:${String(s).padStart(2,"0")}`; };
     const countText = count => `${count} entrant${count===1?"":"s"}`;
-    const hideAll = () => Object.values(layers).forEach(layer=>layer.classList.remove("visible"));
+    const hideAll = () => {
+      clearTimeout(winnerHideTimer); winnerHideTimer=0;
+      Object.values(layers).forEach(layer=>layer.classList.remove("visible"));
+    };
+    const scheduleWinnerHide = delay => {
+      clearTimeout(winnerHideTimer);
+      winnerHideTimer=setTimeout(hideAll,delay);
+    };
     function renderRows(index) {
       const rows=[...document.querySelectorAll(".reel-row")];
       if (!entrants.length) { rows.forEach((row,i)=>row.textContent=i===2?"Waiting for entries":""); return; }
@@ -142,7 +150,7 @@
         reelRows.style.transform=`translateY(${-fraction*20}%)`;
         reelRows.style.filter=`blur(${Math.max(0,(1-p)*1.15)}px)`;
         if (p<1) spinFrame=requestAnimationFrame(animate);
-        else { reelRows.style.transform="translateY(0)"; reelRows.style.filter="none"; renderRows(winner); layers.reel.className="layer visible winner"; }
+        else { reelRows.style.transform="translateY(0)"; reelRows.style.filter="none"; renderRows(winner); layers.reel.className="layer visible winner"; scheduleWinnerHide(8000); }
       };
       spinFrame=requestAnimationFrame(animate);
     }
@@ -157,7 +165,7 @@
         return;
       }
       if (event.type==="spin") { spin(event); return; }
-      if (event.type==="winner") { const reelRows=document.querySelector(".reel-rows"); reelRows.style.transform="translateY(0)"; reelRows.style.filter="none"; layers.reel.className="layer visible winner"; const i=entrants.findIndex(x=>x.id===String(event.winner_id)); if(i>=0)renderRows(i); return; }
+      if (event.type==="winner") { const reelRows=document.querySelector(".reel-rows"); reelRows.style.transform="translateY(0)"; reelRows.style.filter="none"; layers.reel.className="layer visible winner"; const i=entrants.findIndex(x=>x.id===String(event.winner_id)); if(i>=0)renderRows(i); scheduleWinnerHide(5000); return; }
       if (event.type==="cancelled") hideAll();
     }
     function connect() {

@@ -396,8 +396,8 @@ function CyanInput(props) {
   return <input {...props} style={{ ...C.input, ...props.style }} onFocus={e=>e.target.style.borderColor="var(--cyan)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />;
 }
 
-function CyanSelect({ value, onChange, children, style }) {
-  return <select value={value} onChange={onChange} style={{ ...C.input, ...style }} onFocus={e=>e.target.style.borderColor="var(--cyan)"} onBlur={e=>e.target.style.borderColor="var(--border)"}>{children}</select>;
+function CyanSelect({ value, onChange, children, style, ...props }) {
+  return <select {...props} value={value} onChange={onChange} style={{ ...C.input, ...style }} onFocus={e=>e.target.style.borderColor="var(--cyan)"} onBlur={e=>e.target.style.borderColor="var(--border)"}>{children}</select>;
 }
 
 // ── Login Screen ──────────────────────────────────────────────────────────────
@@ -576,14 +576,15 @@ function MemberPicker({ guildId, value, onChange }) {
   const [search, setSearch]   = useState("");
   const [loading, setLoading] = useState(false);
   const selected = value ? members.find(m => String(m.id) === String(value)) : null;
-  useEffect(() => {
+  const loadMembers = useCallback(() => {
     if (!guildId) return;
     setLoading(true);
-    apiFetch(`/api/guild/${guildId}/members`)
+    apiFetch(`/api/guild/${guildId}/members?refresh=${Date.now()}`, { cache:"no-store" })
       .then(r => setMembers(Array.isArray(r) ? r : (r?.members || [])))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [guildId]);
+  useEffect(() => { loadMembers(); }, [loadMembers]);
   const q = search.toLowerCase();
   const filtered = q
     ? members.filter(m => ((m.display_name||"").toLowerCase()).includes(q) || ((m.username||"").toLowerCase()).includes(q)).slice(0,100)
@@ -601,10 +602,13 @@ function MemberPicker({ guildId, value, onChange }) {
             <button onClick={() => onChange(null)} style={{ marginLeft:"auto", ...C.btnDanger, padding:"2px 8px", fontSize:11 }}>✕</button>
           </div>
         )}
-        <input value={search} onChange={e => setSearch(e.target.value)}
-          placeholder={loading ? "Loading members…" : "Search members…"} disabled={loading}
-          style={{ ...C.input, padding:"5px 10px", fontSize:12, width:"100%", boxSizing:"border-box" }}
-          onFocus={e=>e.target.style.borderColor="var(--cyan)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+        <div style={{ display:"flex", gap:6 }}>
+          <input value={search} onChange={e => setSearch(e.target.value)}
+            placeholder={loading ? "Loading members…" : "Search members…"} disabled={loading}
+            style={{ ...C.input, padding:"5px 10px", fontSize:12, width:"100%", boxSizing:"border-box" }}
+            onFocus={e=>e.target.style.borderColor="var(--cyan)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+          <button type="button" onClick={loadMembers} disabled={loading} title="Refresh Discord member list" style={{ ...C.btnSecondary, padding:"4px 9px", flexShrink:0 }}>{loading?"…":"↻"}</button>
+        </div>
       </div>
       <div style={{ maxHeight:200, overflowY:"auto" }}>
         <div onClick={() => onChange(null)}
@@ -860,6 +864,7 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
   const [newLimit, setNewLimit]   = useState(75);
   const [savingLimit, setSavingLimit] = useState(false);
   const [search, setSearch]       = useState("");
+  const [linkFilter, setLinkFilter] = useState("all");
   const [sortBy, setSortBy]       = useState("added");
   const [sortOpen, setSortOpen]   = useState(false);
   const [showActiveHelp, setShowActiveHelp] = useState(false);
@@ -922,9 +927,12 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
 
   const atLimit = count >= limit;
   const limitColor = count >= limit ? "var(--red)" : count >= limit * 0.8 ? "var(--yellow)" : "var(--text3)";
-  const filtered = search.trim()
-    ? streamers.filter(s => (s.display_name||s.twitch_username).toLowerCase().includes(search.toLowerCase()))
-    : streamers;
+  const filtered = streamers.filter(s => {
+    const matchesSearch = !search.trim() || (s.display_name||s.twitch_username).toLowerCase().includes(search.toLowerCase());
+    const hasDiscordLink = Boolean(s.discord_user_id);
+    const matchesLink = linkFilter === "all" || (linkFilter === "linked" ? hasDiscordLink : !hasDiscordLink);
+    return matchesSearch && matchesLink;
+  });
   const sortedStreamers = [...filtered].sort((a, b) => {
     if (sortBy === "alphabetical") {
       return (a.display_name || a.twitch_username).localeCompare(
@@ -978,6 +986,11 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
               onFocus={e=>e.target.style.borderColor="var(--cyan)"}
               onBlur={e=>e.target.style.borderColor="var(--border)"}
             />
+            <CyanSelect value={linkFilter} onChange={e=>setLinkFilter(e.target.value)} className="mob-full" style={{ width:145, padding:"6px 10px", fontSize:12 }} aria-label="Filter by Discord Live Role link">
+              <option value="all">All Live Role links</option>
+              <option value="linked">Discord linked</option>
+              <option value="unlinked">Not linked</option>
+            </CyanSelect>
             <div ref={sortMenuRef} className="mob-full" style={{ position:"relative" }}>
               <button
                 type="button"
@@ -1072,7 +1085,7 @@ function StreamersTab({ guildId, isDev, showAdd: showAddProp, onAddClose }) {
               </div>
               );
             })}
-            {!sortedStreamers.length && <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}><div style={{ fontSize:32, marginBottom:12 }}>{search ? "🔍" : "📺"}</div><div style={{ fontFamily:"'Outfit',sans-serif", fontSize:13 }}>{search ? `No streamers matching "${search}"` : "No streamers tracked yet"}</div></div>}
+            {!sortedStreamers.length && <div style={{ textAlign:"center", padding:"60px 0", color:"var(--text3)" }}><div style={{ fontSize:32, marginBottom:12 }}>{search || linkFilter!=="all" ? "🔍" : "📺"}</div><div style={{ fontFamily:"'Outfit',sans-serif", fontSize:13 }}>{search || linkFilter!=="all" ? "No streamers match the current filters" : "No streamers tracked yet"}</div></div>}
           </div>
         )}
       </div>
@@ -2125,6 +2138,7 @@ function BirthdaysTab({ guildId }) {
   const [showBdayModal, setShowBdayModal] = useState(false);
   const [bdayForm, setBdayForm]   = useState({ user_id:"", day:1, month:1, year:"" });
   const [bdayEditId, setBdayEditId] = useState(null);
+  const [memberSearch, setMemberSearch] = useState("");
 
   const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -2158,7 +2172,8 @@ function BirthdaysTab({ guildId }) {
 
   const openAddBday = () => {
     setBdayEditId(null);
-    setBdayForm({ user_id: members[0]?.id || "", day:1, month:1, year:"" });
+    setMemberSearch("");
+    setBdayForm({ user_id:"", day:1, month:1, year:"" });
     setShowBdayModal(true);
   };
   const openEditBday = (b) => {
@@ -2236,9 +2251,13 @@ function BirthdaysTab({ guildId }) {
           </div>
           {!bdayEditId && (
             <Field label="Member">
+              <CyanInput value={memberSearch} onChange={e=>setMemberSearch(e.target.value)} placeholder="Search by name or username…" autoFocus />
               <CyanSelect value={bdayForm.user_id} onChange={e => setBdayForm(p => ({ ...p, user_id: e.target.value }))}>
                 <option value="">Select member...</option>
-                {members.map(m => <option key={m.id} value={m.id}>{m.username}</option>)}
+                {members.filter(m => {
+                  const q=memberSearch.trim().toLowerCase();
+                  return !q || (m.display_name||"").toLowerCase().includes(q) || (m.username||"").toLowerCase().includes(q);
+                }).map(m => <option key={m.id} value={m.id}>{m.display_name}{m.display_name!==m.username?` (@${m.username})`:""}</option>)}
               </CyanSelect>
             </Field>
           )}
@@ -2264,7 +2283,7 @@ function BirthdaysTab({ guildId }) {
           </div>
           <div style={{ display:"flex", justifyContent:"flex-end", gap:10 }}>
             <button onClick={() => setShowBdayModal(false)} style={C.btnSecondary}>Cancel</button>
-            <button onClick={saveBday} style={C.btnPrimary}>{bdayEditId ? "Save Changes" : "Add Birthday"}</button>
+            <button onClick={saveBday} disabled={!bdayEditId&&!bdayForm.user_id} style={{...C.btnPrimary,opacity:(!bdayEditId&&!bdayForm.user_id) ? 0.6 : 1}}>{bdayEditId ? "Save Changes" : "Add Birthday"}</button>
           </div>
         </Modal>
       )}
@@ -5099,6 +5118,13 @@ function ServerInfoTab({ guildId }) {
       setData(current => ({ ...current, alerts:{ ...current.alerts, permission_dm_muted:result.permission_dm_muted } }));
     } catch (e) { setError(e.message); }
   };
+  const setBotOwnerPermissionDmMuted = async muted => {
+    setError("");
+    try {
+      const result = await apiFetch(`/api/dev/server-info/${guildId}/bot-owner-permission-dm`, { method:"PATCH", body:JSON.stringify({ muted }) });
+      setData(current => ({ ...current, alerts:{ ...current.alerts, bot_owner_dm_muted:result.bot_owner_dm_muted } }));
+    } catch (e) { setError(e.message); }
+  };
 
   if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:50 }}><Spinner /></div>;
   if (error) return <><PageHeader title="Server Info" subtitle="Owner-only server inspection" /><div style={{...C.card,color:"var(--red)"}}>⚠️ {error}</div></>;
@@ -5114,7 +5140,7 @@ function ServerInfoTab({ guildId }) {
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(290px,1fr))",gap:14,marginBottom:14}}>
       <InfoCard title="Server & Owner"><Row label="Created" value={dateText(s.created_at)} /><Row label="Bot joined" value={dateText(s.bot_joined_at)} /><Row label="Owner display name" value={o.display_name} /><Row label="Owner username" value={o.username ? `@${o.username}` : null} /><Row label="Owner user ID" value={o.id} mono /></InfoCard>
       <InfoCard title="Bot Role"><Row label="Highest role" value={data.bot_role.name ? `@${data.bot_role.name}` : null} /><Row label="Role ID" value={data.bot_role.id} mono /><Row label="Hierarchy position" value={data.bot_role.position != null ? `${data.bot_role.position} of ${Math.max(0,data.bot_role.role_count-1)}` : null} /></InfoCard>
-      <InfoCard title="Important Permissions"><div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{Object.values(data.permissions).map(p=><span key={p.label} style={{padding:"6px 9px",borderRadius:20,fontSize:11,color:p.granted?"var(--green)":"var(--red)",background:p.granted?"rgba(57,217,138,.09)":"var(--red-dim)",border:`1px solid ${p.granted?"rgba(57,217,138,.25)":"rgba(255,77,109,.3)"}`}}>{p.granted?"✓":"✕"} {p.label}</span>)}</div>{data.channel_permission_issues.length>0&&<div style={{marginTop:13,color:"var(--yellow)",fontSize:11}}>⚠ {data.channel_permission_issues.length} channel-specific issue{data.channel_permission_issues.length===1?"":"s"} currently detected</div>}<div style={{marginTop:15,paddingTop:13,borderTop:"1px solid var(--border)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}><div><div style={{fontSize:12,color:"var(--text)"}}>Permission issue DMs to server owner</div><div style={{fontSize:10,color:"var(--text3)",marginTop:3}}>Logs and dashboard warnings continue while muted.</div></div><button onClick={()=>setPermissionDmMuted(!data.alerts?.permission_dm_muted)} style={data.alerts?.permission_dm_muted?C.btnPrimary:C.btnDanger}>{data.alerts?.permission_dm_muted?"Restore DMs":"Mute DMs"}</button></div></InfoCard>
+      <InfoCard title="Important Permissions"><div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{Object.values(data.permissions).map(p=><span key={p.label} style={{padding:"6px 9px",borderRadius:20,fontSize:11,color:p.granted?"var(--green)":"var(--red)",background:p.granted?"rgba(57,217,138,.09)":"var(--red-dim)",border:`1px solid ${p.granted?"rgba(57,217,138,.25)":"rgba(255,77,109,.3)"}`}}>{p.granted?"✓":"✕"} {p.label}</span>)}</div>{data.channel_permission_issues.length>0&&<div style={{marginTop:13,color:"var(--yellow)",fontSize:11}}>⚠ {data.channel_permission_issues.length} channel-specific issue{data.channel_permission_issues.length===1?"":"s"} currently detected</div>}<div style={{marginTop:15,paddingTop:13,borderTop:"1px solid var(--border)",display:"grid",gap:12}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}><div><div style={{fontSize:12,color:"var(--text)"}}>Permission issue DMs to server owner</div><div style={{fontSize:10,color:"var(--text3)",marginTop:3}}>Logs and dashboard warnings continue while muted.</div></div><button onClick={()=>setPermissionDmMuted(!data.alerts?.permission_dm_muted)} style={data.alerts?.permission_dm_muted?C.btnPrimary:C.btnDanger}>{data.alerts?.permission_dm_muted?"Restore DMs":"Mute DMs"}</button></div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap",paddingTop:12,borderTop:"1px solid var(--border)"}}><div><div style={{fontSize:12,color:"var(--text)"}}>Permission issue DMs to bot owner</div><div style={{fontSize:10,color:"var(--text3)",marginTop:3}}>Only your DM is muted; the bot log channel still receives the alert.</div></div><button onClick={()=>setBotOwnerPermissionDmMuted(!data.alerts?.bot_owner_dm_muted)} style={data.alerts?.bot_owner_dm_muted?C.btnPrimary:C.btnDanger}>{data.alerts?.bot_owner_dm_muted?"Restore My DMs":"Mute My DMs"}</button></div></div></InfoCard>
       <InfoCard title="Configured Channels">{Object.entries(data.channels).map(([label,items])=><Row key={label} label={label} value={items.filter(Boolean).length ? items.filter(Boolean).map(x=>`${x.name} (${x.id})`).join(", ") : "Not configured"} mono />)}</InfoCard>
       <InfoCard title="Notification Delivery"><div style={{display:"flex",gap:10,marginBottom:12}}>{[["Sent",counts.sent,"var(--green)"],["Failed",counts.failed,"var(--red)"],["Total",counts.total,"var(--cyan)"]].map(([l,v,c])=><div key={l} style={{flex:1,padding:10,borderRadius:7,background:"rgba(8,11,15,.7)",textAlign:"center"}}><div style={{fontSize:19,fontWeight:700,color:c}}>{v}</div><div style={{fontSize:9,color:"var(--text3)"}}>{l.toUpperCase()} · 24H</div></div>)}</div>{data.notifications.recent.length ? data.notifications.recent.slice(0,5).map((n,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"6px 0",fontSize:11,borderBottom:"1px solid rgba(36,52,68,.45)"}}><span style={{color:"var(--text2)"}}>@{n.streamer_name} → {n.channel?.name}</span><span style={{color:n.status==="sent"?"var(--green)":"var(--red)"}}>{n.status} · {timeAgo(n.sent_at)}</span></div>) : <div style={{color:"var(--text3)",fontSize:11}}>No recent deliveries recorded.</div>}</InfoCard>
       <InfoCard title="Dashboard Users"><div style={{color:"var(--text3)",fontSize:10,marginBottom:10}}>Currently authenticated sessions with access to this server.</div>{data.dashboard_users.length ? data.dashboard_users.map(u=><Row key={u.user_id} label={u.access} value={`${u.username} · ${u.user_id}`} mono />) : <div style={{color:"var(--text3)",fontSize:11}}>No active sessions found.</div>}</InfoCard>
@@ -5362,6 +5388,7 @@ export default function App() {
   const [activeGuild, setActiveGuild] = useState(null);
   const [activeTab, setActiveTab] = useState("overview");
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [guildSearch, setGuildSearch] = useState("");
   const [serverEstablished, setServerEstablished] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loggedIn, setLoggedIn] = useState(false);
@@ -5414,7 +5441,7 @@ export default function App() {
     try { await apiFetch("/auth/logout", { method:"POST" }); } catch(e) {}
     setLoggedIn(false); setUser(null);
   };
-  const switchGuild = (id) => { setActiveGuild(id); localStorage.setItem("ep_last_guild",id); setDropdownOpen(false); setServerEstablished(null); setActiveTab("overview"); };
+  const switchGuild = (id) => { setActiveGuild(id); localStorage.setItem("ep_last_guild",id); setDropdownOpen(false); setGuildSearch(""); setServerEstablished(null); setActiveTab("overview"); };
 
   if (loading) return <div style={{ height:"100vh", background:"var(--bg)", display:"flex", alignItems:"center", justifyContent:"center" }}><Spinner size={32} /></div>;
   if (!loggedIn) return <LoginScreen />;
@@ -5463,6 +5490,7 @@ export default function App() {
     { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
   ] : [];
   const hasAdminNav = operationsTabs.length + managementTabs.length + feedbackTabs.length + advancedAdminTabs.length > 0;
+  const searchedGuilds = guilds.filter(g => !guildSearch.trim() || (g.name||"").toLowerCase().includes(guildSearch.trim().toLowerCase()) || String(g.id).includes(guildSearch.trim()));
 
   return (
     <div style={{ height:"100vh", width:"100vw", background:"var(--bg)", color:"var(--text)", fontFamily:"'Outfit',sans-serif", display:"flex", flexDirection:"column", overflow:"hidden", position:"relative" }}>
@@ -5494,8 +5522,9 @@ export default function App() {
           </button>
           {dropdownOpen && guilds.length>1 && (
             <div style={{ position:"absolute", top:"calc(100% + 6px)", left:0, background:"linear-gradient(135deg, rgba(16,23,33,0.99) 0%, rgba(11,16,24,0.99) 100%)", border:"1px solid rgba(0,245,212,0.22)", borderRadius:10, padding:6, minWidth:220, zIndex:100, boxShadow:"0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,245,212,0.04), inset 0 1px 0 rgba(0,245,212,0.09)", maxHeight:"calc(100vh - 80px)", overflowY:"auto" }}>
+              {(isActuallyDev || isAdmin) && <input value={guildSearch} onChange={e=>setGuildSearch(e.target.value)} placeholder="Search servers…" autoFocus style={{...C.input,width:"100%",padding:"7px 9px",fontSize:11,marginBottom:6}} />}
               {/* Own servers — always shown */}
-              {(effectivelyAdmin || isAdmin ? guilds.filter(g => !g.admin_access) : guilds).map(g=>(
+              {(effectivelyAdmin || isAdmin ? searchedGuilds.filter(g => !g.admin_access) : searchedGuilds).map(g=>(
                 <button key={g.id} onClick={()=>switchGuild(g.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:"8px 10px", borderRadius:7, border:"none", background:activeGuild===g.id?"var(--cyan-dim)":"transparent", color:activeGuild===g.id?"var(--cyan)":"var(--text)", cursor:"pointer", fontSize:13, fontFamily:"'Outfit',sans-serif", textAlign:"left" }}>
                   <GuildAvatar guild={g} size={24} />
                   <div style={{ flex:1 }}>
@@ -5506,9 +5535,9 @@ export default function App() {
                 </button>
               ))}
               {/* Admin access section */}
-              {guilds.some(g => g.admin_access) && (effectivelyAdmin || isAdmin) && <>
+              {searchedGuilds.some(g => g.admin_access) && (effectivelyAdmin || isAdmin) && <>
                 <div style={{ fontSize:9, color:"rgba(245,180,50,0.8)", textTransform:"uppercase", letterSpacing:1.5, padding:"8px 10px 4px", fontFamily:"'JetBrains Mono',monospace", borderTop:"1px solid var(--border)", marginTop:4 }}>Admin Access</div>
-                {guilds.filter(g => g.admin_access).map(g=>(
+                {searchedGuilds.filter(g => g.admin_access).map(g=>(
                   <button key={g.id} onClick={()=>switchGuild(g.id)} style={{ display:"flex", alignItems:"center", gap:10, width:"100%", padding:"8px 10px", borderRadius:7, border:"none", background:activeGuild===g.id?"rgba(245,180,50,0.1)":"transparent", color:activeGuild===g.id?"#f5b432":"var(--text2)", cursor:"pointer", fontSize:13, fontFamily:"'Outfit',sans-serif", textAlign:"left" }}>
                     <GuildAvatar guild={g} size={24} />
                     <div style={{ flex:1 }}>

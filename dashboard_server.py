@@ -244,7 +244,7 @@ async def get_guild_members(request):
                 "avatar":       m.avatar.key if m.avatar else None,
             })
         members.sort(key=lambda m: m["display_name"].lower())
-        return web.json_response({"members": members})
+        return web.json_response({"members": members}, headers={"Cache-Control": "no-store"})
     except Exception as e:
         logger.error(f"Error fetching members for guild {guild_id}: {e}")
         return web.json_response({"members": []})
@@ -2693,6 +2693,7 @@ let player = null;
 let ytReady = false;
 let savedVolume = 100;
 let progressInterval = null;
+let playbackRecoveryTimer = null;
 
 
 function formatTime(seconds) {{
@@ -2732,10 +2733,27 @@ function onYouTubeIframeAPIReady() {{
 function extractVideoId(url) {{
   try {{
     const u = new URL(url);
-    if (u.hostname.includes("youtu.be")) return u.pathname.slice(1).split("?")[0];
-    if (u.pathname.includes("/shorts/")) return u.pathname.split("/shorts/")[1].split("?")[0];
-    return u.searchParams.get("v") || null;
+    const host = u.hostname.toLowerCase().replace(/^www\\./, "");
+    let id = null;
+    if (host === "youtu.be") id = u.pathname.slice(1).split("/")[0];
+    if (["youtube.com", "m.youtube.com", "music.youtube.com"].includes(host)) {{
+      for (const prefix of ["/shorts/", "/live/", "/embed/"]) {{
+        if (u.pathname.startsWith(prefix)) id = u.pathname.slice(prefix.length).split("/")[0];
+      }}
+      id = id || u.searchParams.get("v");
+    }}
+    return id && /^[A-Za-z0-9_-]{{11}}$/.test(id) ? id : null;
   }} catch {{ return null; }}
+}}
+
+function finishCurrent(delay = 500) {{
+  if (playbackRecoveryTimer) clearTimeout(playbackRecoveryTimer);
+  playbackRecoveryTimer = null;
+  frameWrap.style.display = "none";
+  rdm.style.display = "none";
+  stopProgress();
+  playing = false;
+  setTimeout(processQueue, delay);
 }}
 
 const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -2771,15 +2789,18 @@ ws.onclose = () => {{ setTimeout(() => location.reload(), 3000); }};
 
 function onPlayerStateChange(e) {{
   if (e.data === YT.PlayerState.PLAYING) {{
+    if (playbackRecoveryTimer) clearTimeout(playbackRecoveryTimer);
+    playbackRecoveryTimer = null;
     startProgress();
   }}
   if (e.data === YT.PlayerState.ENDED && playing) {{
-    frameWrap.style.display = "none";
-    rdm.style.display = "none";
-    stopProgress();
-    playing = false;
-    setTimeout(processQueue, 500);
+    finishCurrent(500);
   }}
+}}
+
+function onPlayerError(e) {{
+  console.error("YouTube player rejected video:", e.data);
+  finishCurrent(250);
 }}
 
 function processQueue() {{
@@ -2794,6 +2815,12 @@ function processQueue() {{
   console.log("Playing videoId:", videoId, "ytReady:", ytReady);
   if (!videoId) {{ playing = false; setTimeout(processQueue, 500); return; }}
   playing = true;
+  if (playbackRecoveryTimer) clearTimeout(playbackRecoveryTimer);
+  playbackRecoveryTimer = setTimeout(() => {{
+    console.error("YouTube playback did not start; skipping queued video");
+    if (player) player.stopVideo();
+    finishCurrent(250);
+  }}, 12000);
   const volume = savedVolume;
   rdm.textContent = item.redeemer ? item.redeemer + " redeemed!" : "";
   rdm.style.display = item.redeemer ? "block" : "none";
@@ -2808,7 +2835,8 @@ function processQueue() {{
       playerVars: {{ autoplay: 1, controls: 0, disablekb: 1, modestbranding: 1, rel: 0, iv_load_policy: 3 }},
       events: {{
         onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
-        onStateChange: onPlayerStateChange
+        onStateChange: onPlayerStateChange,
+        onError: onPlayerError
       }}
     }});
   }}
@@ -3712,6 +3740,10 @@ async def get_owner_server_info(request):
         "features": features,
         "alerts": {
             "permission_dm_muted": bool(await asyncio.to_thread(_bot_ref.db.get_permission_dm_muted, int(guild_id))),
+            "bot_owner_dm_muted": bool(await asyncio.to_thread(
+                getattr(_bot_ref.db, "get_bot_owner_permission_dm_muted", lambda _guild_id: False),
+                int(guild_id),
+            )),
         },
     })
 
@@ -3735,6 +3767,27 @@ async def set_owner_permission_dm_mute(request):
     await asyncio.to_thread(_bot_ref.db.set_permission_dm_muted, guild_id_int, muted)
     logger.info("Owner %s permission DMs for guild %s", "muted" if muted else "restored", guild_id)
     return web.json_response({"ok": True, "permission_dm_muted": muted})
+
+
+async def set_bot_owner_permission_dm_mute(request):
+    """Owner-only: mute or restore permission-problem DMs to the bot owner for one guild."""
+    _require_owner(request)
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    guild_id = str(request.match_info["guild_id"])
+    try:
+        guild_id_int = int(guild_id)
+    except ValueError:
+        raise web.HTTPBadRequest(reason="Invalid server ID")
+    if not _bot_ref.get_guild(guild_id_int):
+        raise web.HTTPNotFound(reason="Server is not available in the bot cache")
+    body = await request.json()
+    if not isinstance(body.get("muted"), bool):
+        raise web.HTTPBadRequest(reason="muted must be true or false")
+    muted = body["muted"]
+    await asyncio.to_thread(_bot_ref.db.set_bot_owner_permission_dm_muted, guild_id_int, muted)
+    logger.info("Owner %s their permission DMs for guild %s", "muted" if muted else "restored", guild_id)
+    return web.json_response({"ok": True, "bot_owner_dm_muted": muted})
 
 
 _FORTUNA_HISTORY_DAYS = 30
@@ -6594,6 +6647,7 @@ def create_dashboard_app(bot=None):
     app.router.add_post("/api/dev/bot-statuses", set_bot_statuses)
     app.router.add_get("/api/dev/server-info/{guild_id}", get_owner_server_info)
     app.router.add_patch("/api/dev/server-info/{guild_id}/permission-dm", set_owner_permission_dm_mute)
+    app.router.add_patch("/api/dev/server-info/{guild_id}/bot-owner-permission-dm", set_bot_owner_permission_dm_mute)
     app.router.add_get("/api/admin/fortuna-control", get_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/start", start_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/spin", spin_fortuna_control)

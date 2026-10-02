@@ -16,30 +16,33 @@ class BirthdaySetModal(discord.ui.Modal, title="Set Birthday"):
 
     day = discord.ui.TextInput(label="Day", placeholder="e.g. 15", min_length=1, max_length=2)
     month = discord.ui.TextInput(label="Month (number)", placeholder="e.g. 6 for June", min_length=1, max_length=2)
-    year = discord.ui.TextInput(label="Year of birth", placeholder="e.g. 1995", min_length=4, max_length=4)
+    year = discord.ui.TextInput(label="Year of birth (optional)", placeholder="Leave blank to hide your age", required=False, min_length=4, max_length=4)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             day = int(self.day.value)
             month = int(self.month.value)
-            year = int(self.year.value)
-            birthday = datetime(year=year, month=month, day=day)
+            year = int(self.year.value) if self.year.value.strip() else 0
+            validation_year = year or 2000
+            birthday = datetime(year=validation_year, month=month, day=day)
         except ValueError:
             await interaction.response.send_message("❌ Invalid date. Please check the day, month, and year.", ephemeral=True)
             return
 
         now = datetime.now()
-        age = now.year - year - ((now.month, now.day) < (month, day))
-        if age < 0 or age > 130:
+        age = now.year - year - ((now.month, now.day) < (month, day)) if year else None
+        if age is not None and (age < 0 or age > 130):
             await interaction.response.send_message("❌ That doesn't look like a valid birth year.", ephemeral=True)
             return
 
         self.db.set_birthday(guild_id=interaction.guild.id, user_id=self.target_user.id, day=day, month=month, year=year)
 
         if self.target_user.id == interaction.user.id:
-            msg = f"🎂 Your birthday has been set to **{birthday.strftime('%B %d, %Y')}**!"
+            date_text = birthday.strftime('%B %d') + (f", {year}" if year else "")
+            msg = f"🎂 Your birthday has been set to **{date_text}**!"
         else:
-            msg = f"🎂 Birthday for {self.target_user.mention} set to **{birthday.strftime('%B %d, %Y')}**!"
+            date_text = birthday.strftime('%B %d') + (f", {year}" if year else "")
+            msg = f"🎂 Birthday for {self.target_user.mention} set to **{date_text}**!"
 
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -84,12 +87,13 @@ class BirthdayChecker:
                 member = guild.get_member(b["user_id"])
                 if not member:
                     continue
-                age = today.year - b["year"]
                 try:
-                    await channel.send(
-                        f"🎂 It's {member.mention}'s birthday today! "
-                        f"They are turning **{age}** years old! Happy Birthday! 🎉"
-                    )
+                    if b["year"]:
+                        age = today.year - b["year"]
+                        message = f"🎂 It's {member.mention}'s birthday today! They are turning **{age}** years old! Happy Birthday! 🎉"
+                    else:
+                        message = f"🎂 It's {member.mention}'s birthday today! Happy Birthday! 🎉"
+                    await channel.send(message)
                 except Exception as e:
                     logger.error(f"Failed to send birthday message in guild {guild.id}: {e}")
         self._last_birthday_date = today
@@ -148,8 +152,9 @@ async def setup(discord_bot):
         for b in birthdays:
             member = interaction.guild.get_member(b["user_id"])
             name = member.display_name if member else f"Unknown ({b['user_id']})"
-            dt = datetime(year=b["year"], month=b["month"], day=b["day"])
-            lines.append(f"**{name}** — {dt.strftime('%B %d, %Y')}")
+            dt = datetime(year=b["year"] or 2000, month=b["month"], day=b["day"])
+            date_text = dt.strftime('%B %d') + (f", {b['year']}" if b["year"] else "")
+            lines.append(f"**{name}** — {date_text}")
         embed = discord.Embed(title="🎂 Server Birthdays", description="\n".join(lines), color=discord_bot.db.get_embed_color(interaction.guild.id))
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

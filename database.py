@@ -954,9 +954,18 @@ class Database:
             CREATE TABLE IF NOT EXISTS guild_alert_settings (
                 guild_id             INTEGER PRIMARY KEY,
                 permission_dm_muted  INTEGER NOT NULL DEFAULT 0,
+                bot_owner_dm_muted   INTEGER NOT NULL DEFAULT 0,
                 updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        try:
+            cursor.execute(
+                "ALTER TABLE guild_alert_settings ADD COLUMN bot_owner_dm_muted INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("Migration: added bot_owner_dm_muted to guild_alert_settings")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
         # Track kicked guilds for 7-day grace period before data wipe
         cursor.execute('''
@@ -988,6 +997,29 @@ class Database:
             VALUES (?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(guild_id) DO UPDATE SET
                 permission_dm_muted = excluded.permission_dm_muted,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (guild_id, 1 if muted else 0))
+        conn.commit()
+        conn.close()
+
+    def get_bot_owner_permission_dm_muted(self, guild_id: int) -> bool:
+        """Return whether permission-problem DMs to the bot owner are muted for a guild."""
+        conn = self.get_connection()
+        row = conn.execute(
+            "SELECT bot_owner_dm_muted FROM guild_alert_settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        conn.close()
+        return bool(row and row[0])
+
+    def set_bot_owner_permission_dm_muted(self, guild_id: int, muted: bool):
+        """Persist the bot-owner permission DM mute for a guild."""
+        conn = self.get_connection()
+        conn.execute('''
+            INSERT INTO guild_alert_settings (guild_id, bot_owner_dm_muted, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                bot_owner_dm_muted = excluded.bot_owner_dm_muted,
                 updated_at = CURRENT_TIMESTAMP
         ''', (guild_id, 1 if muted else 0))
         conn.commit()
