@@ -60,18 +60,22 @@ class TestSaturation:
         assert welcome_banner._color_saturation(0, 255, 255) == 1.0
 
 
-class TestExactAccentRemap:
-    def test_reference_accent_maps_to_selected_rgb(self):
-        source = Image.new("RGB", (1, 1), (0, 200, 200))
-        selected = (173, 64, 211)
-        result = welcome_banner._recolor_image(source, selected, reference_value=200, reference_hue=128)
-        actual = result.getpixel((0, 0))
-        assert all(abs(got - expected) <= 2 for got, expected in zip(actual, selected))
+class TestSampledHueShift:
+    def test_reference_pixel_maps_to_selected_hue_without_changing_depth(self):
+        source = Image.new("RGB", (1, 1), (22, 226, 235))
+        source_h, source_s, source_v = source.convert("HSV").getpixel((0, 0))
+        target_hue = welcome_banner._rgb_to_hue(173, 64, 211)
+        result = welcome_banner._hue_shift_image(
+            source, target_hue, reference_hue=source_h
+        )
+        actual_h, actual_s, actual_v = result.convert("HSV").getpixel((0, 0))
+        assert abs(actual_h - target_hue) <= 1
+        assert abs(actual_s - source_s) <= 1
+        assert abs(actual_v - source_v) <= 1
 
-    def test_neutral_background_is_unchanged(self):
-        source = Image.new("RGB", (1, 1), (18, 21, 26))
-        result = welcome_banner._recolor_image(source, (255, 0, 0), reference_value=200, reference_hue=128)
-        assert result.getpixel((0, 0)) == source.getpixel((0, 0))
+    def test_template_reference_uses_bright_visible_accent(self):
+        template = Image.open(welcome_banner.BANNER_TEMPLATE_PATH).convert("RGB")
+        assert 127 <= welcome_banner._compute_template_dominant_hue(template) <= 131
 
 
 class TestSubstitutePlaceholders:
