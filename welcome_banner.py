@@ -1,12 +1,12 @@
 """Welcome / Goodbye banner generation.
 
-Renders a hue-shifted banner with the user's avatar + a welcome/goodbye
+Renders a server-color-matched banner with the user's avatar + a welcome/goodbye
 message overlay. The banner template is a single shared file
-(`assets/banner_template.png`) designed in cyan; we shift its hue at
-runtime to match each server's configured embed color so the banner
-visually matches the server's theme.
+(`assets/banner_template.png`) designed in cyan; its colored artwork is
+remapped around the server's exact configured RGB color while retaining
+the original highlights, shadows, and neutral background.
 
-The username also gets hue-shifted glow — not hardcoded cyan — so when a
+The username also uses the configured glow — not hardcoded cyan — so when a
 server picks green, the username's glow goes green too. Stays consistent.
 
 Image generation runs in a thread pool via asyncio.to_thread so it
@@ -19,7 +19,7 @@ import math
 import os
 from typing import Optional
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ def _find_font(candidates: list[str], size: int) -> ImageFont.FreeTypeFont:
 # load so the shift math is correct regardless of how the template was
 # designed.
 _TEMPLATE_DOMINANT_HUE: Optional[int] = None
+_TEMPLATE_ACCENT_VALUE: Optional[int] = None
 
 
 def _compute_template_dominant_hue(image: Image.Image) -> int:
@@ -97,9 +98,26 @@ def _compute_template_dominant_hue(image: Image.Image) -> int:
     return bins.index(max(bins))
 
 
+def _compute_template_accent_value(image: Image.Image, dominant_hue: int) -> int:
+    """Return the representative brightness of the template's accent color."""
+    hsv = image.convert("HSV")
+    values = []
+    for h, s, v in zip(hsv.getdata(0), hsv.getdata(1), hsv.getdata(2)):
+        hue_distance = min((h - dominant_hue) % 256, (dominant_hue - h) % 256)
+        if s > 80 and hue_distance <= 14:
+            values.append(v)
+    if not values:
+        return 255
+    values.sort()
+    # The upper quartile represents the visible accent, rather than its dim
+    # glow. Mapping this level to the selected RGB keeps that color recognizable
+    # while allowing the brightest template pixels to remain highlights.
+    return max(1, values[int((len(values) - 1) * 0.75)])
+
+
 def _ensure_template_loaded() -> Optional[Image.Image]:
     """Load and cache the banner template image. Returns None on failure."""
-    global _TEMPLATE_DOMINANT_HUE
+    global _TEMPLATE_DOMINANT_HUE, _TEMPLATE_ACCENT_VALUE
     if not os.path.exists(BANNER_TEMPLATE_PATH):
         logger.error(f"Banner template missing at {BANNER_TEMPLATE_PATH}")
         return None
@@ -107,7 +125,11 @@ def _ensure_template_loaded() -> Optional[Image.Image]:
         img = Image.open(BANNER_TEMPLATE_PATH).convert("RGB")
         if _TEMPLATE_DOMINANT_HUE is None:
             _TEMPLATE_DOMINANT_HUE = _compute_template_dominant_hue(img)
-            logger.info(f"Template dominant hue detected: {_TEMPLATE_DOMINANT_HUE}/255")
+            _TEMPLATE_ACCENT_VALUE = _compute_template_accent_value(img, _TEMPLATE_DOMINANT_HUE)
+            logger.info(
+                "Template accent detected: hue=%s/255 value=%s/255",
+                _TEMPLATE_DOMINANT_HUE, _TEMPLATE_ACCENT_VALUE,
+            )
         return img
     except Exception as e:
         logger.error(f"Failed to load banner template: {e}")
@@ -142,27 +164,52 @@ def _color_saturation(r: int, g: int, b: int) -> float:
     return (mx - mn) / mx
 
 
-def _hue_shift_image(img: Image.Image, target_hue: int) -> Image.Image:
-    """Shift the entire image's hue so the dominant color moves to target_hue.
+def _recolor_image(
+    img: Image.Image,
+    target_rgb: tuple[int, int, int],
+    reference_value: Optional[int] = None,
+    reference_hue: Optional[int] = None,
+) -> Image.Image:
+    """Map colored template artwork to an exact RGB reference color.
 
-    The dominant hue of the template was computed at load time. We compute
-    the per-channel delta and add it modulo 256 to every pixel's hue.
-    Saturation and value are preserved — so the dark background stays
-    dark, and bright cyan elements just shift to bright {target} elements.
+    Fully colored pixels use the target's hue and saturation. Their brightness
+    is scaled so the template's representative accent level becomes the exact
+    requested color; brighter and darker pixels retain their shading. Neutral
+    background pixels are left untouched and transition pixels are blended.
     """
-    if _TEMPLATE_DOMINANT_HUE is None:
-        return img  # cache failure; return unmodified
+    source_hsv = img.convert("HSV")
+    source_hue, source_saturation, source_value = source_hsv.split()
+    target_h, target_s, target_v = Image.new("RGB", (1, 1), target_rgb).convert("HSV").getpixel((0, 0))
+    reference = max(1, int(reference_value or _TEMPLATE_ACCENT_VALUE or 255))
 
-    delta = (target_hue - _TEMPLATE_DOMINANT_HUE) % 256
-    if delta == 0:
-        return img
+    target_hue = Image.new("L", img.size, target_h)
+    target_saturation = Image.new("L", img.size, target_s)
+    scaled_value = source_value.point(
+        lambda value: min(255, round(value * target_v / reference))
+    )
+    recolored = Image.merge(
+        "HSV", (target_hue, target_saturation, scaled_value)
+    ).convert("RGB")
 
-    hsv = img.convert("HSV")
-    h, s, v = hsv.split()
-    # Shift hue band — wrap around 256
-    h = h.point(lambda x: (x + delta) % 256)
-    shifted = Image.merge("HSV", (h, s, v)).convert("RGB")
-    return shifted
+    # Preserve neutral background/text. Saturated accent pixels are replaced
+    # completely; antialiased edges blend smoothly into the original artwork.
+    saturation_mask = source_saturation.point(
+        lambda saturation: 0 if saturation <= 24 else min(255, round((saturation - 24) * 255 / 96))
+    )
+    source_accent_hue = int(reference_hue if reference_hue is not None else (_TEMPLATE_DOMINANT_HUE or 0))
+    hue_mask = source_hue.point(
+        lambda hue: max(
+            0,
+            min(255, round((45 - min((hue - source_accent_hue) % 256, (source_accent_hue - hue) % 256)) * 255 / 27)),
+        )
+    )
+    value_mask = source_value.point(
+        lambda value: 0 if value <= 32 else min(255, round((value - 32) * 255 / 48))
+    )
+    accent_mask = ImageChops.multiply(
+        ImageChops.multiply(saturation_mask, hue_mask), value_mask
+    )
+    return Image.composite(recolored, img.convert("RGB"), accent_mask)
 
 
 def _circle_crop(img: Image.Image, size: int) -> Image.Image:
@@ -263,20 +310,13 @@ def _render_sync(
     if template is None:
         return None
 
-    # ── 1. Hue-shift the template to the server's accent color ────────────
+    # ── 1. Remap the template to the server's exact accent color ──────────
     r = (accent_color >> 16) & 0xFF
     g = (accent_color >> 8) & 0xFF
     b = accent_color & 0xFF
 
-    # If the color is too desaturated (white/black/grey), skip the shift
-    # entirely — the result would look weird. Banner stays cyan as-is.
-    if _color_saturation(r, g, b) < 0.15:
-        banner = template.copy().convert("RGBA")
-        glow_rgb = (0, 245, 212)  # default cyan for username glow too
-    else:
-        target_hue = _rgb_to_hue(r, g, b)
-        banner = _hue_shift_image(template, target_hue).convert("RGBA")
-        glow_rgb = (r, g, b)
+    banner = _recolor_image(template, (r, g, b)).convert("RGBA")
+    glow_rgb = (r, g, b)
 
     canvas_w, canvas_h = banner.size
 

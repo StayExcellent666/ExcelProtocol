@@ -8,6 +8,7 @@ and adds little value). We DO test:
   - That the renderer doesn't crash for valid inputs
 """
 import pytest
+from PIL import Image
 import welcome_banner
 
 
@@ -57,6 +58,20 @@ class TestSaturation:
 
     def test_pure_cyan_full(self):
         assert welcome_banner._color_saturation(0, 255, 255) == 1.0
+
+
+class TestExactAccentRemap:
+    def test_reference_accent_maps_to_selected_rgb(self):
+        source = Image.new("RGB", (1, 1), (0, 200, 200))
+        selected = (173, 64, 211)
+        result = welcome_banner._recolor_image(source, selected, reference_value=200, reference_hue=128)
+        actual = result.getpixel((0, 0))
+        assert all(abs(got - expected) <= 2 for got, expected in zip(actual, selected))
+
+    def test_neutral_background_is_unchanged(self):
+        source = Image.new("RGB", (1, 1), (18, 21, 26))
+        result = welcome_banner._recolor_image(source, (255, 0, 0), reference_value=200, reference_hue=128)
+        assert result.getpixel((0, 0)) == source.getpixel((0, 0))
 
 
 class TestSubstitutePlaceholders:
