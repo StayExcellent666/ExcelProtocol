@@ -70,6 +70,15 @@ if (typeof document !== "undefined") {
     * { transition: border-color 0.15s, background 0.15s, color 0.15s, box-shadow 0.15s; }
     button:hover { filter: brightness(1.1); }
     a:hover { opacity: 0.85; }
+    .reward-trim-range { position:absolute; inset:0; width:100%; height:34px; margin:0; appearance:none; -webkit-appearance:none; background:transparent; pointer-events:none; }
+    .reward-trim-range::-webkit-slider-runnable-track { height:6px; background:transparent; }
+    .reward-trim-range::-webkit-slider-thumb { appearance:none; -webkit-appearance:none; width:19px; height:19px; margin-top:-7px; border-radius:50%; border:2px solid #081018; pointer-events:auto; cursor:ew-resize; box-shadow:0 0 11px rgba(0,245,212,.6); }
+    .reward-trim-range::-moz-range-track { height:6px; background:transparent; }
+    .reward-trim-range::-moz-range-thumb { width:17px; height:17px; border-radius:50%; border:2px solid #081018; pointer-events:auto; cursor:ew-resize; box-shadow:0 0 11px rgba(0,245,212,.6); }
+    .reward-trim-start::-webkit-slider-thumb { background:var(--cyan); }
+    .reward-trim-end::-webkit-slider-thumb { background:#9b7cff; }
+    .reward-trim-start::-moz-range-thumb { background:var(--cyan); }
+    .reward-trim-end::-moz-range-thumb { background:#9b7cff; }
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
     @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
@@ -2559,6 +2568,7 @@ function TwitchTab({ guildId, isDev }) {
   const [saving, setSaving]       = useState(false);
   const [savingPlay, setSavingPlay] = useState(false);
   const [savingClip, setSavingClip] = useState(false);
+  const [savingBuiltin, setSavingBuiltin] = useState(null);
   const [clipForm, setClipForm] = useState({ enabled:false, duration:45, cooldown:60 });
   const [err, setErr]             = useState(null);
 
@@ -2569,7 +2579,6 @@ function TwitchTab({ guildId, isDev }) {
     { command_name:"!title",    description:"Current stream title",               permission:"everyone", cooldown_seconds:30 },
     { command_name:"!viewers",  description:"Current viewer count",               permission:"everyone", cooldown_seconds:60 },
     { command_name:"!so",       description:"Shoutout another streamer",          permission:"mod",      cooldown_seconds:0  },
-    { command_name:"!clip",     description:"Create and share a clip of the latest stream moment", permission:"everyone", cooldown_seconds:info?.clip_cooldown ?? 60 },
     { command_name:"!commands", description:"Lists all available commands",       permission:"everyone", cooldown_seconds:60 },
   ];
 
@@ -2643,6 +2652,18 @@ function TwitchTab({ guildId, isDev }) {
       setInfo(p => ({ ...p, ...saved }));
     } catch(e) { alert("Failed: " + e.message); }
     setSavingClip(false);
+  };
+
+  const toggleBuiltin = async (commandName) => {
+    const enabled = info?.builtin_commands?.[commandName] !== false;
+    setSavingBuiltin(commandName);
+    try {
+      await apiFetch(`/api/guild/${guildId}/twitch/builtin-commands/${encodeURIComponent(commandName)}`, {
+        method:"POST", body:JSON.stringify({ enabled:!enabled }),
+      });
+      setInfo(current => ({ ...current, builtin_commands:{ ...current.builtin_commands, [commandName]:!enabled } }));
+    } catch(e) { alert("Failed: " + e.message); }
+    setSavingBuiltin(null);
   };
 
   if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
@@ -2808,7 +2829,8 @@ function TwitchTab({ guildId, isDev }) {
 
       {/* Built-in commands */}
       <div style={{ ...C.card }}>
-        <div style={{ fontWeight:800, fontSize:14, fontFamily:"'Orbitron',sans-serif", color:"var(--text2)", marginBottom:14 }}>Built-in Commands <span style={{ fontSize:11, fontWeight:400, color:"var(--text3)", fontFamily:"'Outfit',sans-serif" }}>(read-only)</span></div>
+        <div style={{ fontWeight:800, fontSize:14, fontFamily:"'Orbitron',sans-serif", color:"var(--text2)", marginBottom:4 }}>Built-in Commands</div>
+        <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'Outfit',sans-serif", marginBottom:14 }}>Choose which standard commands respond in this Twitch channel.</div>
         <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
           {BUILTIN.map(cmd => (
             <div key={cmd.command_name} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 14px", borderRadius:8, background:"rgba(8,11,15,0.4)", border:"1px solid var(--border)" }}>
@@ -2816,6 +2838,11 @@ function TwitchTab({ guildId, isDev }) {
               <span style={{ fontSize:12, color:"var(--text3)", fontFamily:"'Outfit',sans-serif", flex:1 }}>{cmd.description}</span>
               <Badge text={cmd.permission} color={cmd.permission==="everyone"?"var(--green)":cmd.permission==="mod"?"var(--yellow)":"var(--red)"} />
               {cmd.cooldown_seconds > 0 && <span style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>⏱ {cmd.cooldown_seconds}s</span>}
+              <button type="button" disabled={savingBuiltin===cmd.command_name} onClick={()=>toggleBuiltin(cmd.command_name)}
+                aria-label={`${info?.builtin_commands?.[cmd.command_name] !== false ? "Disable" : "Enable"} ${cmd.command_name}`}
+                style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",background:info?.builtin_commands?.[cmd.command_name] !== false?"var(--cyan)":"var(--border2)",position:"relative",flexShrink:0,opacity:savingBuiltin===cmd.command_name ? .6 : 1}}>
+                <span style={{position:"absolute",top:3,left:info?.builtin_commands?.[cmd.command_name] !== false?22:3,width:18,height:18,borderRadius:"50%",background:"#fff",transition:"left .2s"}} />
+              </button>
             </div>
           ))}
         </div>
@@ -2977,8 +3004,10 @@ function youtubeVideoId(url) {
   } catch { return null; }
 }
 
-function RewardVideoPreview({ url, seekRequest, volume, onDuration }) {
+function RewardVideoPreview({ url, seekRequest, volume, segmentStart=0, segmentEnd=null, onDuration }) {
   const frameRef = useRef(null);
+  const segmentRef = useRef({ start:0, end:null });
+  const lastLoopRef = useRef(0);
   const videoId = youtubeVideoId(url);
   const send = useCallback((func, args=[]) => {
     frameRef.current?.contentWindow?.postMessage(JSON.stringify({ event:"command", func, args }), "https://www.youtube.com");
@@ -2997,22 +3026,72 @@ function RewardVideoPreview({ url, seekRequest, volume, onDuration }) {
     send("setVolume", [Math.round(Math.min(1, Math.max(0, Number(volume ?? 1))) * 100)]);
   }, [videoId, volume, send]);
   useEffect(() => {
+    segmentRef.current = {
+      start:Math.max(0, Number(segmentStart || 0)),
+      end:segmentEnd == null ? null : Math.max(0, Number(segmentEnd)),
+    };
+  }, [segmentStart, segmentEnd]);
+  useEffect(() => {
     const receive = event => {
       if (event.source !== frameRef.current?.contentWindow) return;
       let payload = event.data;
       try { if (typeof payload === "string") payload = JSON.parse(payload); } catch { return; }
       const duration = Number(payload?.info?.duration);
       if (duration > 0) onDuration?.(duration);
+      const currentTime = Number(payload?.info?.currentTime);
+      const { start, end } = segmentRef.current;
+      const cutoff = end || (duration > 0 ? duration : null);
+      if (cutoff && Number.isFinite(currentTime) && currentTime >= cutoff - 0.12) {
+        const now = Date.now();
+        if (now - lastLoopRef.current > 500) {
+          lastLoopRef.current = now;
+          send("seekTo", [start, true]);
+          send("playVideo");
+        }
+      }
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [videoId, onDuration]);
+  }, [videoId, onDuration, send]);
   if (!videoId) return <div style={{padding:"18px",borderRadius:8,border:"1px dashed var(--border2)",color:"var(--text3)",fontSize:11,textAlign:"center"}}>Enter a valid YouTube URL to enable live trim preview.</div>;
   return <div style={{display:"grid",gap:6}}>
     <div style={{position:"relative",width:"100%",aspectRatio:"16 / 9",overflow:"hidden",borderRadius:9,border:"1px solid var(--border2)",background:"#000"}}>
       <iframe ref={frameRef} onLoad={ready} title="Reward video trim preview" src={`https://www.youtube.com/embed/${videoId}?enablejsapi=1&controls=1&rel=0&modestbranding=1&origin=${encodeURIComponent(window.location.origin)}`} allow="autoplay; encrypted-media; picture-in-picture" style={{position:"absolute",inset:0,width:"100%",height:"100%",border:0}} />
     </div>
-    <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>Moving Start previews from that point. Moving End previews the five seconds leading into the cutoff.</div>
+    <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>The selected segment loops here at the same effective volume it will use in OBS.</div>
+  </div>;
+}
+
+function RewardTrimTimeline({ duration, start, end, onChange, onPreview }) {
+  const max = Math.max(1, Number(duration || 0));
+  const startValue = Math.min(Math.max(0, Number(start || 0)), Math.max(0, max - 1));
+  const endValue = end === "" || end == null ? max : Math.min(max, Math.max(startValue + 1, Number(end)));
+  const time = value => `${Math.floor(Number(value || 0)/60)}:${String(Math.floor(Number(value || 0)%60)).padStart(2,"0")}`;
+  const update = (nextStart, nextEnd) => {
+    onChange(nextStart, nextEnd);
+    onPreview(nextStart);
+  };
+  return <div style={{display:"grid",gap:10}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11,fontFamily:"'JetBrains Mono',monospace"}}>
+      <span style={{color:"var(--cyan)"}}>Start {time(startValue)}</span>
+      <span style={{color:"#b8a7ff"}}>End {time(endValue)}</span>
+    </div>
+    <div style={{position:"relative",height:34,opacity:duration?1:.35}}>
+      <div style={{position:"absolute",left:0,right:0,top:14,height:6,borderRadius:4,background:"var(--border2)"}} />
+      <div style={{position:"absolute",left:`${(startValue/max)*100}%`,right:`${100-(endValue/max)*100}%`,top:14,height:6,borderRadius:4,background:"linear-gradient(90deg,var(--cyan),#9b7cff)",boxShadow:"0 0 9px rgba(0,245,212,.35)"}} />
+      <input className="reward-trim-range reward-trim-start" type="range" min={0} max={Math.max(1,max-1)} step={1} value={startValue} disabled={!duration}
+        onChange={event=>{const next=Math.min(Number(event.target.value),endValue-1);update(next,end===""?"":endValue);}} style={{zIndex:startValue>max-10?3:2}} aria-label="Clip start" />
+      <input className="reward-trim-range reward-trim-end" type="range" min={1} max={max} step={1} value={endValue} disabled={!duration}
+        onChange={event=>{const next=Math.max(Number(event.target.value),startValue+1);update(startValue,next);}} style={{zIndex:2}} aria-label="Clip end" />
+    </div>
+    <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>
+      <span>0:00</span><span>{duration?`Total ${time(max)}`:"Waiting for video duration…"}</span><span>{time(max)}</span>
+    </div>
+    <div style={{display:"flex",gap:10}}>
+      <Field label="Start (seconds)"><CyanInput type="number" min={0} max={Math.max(0,max-1)} value={startValue} disabled={!duration} onChange={event=>update(Math.min(Math.max(0,Number(event.target.value)||0),endValue-1),end===""?"":endValue)} /></Field>
+      <Field label="End (seconds)"><CyanInput type="number" min={startValue+1} max={max} value={end===""?"":endValue} disabled={!duration} placeholder="Full video" onChange={event=>{if(event.target.value===""){update(startValue,"");return;}update(startValue,Math.min(max,Math.max(startValue+1,Number(event.target.value)||startValue+1)));}} /></Field>
+    </div>
+    {end !== "" && <button type="button" onClick={()=>update(startValue,"")} style={{...C.btnSecondary,justifySelf:"start",padding:"4px 9px",fontSize:10}}>Use full video</button>}
   </div>;
 }
 
@@ -3308,7 +3387,11 @@ function ChannelRewardsTab({ guildId }) {
               placeholder="https://www.youtube.com/watch?v=..." />
             <div style={{ fontSize:11, color:"var(--text3)", marginTop:3, fontFamily:"'JetBrains Mono',monospace" }}>Leave blank to remove trigger.</div>
           </Field>
-          <RewardVideoPreview url={triggerForm.video_url} seekRequest={previewSeek} volume={triggerForm.volume} onDuration={receivePreviewDuration} />
+          <RewardVideoPreview url={triggerForm.video_url} seekRequest={previewSeek}
+            volume={(Number(overlayVolume)/100) * Number(triggerForm.volume)}
+            segmentStart={Number(triggerForm.start_seconds || 0)}
+            segmentEnd={triggerForm.end_seconds === "" ? previewDuration || null : Number(triggerForm.end_seconds)}
+            onDuration={receivePreviewDuration} />
           <Field label="Preview and reward volume">
             <div style={{ display:"flex", alignItems:"center", gap:10 }}>
               <input type="range" min={0} max={1} step={0.05} value={triggerForm.volume}
@@ -3316,23 +3399,18 @@ function ChannelRewardsTab({ guildId }) {
                 style={{ flex:1, accentColor:"var(--cyan)" }} />
               <span style={{ fontSize:12, color:"var(--cyan)", fontFamily:"'JetBrains Mono',monospace", width:38 }}>{Math.round(Number(triggerForm.volume)*100)}%</span>
             </div>
+            <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace",marginTop:5}}>
+              Effective preview: {Math.round((Number(overlayVolume)/100)*Number(triggerForm.volume)*100)}% (browser source {overlayVolume}% × reward {Math.round(Number(triggerForm.volume)*100)}%)
+            </div>
           </Field>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid var(--border)", borderBottom:"1px solid var(--border)" }}>
             <div><div style={{fontSize:13,color:"var(--text)"}}>Audio only</div><div style={{fontSize:10,color:"var(--text3)",marginTop:3}}>Plays through OBS without showing the video or progress bar.</div></div>
             <button type="button" onClick={()=>setTriggerForm(p=>({...p,audio_only:!p.audio_only}))} style={{width:48,height:26,borderRadius:14,border:`1px solid ${triggerForm.audio_only?"var(--cyan)":"var(--border2)"}`,background:triggerForm.audio_only?"var(--cyan-dim)":"var(--bg3)",padding:2,cursor:"pointer",display:"flex",justifyContent:triggerForm.audio_only?"flex-end":"flex-start",alignItems:"center"}}><span style={{width:20,height:20,borderRadius:"50%",background:triggerForm.audio_only?"var(--cyan)":"var(--text3)",boxShadow:triggerForm.audio_only?"0 0 8px rgba(0,245,212,.5)":"none"}} /></button>
           </div>
           <Field label="Video segment">
-            {(() => {
-              const start=Number(triggerForm.start_seconds||0), end=triggerForm.end_seconds===""?null:Number(triggerForm.end_seconds);
-              const max=previewDuration;
-              const time=v=>`${Math.floor(Number(v||0)/60)}:${String(Math.floor(Number(v||0)%60)).padStart(2,"0")}`;
-              return <div style={{display:"grid",gap:12}}>
-                <div><div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--text3)",marginBottom:4}}><span>Start</span><span style={{color:"var(--cyan)",fontFamily:"'JetBrains Mono',monospace"}}>{time(start)}</span></div><input type="range" min={0} max={Math.max(1,max-1)} step={1} value={max?Math.min(start,max-1):0} disabled={!max} onChange={e=>{const seconds=Number(e.target.value);setTriggerForm(p=>({...p,start_seconds:seconds,end_seconds:p.end_seconds!==""&&Number(p.end_seconds)<=seconds?Math.min(max,seconds+1):p.end_seconds}));setPreviewSeek({seconds,nonce:Date.now()});}} style={{width:"100%",accentColor:"var(--cyan)",opacity:max?1:.35}} /></div>
-                <div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11,color:"var(--text3)",marginBottom:4}}><span>End</span><span style={{display:"flex",alignItems:"center",gap:8}}><button type="button" disabled={!max} onClick={()=>setTriggerForm(p=>({...p,end_seconds:p.end_seconds===""?max:""}))} style={{...C.btnSecondary,padding:"2px 7px",fontSize:10,opacity:max?1:.4}}>{end===null?"Set end":"Use full video"}</button><span style={{color:"var(--cyan)",fontFamily:"'JetBrains Mono',monospace",minWidth:34,textAlign:"right"}}>{end===null?"Full":time(end)}</span></span></div><input type="range" min={Math.min(max||1, start+1)} max={Math.max(1,max)} step={1} value={end===null?Math.max(1,max):Math.max(start+1,Math.min(end,max||end))} disabled={!max||end===null} onChange={e=>{const seconds=Number(e.target.value);setTriggerForm(p=>({...p,end_seconds:seconds}));setPreviewSeek({seconds:Math.max(start,seconds-5),nonce:Date.now()});}} style={{width:"100%",accentColor:"var(--cyan)",opacity:!max||end===null ? .35 : 1}} /></div>
-                <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>{max?`YouTube duration: ${time(max)}. Both sliders are limited to this video.`:"Waiting for YouTube to report the video duration…"}</div>
-                <div style={{display:"flex",gap:10}}><Field label="Start (seconds)"><CyanInput type="number" min={0} max={max?Math.max(0,max-1):undefined} step={1} value={triggerForm.start_seconds} onChange={e=>{const seconds=Math.min(max?Math.max(0,max-1):Infinity,Math.max(0,Number(e.target.value)||0));setTriggerForm(p=>({...p,start_seconds:seconds}));setPreviewSeek({seconds,nonce:Date.now()});}} aria-label="Start seconds" /></Field><Field label="End (seconds)"><CyanInput type="number" min={start+1} max={max||undefined} step={1} value={triggerForm.end_seconds} onChange={e=>{const value=e.target.value;if(value===""){setTriggerForm(p=>({...p,end_seconds:""}));return;}const seconds=Math.min(max||Infinity,Math.max(start+1,Number(value)||start+1));setTriggerForm(p=>({...p,end_seconds:seconds}));setPreviewSeek({seconds:Math.max(start,seconds-5),nonce:Date.now()});}} aria-label="End seconds" placeholder="Full video" /></Field></div>
-              </div>;
-            })()}
+            <RewardTrimTimeline duration={previewDuration} start={triggerForm.start_seconds} end={triggerForm.end_seconds}
+              onChange={(start,end)=>setTriggerForm(current=>({...current,start_seconds:start,end_seconds:end}))}
+              onPreview={seconds=>setPreviewSeek({seconds,nonce:Date.now()})} />
           </Field>
           <Field label="Companion Hotkey">
             <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", marginBottom:6 }}>

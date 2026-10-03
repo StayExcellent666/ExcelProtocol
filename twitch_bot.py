@@ -92,6 +92,11 @@ class TwitchChatBot(commands.Bot):
     async def _handle_builtin(self, message, command_name: str, args: str, channel_name: str) -> bool:
         is_mod = message.author.is_mod or message.author.name.lower() == channel_name
 
+        configurable = {"!uptime", "!game", "!title", "!viewers", "!so", "!commands"}
+        enabled_check = getattr(self.db, "is_builtin_command_enabled", None)
+        if command_name in configurable and enabled_check and not enabled_check(channel_name, command_name):
+            return True
+
         if command_name == "!so":
             if not is_mod:
                 return True
@@ -219,11 +224,15 @@ class TwitchChatBot(commands.Bot):
             if not await self._check_cooldown(channel_name, "!commands", 60):
                 return True
             custom_cmds = self.db.get_twitch_commands(channel_name)
-            builtin = "!uptime !game !title !viewers !so !commands"
+            settings_getter = getattr(self.db, "get_builtin_command_settings", None)
+            settings = settings_getter(channel_name) if settings_getter else {
+                name: True for name in ("!uptime", "!game", "!title", "!viewers", "!so", "!commands")
+            }
+            builtin = " ".join(name for name, enabled in settings.items() if enabled)
             if self.db.get_clip_config(channel_name):
-                builtin += " !clip"
+                builtin = f"{builtin} !clip".strip()
             if self.db.is_play_enabled(channel_name):
-                builtin += " !play !stop !skip"
+                builtin = f"{builtin} !play !stop !skip".strip()
             if custom_cmds:
                 names = " ".join(c["command_name"] for c in custom_cmds)
                 await message.channel.send(f"Commands: {builtin} | Custom: {names}")

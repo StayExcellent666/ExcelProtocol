@@ -863,6 +863,18 @@ class Database:
                 revoked_at               TIMESTAMP
             )
         ''')
+
+        # Per-channel switches for the built-in chat commands. Missing rows
+        # intentionally mean enabled so existing channels keep their behavior.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS twitch_builtin_command_settings (
+                twitch_channel TEXT NOT NULL,
+                command_name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (twitch_channel, command_name)
+            )
+        ''')
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_fortuna_plugin_keys_broadcaster
             ON fortuna_plugin_keys(twitch_broadcaster_id, revoked_at)
@@ -2814,6 +2826,57 @@ class Database:
     # ------------------------------------------------------------------
     # Twitch custom commands
     # ------------------------------------------------------------------
+
+    TWITCH_BUILTIN_COMMANDS = ("!uptime", "!game", "!title", "!viewers", "!so", "!commands")
+
+    def get_builtin_command_settings(self, twitch_channel: str) -> Dict[str, bool]:
+        """Return all configurable built-ins; commands default to enabled."""
+        settings = {name: True for name in self.TWITCH_BUILTIN_COMMANDS}
+        conn = self.get_connection()
+        rows = conn.execute(
+            '''SELECT command_name, enabled
+               FROM twitch_builtin_command_settings
+               WHERE twitch_channel = ?''',
+            (twitch_channel.lower(),),
+        ).fetchall()
+        conn.close()
+        for row in rows:
+            name = str(row[0]).lower()
+            if name in settings:
+                settings[name] = bool(row[1])
+        return settings
+
+    def is_builtin_command_enabled(self, twitch_channel: str, command_name: str) -> bool:
+        """Check a built-in command switch, defaulting to enabled."""
+        name = command_name.lower()
+        if name not in self.TWITCH_BUILTIN_COMMANDS:
+            return True
+        conn = self.get_connection()
+        row = conn.execute(
+            '''SELECT enabled FROM twitch_builtin_command_settings
+               WHERE twitch_channel = ? AND command_name = ?''',
+            (twitch_channel.lower(), name),
+        ).fetchone()
+        conn.close()
+        return bool(row[0]) if row else True
+
+    def set_builtin_command_enabled(self, twitch_channel: str, command_name: str, enabled: bool):
+        """Persist one built-in Twitch command switch."""
+        name = command_name.lower()
+        if name not in self.TWITCH_BUILTIN_COMMANDS:
+            raise ValueError("Unknown built-in Twitch command")
+        conn = self.get_connection()
+        conn.execute(
+            '''INSERT INTO twitch_builtin_command_settings
+                   (twitch_channel, command_name, enabled, updated_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(twitch_channel, command_name) DO UPDATE SET
+                   enabled = excluded.enabled,
+                   updated_at = CURRENT_TIMESTAMP''',
+            (twitch_channel.lower(), name, int(enabled)),
+        )
+        conn.commit()
+        conn.close()
 
     def add_twitch_command(
         self,

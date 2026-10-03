@@ -36,6 +36,15 @@ BOT_OWNER_ID          = os.getenv("BOT_OWNER_ID", "")
 DEV_TOKEN             = os.getenv("DEV_TOKEN", "")
 PORT                  = int(os.getenv("DASHBOARD_PORT", 8080))
 
+# Stable for one deployed source revision. OBS overlays compare this value
+# after reconnecting so a plain process restart keeps the active player alive,
+# while an actual code deployment triggers one cache-busted page refresh.
+try:
+    with open(__file__, "rb") as _overlay_source:
+        OVERLAY_BUILD_ID = hashlib.sha256(_overlay_source.read()).hexdigest()[:12]
+except OSError:
+    OVERLAY_BUILD_ID = "development"
+
 # Parse ADMIN_ID1, ADMIN_ID2, ... from env
 ADMIN_IDS: set[str] = set()
 _i = 1
@@ -1900,7 +1909,7 @@ async def get_twitch_info(request):
     if not _bot_ref:
         return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50})
 
-    row = await _asyncio.get_event_loop().run_in_executor(
+    row = await asyncio.get_event_loop().run_in_executor(
         None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id))
     )
     broadcaster_rows = await db_fetch(
@@ -1926,6 +1935,9 @@ async def get_twitch_info(request):
 
     channel = row["twitch_channel"]
     commands = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_commands(channel))
+    builtin_commands = await _asyncio.get_event_loop().run_in_executor(
+        None, lambda: _bot_ref.db.get_builtin_command_settings(channel)
+    )
     limit = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_command_limit(int(guild_id)))
 
     # Validate the broadcaster token when this settings page is opened. Stored
@@ -1984,6 +1996,7 @@ async def get_twitch_info(request):
         "linked": True,
         "channel": channel,
         "commands": commands,
+        "builtin_commands": builtin_commands,
         "count": len(commands),
         "limit": limit,
         "bot_is_modded": bot_is_modded,
@@ -2006,6 +2019,32 @@ async def set_play_enabled(request):
     else:
         await db_execute("UPDATE twitch_channels SET play_enabled = ? WHERE guild_id = ?", (int(enabled), guild_id))
     return web.json_response({"ok": True, "play_enabled": enabled})
+
+
+async def set_builtin_command_enabled(request):
+    """Toggle one of the standard Twitch chat commands for a linked channel."""
+    guild_id = int(request.match_info["guild_id"])
+    command_name = request.match_info["command_name"].lower()
+    body = await request.json()
+    if "enabled" not in body or not isinstance(body["enabled"], bool):
+        raise web.HTTPBadRequest(reason="enabled must be true or false")
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    row = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _bot_ref.db.get_twitch_channel(guild_id)
+    )
+    if not row:
+        raise web.HTTPNotFound(reason="No Twitch channel is linked")
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: _bot_ref.db.set_builtin_command_enabled(
+                row["twitch_channel"], command_name, body["enabled"]
+            ),
+        )
+    except ValueError as exc:
+        raise web.HTTPBadRequest(reason=str(exc))
+    return web.json_response({"ok": True, "command_name": command_name, "enabled": body["enabled"]})
 
 
 async def set_clip_settings(request):
@@ -2573,6 +2612,7 @@ async def overlay_ws(request):
     _overlay_connections.setdefault(guild_id, set()).add(ws)
     # Send saved volume immediately on connect so OBS picks it up
     try:
+        await ws.send_str(json.dumps({"type": "hello", "overlay_version": OVERLAY_BUILD_ID}))
         volume = _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100
         await ws.send_str(json.dumps({"type": "set_volume", "volume": volume}))
     except Exception:
@@ -2684,6 +2724,7 @@ async def overlay_page(request):
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
 const guildId = "{guild_id}";
+const overlayBuild = "{OVERLAY_BUILD_ID}";
 const rdm = document.getElementById("rdm");
 const frameWrap = document.getElementById("frame-wrap");
 const progressWrap = document.getElementById("progress-wrap");
@@ -2768,11 +2809,24 @@ function finishCurrent(delay = 500) {{
 }}
 
 const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
-const ws = new WebSocket(wsProto + "//" + location.host + "/overlay/" + guildId + "/ws");
+let ws = null;
+let reconnectTimer = null;
+let reconnectDelay = 1000;
+let versionReloadStarted = false;
 
-ws.onmessage = e => {{
+function handleSocketMessage(e) {{
   const msg = JSON.parse(e.data);
   console.log("Overlay received:", msg);
+  if (msg.type === "hello") {{
+    if (msg.overlay_version && msg.overlay_version !== overlayBuild && !versionReloadStarted) {{
+      versionReloadStarted = true;
+      const freshUrl = new URL(location.href);
+      freshUrl.searchParams.set("overlay_v", msg.overlay_version);
+      freshUrl.searchParams.set("reload", String(Date.now()));
+      location.replace(freshUrl.toString());
+    }}
+    return;
+  }}
   if (msg.type === "set_volume") {{
     savedVolume = msg.volume;
     if (player) player.setVolume(msg.volume);
@@ -2794,9 +2848,29 @@ ws.onmessage = e => {{
     stopProgress();
     playing = false;
   }}
-}};
+}}
 
-ws.onclose = () => {{ setTimeout(() => location.reload(), 3000); }};
+function connectOverlaySocket() {{
+  if (versionReloadStarted || (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) return;
+  ws = new WebSocket(wsProto + "//" + location.host + "/overlay/" + guildId + "/ws");
+  ws.onopen = () => {{
+    console.log("Overlay connected");
+    reconnectDelay = 1000;
+  }};
+  ws.onmessage = handleSocketMessage;
+  ws.onerror = () => {{ try {{ ws.close(); }} catch {{}} }};
+  ws.onclose = () => {{
+    ws = null;
+    if (reconnectTimer || versionReloadStarted) return;
+    reconnectTimer = setTimeout(() => {{
+      reconnectTimer = null;
+      connectOverlaySocket();
+    }}, reconnectDelay);
+    reconnectDelay = Math.min(10000, reconnectDelay * 1.7);
+  }};
+}}
+
+connectOverlaySocket();
 
 function onPlayerStateChange(e) {{
   if (e.data === YT.PlayerState.PLAYING) {{
@@ -2860,7 +2934,12 @@ function processQueue() {{
 </script>
 </body>
 </html>"""
-    return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
+    return web.Response(text=html, content_type="text/html", headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 # ── Broadcaster Info + Rewards ────────────────────────────────────────────────
 async def get_broadcaster_info(request):
@@ -6652,6 +6731,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get   ("/api/guild/{guild_id}/twitch",                    get_twitch_info)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/play-enabled",       set_play_enabled)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/clip-settings",      set_clip_settings)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/builtin-commands/{command_name}", set_builtin_command_enabled)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/overlay-volume",      set_overlay_volume)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/play-test",           play_test_overlay)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/hotkey-test",          hotkey_test)

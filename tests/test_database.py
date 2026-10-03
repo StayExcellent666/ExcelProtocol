@@ -1439,3 +1439,21 @@ class TestTwitchClipSettings:
             "broadcaster_id": "456",
             "access_token": "access-token",
         }
+
+
+class TestTwitchBuiltinCommandSettings:
+    def test_commands_default_enabled_and_persist_individually(self, db):
+        defaults = db.get_builtin_command_settings("Streamer")
+        assert defaults == {
+            "!uptime": True,
+            "!game": True,
+            "!title": True,
+            "!viewers": True,
+            "!so": True,
+            "!commands": True,
+        }
+
+        db.set_builtin_command_enabled("Streamer", "!uptime", False)
+        assert db.is_builtin_command_enabled("streamer", "!uptime") is False
+        assert db.is_builtin_command_enabled("streamer", "!game") is True
+        assert db.get_builtin_command_settings("STREAMER")["!uptime"] is False
