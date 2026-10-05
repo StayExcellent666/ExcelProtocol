@@ -1640,6 +1640,169 @@ async def save_welcome_settings(request):
     )
     return web.json_response({"ok": True})
 
+
+# ── Set Up Server wizard ─────────────────────────────────────────────────────
+def _is_setup_caller_authorized(request) -> tuple[bool, str | None]:
+    """Restrict template setup to the guild owner or bot owner/admin view."""
+    session = request["session"]
+    if session.get("dev", False):
+        return True, None
+    if not _bot_ref:
+        return False, "Bot not available"
+    try:
+        guild_id = int(request.match_info.get("guild_id", "0"))
+    except ValueError:
+        return False, "Invalid guild id"
+    guild = _bot_ref.get_guild(guild_id)
+    if not guild:
+        return False, "Bot is not in that guild"
+    user_id = session.get("user_id")
+    if user_id and int(user_id) == guild.owner_id:
+        return True, None
+    return False, "Only the server owner can run the setup wizard"
+
+
+async def setup_preview(request):
+    """Return the server template plan without changing Discord."""
+    ok, err = _is_setup_caller_authorized(request)
+    if not ok:
+        raise web.HTTPForbidden(reason=err)
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+
+    guild_id = int(request.match_info["guild_id"])
+    try:
+        config = await request.json()
+    except Exception:
+        config = {}
+
+    import server_setup
+    plan = server_setup.build_plan(config or {})
+    counts = server_setup.count_plan_items(plan)
+    guild = _bot_ref.get_guild(guild_id)
+    if not guild:
+        return web.json_response({"error": "Bot is not in that guild"}, status=404)
+
+    existing_roles = {role.name for role in guild.roles}
+    existing_categories = {category.name for category in guild.categories}
+    custom_roles = [
+        role for role in guild.roles
+        if role.name != "@everyone" and not role.managed
+    ]
+    member_count = guild.member_count or len(guild.members)
+    establishment_signals = {
+        "channels": len(guild.channels),
+        "custom_roles": len(custom_roles),
+        "members": member_count,
+    }
+
+    missing_permissions = []
+    if guild.me:
+        permissions = guild.me.guild_permissions
+        for attr, label in (
+            ("manage_channels", "Manage Channels"),
+            ("manage_roles", "Manage Roles"),
+            ("view_channel", "View Channels"),
+            ("send_messages", "Send Messages"),
+            ("read_message_history", "Read Message History"),
+        ):
+            if not getattr(permissions, attr, False):
+                missing_permissions.append(label)
+
+    return web.json_response({
+        "template_id": plan["template_id"],
+        "template_label": plan["template_label"],
+        "verification_enabled": plan["verification_enabled"],
+        "vip_enabled": plan["vip_enabled"],
+        "auto_post_rules": plan["auto_post_rules"],
+        "role_names": plan["role_names"],
+        "role_permissions": {
+            key: server_setup.ROLE_PERMISSIONS.get(key, [])
+            for key in plan["role_names"]
+        },
+        "categories": plan["categories"],
+        "counts": counts,
+        "would_reuse": {
+            "roles": [name for name in plan["role_names"].values() if name in existing_roles],
+            "categories": [
+                category["name"] for category in plan["categories"]
+                if category["name"] in existing_categories
+            ],
+        },
+        "is_established": server_setup.is_server_established(
+            len(guild.channels), len(custom_roles), member_count
+        ),
+        "establishment_signals": establishment_signals,
+        "missing_permissions": missing_permissions,
+    })
+
+
+async def setup_apply(request):
+    """Start a dry run or real setup and return its polling identifier."""
+    ok, err = _is_setup_caller_authorized(request)
+    if not ok:
+        raise web.HTTPForbidden(reason=err)
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+
+    guild_id = int(request.match_info["guild_id"])
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    config = body.get("config", {})
+    dry_run = bool(body.get("dry_run", False))
+    confirm_established = bool(body.get("confirm_established", False))
+
+    if not dry_run:
+        import server_setup
+        guild = _bot_ref.get_guild(guild_id)
+        if not guild:
+            return web.json_response({"error": "Bot is not in that guild"}, status=404)
+        custom_roles = [
+            role for role in guild.roles
+            if role.name != "@everyone" and not role.managed
+        ]
+        member_count = guild.member_count or len(guild.members)
+        if server_setup.is_server_established(
+            len(guild.channels), len(custom_roles), member_count
+        ) and not confirm_established:
+            return web.json_response({
+                "error": "established_server_requires_confirmation",
+                "message": "This server has existing content and requires explicit confirmation.",
+            }, status=409)
+
+    import uuid
+    setup_id = uuid.uuid4().hex
+    _bot_ref._setup_status[setup_id] = {
+        "guild_id": guild_id,
+        "dry_run": dry_run,
+        "status": "pending",
+        "steps": [],
+        "summary": {"created": 0, "reused": 0, "failed": 0},
+        "started_at": None,
+        "finished_at": None,
+        "error": None,
+        "notes": [],
+    }
+    asyncio.create_task(
+        _bot_ref.run_server_setup(guild_id, config, setup_id, dry_run=dry_run)
+    )
+    return web.json_response({"setup_id": setup_id})
+
+
+async def setup_status(request):
+    """Return live progress for one setup operation."""
+    ok, err = _is_setup_caller_authorized(request)
+    if not ok:
+        raise web.HTTPForbidden(reason=err)
+    if not _bot_ref:
+        return web.json_response({"error": "Bot not available"}, status=503)
+    status = _bot_ref._setup_status.get(request.match_info["setup_id"])
+    if not status:
+        return web.json_response({"error": "Setup id not found or expired"}, status=404)
+    return web.json_response(status)
+
 async def get_welcome_preview(request):
     """Render a private welcome/goodbye preview for the dashboard user."""
     import welcome_banner
@@ -6792,6 +6955,9 @@ def create_dashboard_app(bot=None):
     app.router.add_post ("/api/guild/{guild_id}/welcome-settings",       save_welcome_settings)
     app.router.add_get  ("/api/guild/{guild_id}/welcome-preview",        get_welcome_preview)
     app.router.add_delete("/api/guild/{guild_id}/birthdays/{user_id}",  delete_birthday)
+    app.router.add_post ("/api/guild/{guild_id}/setup/preview",          setup_preview)
+    app.router.add_post ("/api/guild/{guild_id}/setup/apply",            setup_apply)
+    app.router.add_get  ("/api/guild/{guild_id}/setup/status/{setup_id}", setup_status)
     app.router.add_get  ("/api/guild/{guild_id}/settings",              get_server_settings)
     app.router.add_patch("/api/guild/{guild_id}/settings",              patch_server_settings)
     app.router.add_patch("/api/guild/{guild_id}/streamer-limit",          set_streamer_limit)

@@ -8,6 +8,26 @@ from utils import utcnow
 logger = logging.getLogger(__name__)
 
 
+def _normalize_birth_year(value, current_year: int) -> int | None:
+    """Return a real birth year, treating legacy zero/blank values as absent."""
+    try:
+        year = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if year <= 0 or year > current_year or current_year - year > 130:
+        return None
+    return year
+
+
+def _birthday_announcement(mention: str, year_value, current_year: int) -> str:
+    """Build an announcement without inventing an age for missing legacy years."""
+    birth_year = _normalize_birth_year(year_value, current_year)
+    if birth_year is None:
+        return f"🎂 It's {mention}'s birthday today! Happy Birthday! 🎉"
+    age = current_year - birth_year
+    return f"🎂 It's {mention}'s birthday today! They are turning **{age}** years old! Happy Birthday! 🎉"
+
+
 class BirthdaySetModal(discord.ui.Modal, title="Set Birthday"):
     def __init__(self, target_user: discord.Member, db):
         super().__init__()
@@ -88,11 +108,7 @@ class BirthdayChecker:
                 if not member:
                     continue
                 try:
-                    if b["year"]:
-                        age = today.year - b["year"]
-                        message = f"🎂 It's {member.mention}'s birthday today! They are turning **{age}** years old! Happy Birthday! 🎉"
-                    else:
-                        message = f"🎂 It's {member.mention}'s birthday today! Happy Birthday! 🎉"
+                    message = _birthday_announcement(member.mention, b.get("year"), today.year)
                     await channel.send(message)
                 except Exception as e:
                     logger.error(f"Failed to send birthday message in guild {guild.id}: {e}")

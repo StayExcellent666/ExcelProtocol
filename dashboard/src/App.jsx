@@ -4046,7 +4046,10 @@ function SetupWizardTab({ guildId, isDev, established=false }) {
             <div style={{ fontSize:12, color:"var(--text3)", marginBottom:18 }}>Here's what will be created. Existing roles/channels with matching names will be reused.</div>
 
             {previewLoading && <div style={{ color:"var(--cyan)" }}>Loading preview…</div>}
-            {previewError && <div style={{ color:"var(--red)", marginBottom:12 }}>Preview error: {previewError}</div>}
+            {previewError && <div style={{ color:"var(--red)", marginBottom:12, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+              <span>Preview error: {previewError}</span>
+              <button onClick={fetchPreview} disabled={previewLoading} style={{...C.btnSecondary,padding:"4px 9px",fontSize:11}}>Retry preview</button>
+            </div>}
 
             {preview && (
               <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
