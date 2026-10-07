@@ -24,23 +24,46 @@ class TwitchChatBot(commands.Bot):
         self.twitch_api = twitch_api
         self._cooldowns: dict[str, dict[str, datetime]] = {}
 
+    def _connected_channel_names(self) -> set[str]:
+        """Return usable joined-channel names, ignoring TwitchIO reconnect gaps."""
+        names = set()
+        for channel in self.connected_channels:
+            name = getattr(channel, "name", None)
+            if name:
+                names.add(str(name).lower())
+        return names
+
+    @staticmethod
+    def _registered_channel_names(rows) -> set[str]:
+        """Normalize and deduplicate the channels that must be restored."""
+        names = set()
+        for row in rows:
+            try:
+                name = str(row["twitch_channel"] or "").strip().lstrip("#").lower()
+            except (KeyError, TypeError):
+                continue
+            if name:
+                names.add(name)
+        return names
+
     async def event_ready(self):
         logger.info(f"Twitch chat bot ready | Nick: {self.nick}")
         await asyncio.sleep(3)
-        registered = self.db.get_all_twitch_channels()
-        connected_names = [c.name.lower() for c in self.connected_channels]
-        for row in registered:
-            channel_name = row["twitch_channel"].lower()
+        connected_names = self._connected_channel_names()
+        registered_names = self._registered_channel_names(self.db.get_all_twitch_channels())
+        for channel_name in sorted(registered_names):
             if channel_name not in connected_names:
                 for attempt in range(3):
                     try:
                         await self.join_channels([channel_name])
+                        connected_names.add(channel_name)
                         logger.info(f"Joined Twitch channel: {channel_name}")
                         break
                     except KeyError:
                         # twitchio internal race condition — join likely succeeded, verify
                         await asyncio.sleep(1)
-                        if any(c.name.lower() == channel_name for c in self.connected_channels):
+                        if channel_name in self._connected_channel_names():
+                            connected_names.add(channel_name)
                             logger.info(f"Joined Twitch channel: {channel_name} (KeyError suppressed)")
                             break
                         elif attempt < 2:

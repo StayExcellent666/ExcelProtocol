@@ -4220,7 +4220,7 @@ def _fortuna_chat_channel(channel_login: str):
     login = str(channel_login or "").lower()
     return next(
         (candidate for candidate in _bot_ref.twitch_chat_bot.connected_channels
-         if candidate.name.lower() == login),
+         if str(getattr(candidate, "name", "") or "").lower() == login),
         None,
     )
 
@@ -4770,11 +4770,7 @@ async def _fortuna_announce_winner(giveaway: dict, winner: dict):
         logger.warning("Fortuna winner selected, but the Twitch chat bot is unavailable")
         return False
     channel_login = str(giveaway["twitch_broadcaster_login"]).lower()
-    channel = next(
-        (candidate for candidate in _bot_ref.twitch_chat_bot.connected_channels
-         if candidate.name.lower() == channel_login),
-        None,
-    )
+    channel = _fortuna_chat_channel(channel_login)
     if not channel:
         logger.warning("Fortuna could not announce winner: @%s is not joined", channel_login)
         return False
@@ -4849,11 +4845,7 @@ async def _fortuna_run_test_spin(broadcaster_id: str, broadcaster_login: str,
 
         channel = None
         if _bot_ref and getattr(_bot_ref, "twitch_chat_bot", None):
-            channel = next(
-                (candidate for candidate in _bot_ref.twitch_chat_bot.connected_channels
-                 if candidate.name.lower() == broadcaster_login.lower()),
-                None,
-            )
+            channel = _fortuna_chat_channel(broadcaster_login)
         if channel:
             await channel.send(
                 f"[TEST] ExcelFortuna selected {winner['twitch_display_name']}. "
