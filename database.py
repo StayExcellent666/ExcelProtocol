@@ -520,6 +520,22 @@ class Database:
             ON twitch_commands(twitch_channel)
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS twitch_command_user_usage (
+                twitch_channel TEXT NOT NULL,
+                command_name TEXT NOT NULL,
+                twitch_user_key TEXT NOT NULL,
+                twitch_username TEXT NOT NULL,
+                use_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (twitch_channel, command_name, twitch_user_key)
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_twitch_command_user_usage_command
+            ON twitch_command_user_usage(twitch_channel, command_name)
+        ''')
+
         # Notification log (30 day retention)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS notification_log (
@@ -2931,6 +2947,11 @@ class Database:
             (twitch_channel.lower(), command_name.lower())
         )
         removed = cursor.rowcount > 0
+        cursor.execute(
+            '''DELETE FROM twitch_command_user_usage
+               WHERE twitch_channel = ? AND command_name = ?''',
+            (twitch_channel.lower(), command_name.lower()),
+        )
         conn.commit()
         conn.close()
         return removed
@@ -2979,8 +3000,8 @@ class Database:
             for r in rows
         ]
 
-    def increment_command_uses(self, twitch_channel: str, command_name: str):
-        """Increment the use counter for a command"""
+    def increment_command_uses(self, twitch_channel: str, command_name: str) -> int:
+        """Increment and return the global use counter for a command."""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
@@ -2988,8 +3009,40 @@ class Database:
             SET use_count = use_count + 1
             WHERE twitch_channel = ? AND command_name = ?
         ''', (twitch_channel.lower(), command_name.lower()))
+        cursor.execute('''
+            SELECT use_count FROM twitch_commands
+            WHERE twitch_channel = ? AND command_name = ?
+        ''', (twitch_channel.lower(), command_name.lower()))
+        row = cursor.fetchone()
         conn.commit()
         conn.close()
+        return int(row[0]) if row else 0
+
+    def increment_command_user_uses(self, twitch_channel: str, command_name: str,
+                                    user_key: str, username: str) -> int:
+        """Increment and return one viewer's use count for a custom command."""
+        channel = twitch_channel.lower()
+        command = command_name.lower()
+        key = str(user_key or username).lower()
+        name = str(username or key)
+        conn = self.get_connection()
+        conn.execute('''
+            INSERT INTO twitch_command_user_usage
+                (twitch_channel, command_name, twitch_user_key, twitch_username, use_count)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(twitch_channel, command_name, twitch_user_key)
+            DO UPDATE SET
+                twitch_username = excluded.twitch_username,
+                use_count = twitch_command_user_usage.use_count + 1,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (channel, command, key, name))
+        row = conn.execute('''
+            SELECT use_count FROM twitch_command_user_usage
+            WHERE twitch_channel = ? AND command_name = ? AND twitch_user_key = ?
+        ''', (channel, command, key)).fetchone()
+        conn.commit()
+        conn.close()
+        return int(row[0]) if row else 0
 
     def get_command_limit(self, guild_id: int) -> int:
         conn = self.get_connection()

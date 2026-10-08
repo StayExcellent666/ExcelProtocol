@@ -2556,6 +2556,48 @@ function CleanupRulesTab({ guildId }) {
 
 
 // ── Twitch Tab ────────────────────────────────────────────────────────────────
+const CUSTOM_COMMAND_VARIABLES = [
+  { token:"$user", label:"User", help:"Viewer's Twitch username" },
+  { token:"$displayname", label:"Display name", help:"Viewer's capitalized display name" },
+  { token:"$target", label:"@Target", help:"First name after the command, including @; falls back to the viewer" },
+  { token:"$targetname", label:"Target name", help:"First name after the command without @" },
+  { token:"$args", label:"All text", help:"Everything written after the command" },
+  { token:"$channel", label:"Channel", help:"The broadcaster's Twitch channel" },
+  { token:"$command", label:"Command", help:"The command that was used" },
+  { token:"$count", label:"Total uses", help:"Total times this command has been used" },
+  { token:"$usercount", label:"Viewer uses", help:"Times this viewer has used this command" },
+  { token:"$random(1,100)", label:"Random number", help:"Random whole number between the two limits" },
+  { token:"$choice(yes|no|maybe)", label:"Random choice", help:"Randomly chooses one | separated option" },
+];
+
+function customCommandPreview(template, commandName, args) {
+  const username="sampleuser";
+  const displayName="SampleUser";
+  const rawArgs=String(args||"").trim();
+  const targetMatch=rawArgs.match(/^@?([A-Za-z0-9_]{1,25})(?:\s|$)/);
+  const targetName=targetMatch?.[1]||username;
+  let rendered=String(template||"");
+  rendered=rendered.replace(/\$random\(\s*(-?\d{1,7})\s*,\s*(-?\d{1,7})\s*\)/gi,(_,a,b)=>{
+    let low=Math.max(-1000000,Math.min(1000000,Number(a)));
+    let high=Math.max(-1000000,Math.min(1000000,Number(b)));
+    if(low>high){
+      [low,high]=[high,low];
+    }
+    return String(Math.floor(Math.random()*(high-low+1))+low);
+  });
+  rendered=rendered.replace(/\$choice\(([^()\r\n]{1,300})\)/gi,(_,body)=>{
+    const options=body.split("|").map(value=>value.trim()).filter(Boolean).slice(0,50);
+    return options.length?options[Math.floor(Math.random()*options.length)]:"";
+  });
+  const variables=[
+    ["$displayname",displayName],["$targetname",targetName],["$usercount","3"],
+    ["$command",commandName||"!command"],["$channel","streamer"],
+    ["$target",`@${targetName}`],["$count","42"],["$args",rawArgs],["$user",username],
+  ];
+  variables.forEach(([variable,value])=>{rendered=rendered.split(variable).join(value);});
+  return rendered.replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim().slice(0,500);
+}
+
 function TwitchTab({ guildId, isDev }) {
   const [info, setInfo]           = useState(null);
   const [loading, setLoading]     = useState(true);
@@ -2570,6 +2612,8 @@ function TwitchTab({ guildId, isDev }) {
   const [savingClip, setSavingClip] = useState(false);
   const [savingBuiltin, setSavingBuiltin] = useState(null);
   const [clipForm, setClipForm] = useState({ enabled:false, duration:45, cooldown:60 });
+  const [previewArgs, setPreviewArgs] = useState("@viewer");
+  const responseRef = useRef(null);
   const [err, setErr]             = useState(null);
 
   const PERMS = ["everyone","subscriber","mod","broadcaster"];
@@ -2602,6 +2646,7 @@ function TwitchTab({ guildId, isDev }) {
   const openAdd = () => {
     setEditing(null);
     setForm({ command_name:"", response:"", permission:"everyone", cooldown_seconds:0 });
+    setPreviewArgs("@viewer");
     setErr(null);
     setShowModal(true);
   };
@@ -2609,6 +2654,7 @@ function TwitchTab({ guildId, isDev }) {
   const openEdit = (cmd) => {
     setEditing(cmd);
     setForm({ command_name: cmd.command_name, response: cmd.response, permission: cmd.permission, cooldown_seconds: cmd.cooldown_seconds });
+    setPreviewArgs("@viewer");
     setErr(null);
     setShowModal(true);
   };
@@ -2665,6 +2711,22 @@ function TwitchTab({ guildId, isDev }) {
     } catch(e) { alert("Failed: " + e.message); }
     setSavingBuiltin(null);
   };
+
+  const insertVariable = (token) => {
+    const input=responseRef.current;
+    const start=input?.selectionStart??form.response.length;
+    const end=input?.selectionEnd??start;
+    const next=form.response.slice(0,start)+token+form.response.slice(end);
+    setForm(current=>({...current,response:next.slice(0,500)}));
+    requestAnimationFrame(()=>{
+      if(!input)return;
+      const caret=Math.min(500,start+token.length);
+      input.focus();
+      input.setSelectionRange(caret,caret);
+    });
+  };
+
+  const commandPreview = customCommandPreview(form.response, form.command_name, previewArgs);
 
   if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
 
@@ -2863,11 +2925,32 @@ function TwitchTab({ guildId, isDev }) {
           </Field>
 
           <Field label="Response">
-            <textarea value={form.response} onChange={e=>setForm(p=>({...p, response:e.target.value}))}
-              placeholder="What the bot says. Use $user, $channel, $count"
+            <textarea ref={responseRef} value={form.response} maxLength={500} onChange={e=>setForm(p=>({...p, response:e.target.value}))}
+              placeholder="$user hugs $target! 💜"
               rows={3} style={{ ...C.input, lineHeight:1.5 }}
               onFocus={e=>e.target.style.borderColor="var(--cyan)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
+            <div style={{fontSize:9,color:"var(--text3)",textAlign:"right",marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{form.response.length}/500</div>
           </Field>
+
+          <div>
+            <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace",marginBottom:7}}>CLICK TO INSERT A VARIABLE</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {CUSTOM_COMMAND_VARIABLES.map(variable=><button key={variable.token} type="button" onClick={()=>insertVariable(variable.token)} title={variable.help}
+                style={{padding:"5px 8px",borderRadius:6,border:"1px solid rgba(0,245,212,.3)",background:"rgba(0,245,212,.06)",color:"var(--cyan)",fontSize:10,fontFamily:"'JetBrains Mono',monospace",cursor:"pointer"}}>{variable.token}</button>)}
+            </div>
+            <div style={{fontSize:10,color:"var(--text3)",marginTop:7}}>Hover a variable to see what it does. Random ranges are capped at ±1,000,000.</div>
+          </div>
+
+          <div style={{padding:"11px 12px",borderRadius:8,background:"rgba(8,11,15,.7)",border:"1px solid var(--border)"}}>
+            <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace",marginBottom:7}}>LIVE PREVIEW</div>
+            <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:9,flexWrap:"wrap"}}>
+              <code style={{color:"var(--cyan2)",fontSize:11}}>{form.command_name||"!command"}</code>
+              <CyanInput value={previewArgs} onChange={e=>setPreviewArgs(e.target.value)} placeholder="@viewer extra text" style={{flex:1,minWidth:190,padding:"6px 8px",fontSize:11}} />
+            </div>
+            <div style={{fontSize:12,lineHeight:1.45,color:commandPreview?"var(--text2)":"var(--text3)",wordBreak:"break-word"}}>
+              {commandPreview||"Your rendered response will appear here."}
+            </div>
+          </div>
 
           <div style={{ display:"flex", gap:12 }}>
             <Field label="Permission">
@@ -2879,10 +2962,6 @@ function TwitchTab({ guildId, isDev }) {
               <CyanInput type="number" min={0} max={3600} value={form.cooldown_seconds}
                 onChange={e=>setForm(p=>({...p, cooldown_seconds:e.target.value}))} style={{ width:120 }} />
             </Field>
-          </div>
-
-          <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace", padding:"8px 12px", borderRadius:6, background:"rgba(8,11,15,0.6)", border:"1px solid var(--border)" }}>
-            Variables: <span style={{ color:"var(--cyan)" }}>$user</span> (username) · <span style={{ color:"var(--cyan)" }}>$channel</span> (channel name) · <span style={{ color:"var(--cyan)" }}>$count</span> (times used)
           </div>
 
           {err && <div style={{ fontSize:12, color:"var(--red)", fontFamily:"'Outfit',sans-serif", padding:"8px 12px", borderRadius:6, background:"var(--red-dim)", border:"1px solid rgba(255,77,109,0.3)" }}>⚠️ {err}</div>}

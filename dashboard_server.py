@@ -2396,6 +2396,8 @@ async def add_twitch_command(request):
 
     if not command_name or not response:
         raise web.HTTPBadRequest(reason="command_name and response are required")
+    if len(response) > 500:
+        raise web.HTTPBadRequest(reason="response must be 500 characters or fewer")
     if not command_name.startswith("!"):
         command_name = "!" + command_name
     if permission not in ("everyone", "subscriber", "mod", "broadcaster"):

@@ -7,6 +7,7 @@ from database import Database
 from twitch_api import TwitchAPI
 from utils import utcnow, parse_twitch_iso
 from config import TWITCH_CLIENT_ID
+from twitch_command_variables import render_custom_command
 
 logger = logging.getLogger(__name__)
 
@@ -356,14 +357,31 @@ class TwitchChatBot(commands.Bot):
             if not await self._check_cooldown(channel_name, command_name, cooldown):
                 return
 
-        self.db.increment_command_uses(channel_name, command_name)
+        count = self.db.increment_command_uses(channel_name, command_name)
+        if count is None:
+            count = cmd.get("use_count", 0) + 1
+        username = str(getattr(message.author, "name", "") or "viewer")
+        display_name = str(
+            getattr(message.author, "display_name", "") or username
+        )
+        user_key = str(getattr(message.author, "id", "") or username).lower()
+        user_counter = getattr(self.db, "increment_command_user_uses", None)
+        user_count = (
+            user_counter(channel_name, command_name, user_key, username)
+            if user_counter else 1
+        )
         response = self._replace_variables(
             cmd["response"],
-            message.author.name,
+            username,
             channel_name,
-            cmd.get("use_count", 0) + 1
+            count,
+            args=args,
+            display_name=display_name,
+            user_count=user_count,
+            command_name=command_name,
         )
-        await message.channel.send(response)
+        if response:
+            await message.channel.send(response)
 
     def _has_permission(self, author, channel_name: str, permission: str) -> bool:
         if permission == "everyone":
@@ -376,11 +394,14 @@ class TwitchChatBot(commands.Bot):
             return author.name.lower() == channel_name.lower()
         return True
 
-    def _replace_variables(self, text: str, username: str, channel: str, count: int) -> str:
-        text = text.replace("$user", username)
-        text = text.replace("$channel", channel)
-        text = text.replace("$count", str(count))
-        return text
+    def _replace_variables(self, text: str, username: str, channel: str, count: int,
+                           args: str = "", display_name: str = None,
+                           user_count: int = 1, command_name: str = "") -> str:
+        return render_custom_command(
+            text, username, channel, count,
+            args=args, display_name=display_name,
+            user_count=user_count, command_name=command_name,
+        )
 
     async def _check_cooldown(self, channel: str, command: str, seconds: int) -> bool:
         now = utcnow()

@@ -46,6 +46,23 @@ class TestSchema:
         assert cols["overlay_show_progress"] == "1"
         assert cols["overlay_tv_frame"] == "0"
 
+    def test_twitch_command_user_usage_schema_and_counter(self, db):
+        conn = db.get_connection()
+        cols = {
+            r[1] for r in conn.execute(
+                "PRAGMA table_info(twitch_command_user_usage)"
+            ).fetchall()
+        }
+        conn.close()
+        assert {
+            "twitch_channel", "command_name", "twitch_user_key",
+            "twitch_username", "use_count", "updated_at",
+        }.issubset(cols)
+
+        assert db.increment_command_user_uses("Channel", "!hug", "42", "Viewer") == 1
+        assert db.increment_command_user_uses("Channel", "!hug", "42", "Renamed") == 2
+        assert db.increment_command_user_uses("Channel", "!hug", "99", "Other") == 1
+
     def test_overlay_appearance_round_trip(self, db):
         db.set_twitch_channel(123, "streamer")
         assert db.get_overlay_appearance(123) == {

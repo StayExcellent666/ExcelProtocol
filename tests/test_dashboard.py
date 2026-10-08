@@ -851,6 +851,16 @@ class TestDevDashboardRoutes:
         assert 'msg.type === "set_appearance"' in source
         assert 'classList.toggle("tv-frame"' in source
 
+    def test_custom_command_editor_has_variable_buttons_and_live_preview(self):
+        from pathlib import Path
+        source = (Path(__file__).parent.parent / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+        assert "CUSTOM_COMMAND_VARIABLES" in source
+        assert 'token:"$target"' in source
+        assert 'token:"$args"' in source
+        assert 'token:"$random(1,100)"' in source
+        assert 'token:"$choice(yes|no|maybe)"' in source
+        assert "LIVE PREVIEW" in source
+
     @pytest.mark.asyncio
     async def test_shared_fortuna_start_engine_broadcasts_state(self, monkeypatch):
         broadcasts = []
