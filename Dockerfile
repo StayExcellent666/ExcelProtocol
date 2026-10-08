@@ -59,7 +59,9 @@ RUN apt-get purge -y gcc && \
     apt-get clean
 
 # Copy only necessary Python files
-COPY utils.py bot.py database.py twitch_api.py config.py twitch_bot.py twitch_chat_cog.py reaction_roles.py setchannel_cog.py birthday_cog.py dashboard_server.py server_setup.py welcome_banner.py ./
+# Keep every top-level Python module available in the runtime image. Using the
+# wildcard prevents a newly imported helper from being omitted on clean builds.
+COPY *.py ./
 COPY fortuna_overlay.html ./
 
 # Banner template + (future) other static assets used by Python code.

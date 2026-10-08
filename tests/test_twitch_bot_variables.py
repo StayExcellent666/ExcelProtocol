@@ -1,4 +1,11 @@
+from pathlib import Path
+
 from twitch_command_variables import render_custom_command, TWITCH_MESSAGE_LIMIT
+
+
+def test_docker_image_includes_command_variable_module():
+    dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY *.py ./" in dockerfile
 
 
 def render(text, *, args="@Target extra words"):
