@@ -63,6 +63,96 @@ class TestSchema:
         assert db.increment_command_user_uses("Channel", "!hug", "42", "Renamed") == 2
         assert db.increment_command_user_uses("Channel", "!hug", "99", "Other") == 1
 
+    def test_cleanup_guild_removes_new_scoped_data_but_preserves_shared_twitch_data(self, db):
+        db.set_twitch_channel(1, "sharedchannel")
+        db.set_twitch_channel(2, "sharedchannel")
+        conn = db.get_connection()
+        for guild_id in (1, 2):
+            conn.execute(
+                "INSERT INTO broadcaster_tokens "
+                "(guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at) "
+                "VALUES (?, '99', 'sharedchannel', 'access', 'refresh', '2099-01-01')",
+                (guild_id,),
+            )
+        conn.execute(
+            "INSERT INTO twitch_commands (twitch_channel, command_name, response) "
+            "VALUES ('sharedchannel', '!hug', '$user hugs $target')"
+        )
+        conn.execute(
+            "INSERT INTO twitch_command_user_usage "
+            "(twitch_channel, command_name, twitch_user_key, twitch_username, use_count) "
+            "VALUES ('sharedchannel', '!hug', '7', 'viewer', 2)"
+        )
+        conn.execute(
+            "INSERT INTO twitch_builtin_command_settings "
+            "(twitch_channel, command_name, enabled) VALUES ('sharedchannel', '!clip', 1)"
+        )
+        conn.execute("INSERT INTO server_setup (guild_id, data_json) VALUES (1, '{}')")
+        conn.execute("INSERT INTO welcome_settings (guild_id, welcome_message) VALUES (1, 'hello')")
+        conn.execute(
+            "INSERT INTO notification_log (guild_id, streamer_name, channel_id) "
+            "VALUES (1, 'streamer', 10)"
+        )
+        conn.execute(
+            "INSERT INTO fortuna_overlay_settings (guild_id, token, layout_json) "
+            "VALUES ('1', 'overlay-token', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO fortuna_plugin_keys "
+            "(guild_id, twitch_broadcaster_id, twitch_broadcaster_login, token_hash) "
+            "VALUES (1, '99', 'sharedchannel', 'hash')"
+        )
+        conn.execute(
+            "INSERT INTO admin_audit_log "
+            "(admin_id, admin_username, guild_id, method, endpoint) "
+            "VALUES ('5', 'admin', '1', 'POST', '/test')"
+        )
+        suggestion_id = conn.execute(
+            "INSERT INTO dashboard_suggestions (user_id, username, guild_id, text) "
+            "VALUES ('6', 'viewer', '1', 'idea')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO suggestion_comments "
+            "(suggestion_id, author_id, author_username, text) VALUES (?, '5', 'admin', 'note')",
+            (suggestion_id,),
+        )
+        giveaway_id = conn.execute(
+            "INSERT INTO fortuna_giveaways "
+            "(twitch_broadcaster_id, twitch_broadcaster_login, title) "
+            "VALUES ('99', 'sharedchannel', 'Test')"
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO fortuna_entries "
+            "(giveaway_id, redemption_id, twitch_user_id, twitch_user_login, twitch_display_name) "
+            "VALUES (?, 'redeem', '7', 'viewer', 'Viewer')",
+            (giveaway_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        db.cleanup_guild(1)
+        conn = db.get_connection()
+        for table in (
+            "server_setup", "welcome_settings", "notification_log",
+            "fortuna_overlay_settings", "fortuna_plugin_keys", "admin_audit_log",
+            "dashboard_suggestions", "suggestion_comments",
+        ):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM twitch_commands").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM twitch_command_user_usage").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM fortuna_giveaways").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM fortuna_entries").fetchone()[0] == 1
+        conn.close()
+
+        db.cleanup_guild(2)
+        conn = db.get_connection()
+        assert conn.execute("SELECT COUNT(*) FROM twitch_commands").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM twitch_command_user_usage").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM twitch_builtin_command_settings").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM fortuna_giveaways").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM fortuna_entries").fetchone()[0] == 0
+        conn.close()
+
     def test_overlay_appearance_round_trip(self, db):
         db.set_twitch_channel(123, "streamer")
         assert db.get_overlay_appearance(123) == {

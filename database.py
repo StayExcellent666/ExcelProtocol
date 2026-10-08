@@ -3254,13 +3254,40 @@ class Database:
         conn.close()
 
     def cleanup_guild(self, guild_id: int):
-        """Remove all data for a guild (called when bot is removed from server)"""
+        """Remove guild-scoped data after the seven-day re-invite grace period.
+
+        Twitch chat commands and Fortuna history are keyed by Twitch account,
+        not by Discord guild. Preserve those shared records while another guild
+        is still linked to the same channel or broadcaster.
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
-        
+
+        channel_row = cursor.execute(
+            'SELECT twitch_channel FROM twitch_channels WHERE guild_id = ?',
+            (guild_id,),
+        ).fetchone()
+        twitch_channel = channel_row[0].lower() if channel_row and channel_row[0] else None
+        broadcaster_row = cursor.execute(
+            'SELECT twitch_user_id FROM broadcaster_tokens WHERE guild_id = ?',
+            (guild_id,),
+        ).fetchone()
+        broadcaster_id = str(broadcaster_row[0]) if broadcaster_row and broadcaster_row[0] else None
+
+        # Delete comments before their guild-scoped suggestions because the
+        # legacy schema does not enable SQLite foreign-key cascades globally.
+        cursor.execute('''
+            DELETE FROM suggestion_comments
+            WHERE suggestion_id IN (
+                SELECT id FROM dashboard_suggestions WHERE guild_id = ?
+            )
+        ''', (str(guild_id),))
+        cursor.execute('DELETE FROM dashboard_suggestions WHERE guild_id = ?', (str(guild_id),))
+
         cursor.execute('DELETE FROM monitored_streamers WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM server_settings WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM notification_messages WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM notification_log WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM cleanup_configs WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM twitch_channels WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM birthdays WHERE guild_id = ?', (guild_id,))
@@ -3278,7 +3305,39 @@ class Database:
         cursor.execute('DELETE FROM safety_settings WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM safety_kicks WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM guild_alert_settings WHERE guild_id = ?', (guild_id,))
-        
+        cursor.execute('DELETE FROM server_setup WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM welcome_settings WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM fortuna_plugin_keys WHERE guild_id = ?', (guild_id,))
+        cursor.execute('DELETE FROM fortuna_overlay_settings WHERE guild_id = ?', (str(guild_id),))
+        cursor.execute('DELETE FROM admin_audit_log WHERE guild_id = ?', (str(guild_id),))
+
+        if twitch_channel:
+            still_linked = cursor.execute(
+                'SELECT 1 FROM twitch_channels WHERE lower(twitch_channel) = ? LIMIT 1',
+                (twitch_channel,),
+            ).fetchone()
+            if not still_linked:
+                cursor.execute('DELETE FROM twitch_command_user_usage WHERE twitch_channel = ?', (twitch_channel,))
+                cursor.execute('DELETE FROM twitch_commands WHERE twitch_channel = ?', (twitch_channel,))
+                cursor.execute('DELETE FROM twitch_builtin_command_settings WHERE twitch_channel = ?', (twitch_channel,))
+
+        if broadcaster_id:
+            still_authorized = cursor.execute(
+                'SELECT 1 FROM broadcaster_tokens WHERE twitch_user_id = ? LIMIT 1',
+                (broadcaster_id,),
+            ).fetchone()
+            if not still_authorized:
+                cursor.execute('''
+                    DELETE FROM fortuna_entries
+                    WHERE giveaway_id IN (
+                        SELECT id FROM fortuna_giveaways WHERE twitch_broadcaster_id = ?
+                    )
+                ''', (broadcaster_id,))
+                cursor.execute(
+                    'DELETE FROM fortuna_giveaways WHERE twitch_broadcaster_id = ?',
+                    (broadcaster_id,),
+                )
+
         conn.commit()
         conn.close()
         logger.info(f"Cleaned up data for guild {guild_id}")

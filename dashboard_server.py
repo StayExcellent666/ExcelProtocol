@@ -6199,6 +6199,17 @@ _LEGAL_CSS = """
   .back { display: inline-block; margin-bottom: 32px; font-size: 13px;
           color: #64748b; }
   .back:hover { color: #00f5d4; }
+  strong { color: #f8fafc; }
+  .notice { padding: 16px 18px; margin: 0 0 28px; border-radius: 10px;
+            border: 1px solid rgba(0,245,212,0.2); background: rgba(0,245,212,0.055);
+            color: #cbd5e1; font-size: 14px; }
+  .legal-links { display: flex; flex-wrap: wrap; gap: 8px; margin: -20px 0 30px; }
+  .legal-links a { padding: 5px 9px; border-radius: 6px; font-size: 11px;
+                   border: 1px solid rgba(0,245,212,0.14); background: rgba(0,245,212,0.04); }
+  @media (max-width: 600px) {
+    .wrap { padding: 32px 20px 64px; }
+    h1.title { font-size: 30px; }
+  }
 """
 
 def _legal_html(title, subtitle, body_html):
@@ -6215,6 +6226,7 @@ def _legal_html(title, subtitle, body_html):
     <div class="logo">ExcelProtocol</div>
     <h1 class="title">{title}</h1>
     <div class="subtitle">{subtitle}</div>
+    <div class="legal-links"><a href="/">Home</a><a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="https://discord.gg/Z4unn5DHgD">Support server</a></div>
     {body_html}
     <div class="footer">
       ExcelProtocol is an independent project and is not affiliated with Discord Inc. or Twitch Interactive, Inc.<br>
@@ -6231,8 +6243,13 @@ async def landing_page(request):
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ExcelProtocol — Discord &amp; Twitch Community Bot</title>
-  <meta name="description" content="Connect your Discord and Twitch communities with instant live alerts, roles, moderation, voice rooms, creator tools, statistics, and an easy web dashboard.">
+  <title>ExcelProtocol — Discord, Twitch &amp; OBS in One Dashboard</title>
+  <meta name="description" content="Run your Discord and Twitch community from one dashboard with instant live alerts, chat commands, channel rewards, OBS overlays, giveaways, roles, moderation, and more.">
+  <meta name="theme-color" content="#080c12">
+  <meta property="og:title" content="ExcelProtocol — One command center for your community">
+  <meta property="og:description" content="Connect Discord, Twitch chat, channel rewards, OBS overlays, and giveaways without juggling separate tools.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://excelprotocol.fly.dev/">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800;900&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
@@ -6296,11 +6313,12 @@ async def landing_page(request):
 
     /* ── Hero ── */
     .hero {
-      position:relative; z-index:1;
-      min-height:100vh;
-      display:flex; flex-direction:column; align-items:center; justify-content:center;
-      text-align:center; padding:80px 24px 60px;
+      position:relative; z-index:1; min-height:100vh;
+      display:grid; grid-template-columns:minmax(0,1.04fr) minmax(360px,.96fr);
+      gap:64px; align-items:center; max-width:1180px; margin:0 auto;
+      padding:112px 32px 72px;
     }
+    .hero-copy { min-width:0; }
     .hero-badge {
       display:inline-flex; align-items:center; gap:7px;
       padding:5px 14px; border-radius:20px;
@@ -6321,8 +6339,8 @@ async def landing_page(request):
     }
     .hero-title {
       font-family:'Orbitron',sans-serif; font-weight:900;
-      font-size:clamp(36px, 6vw, 72px);
-      line-height:1.15; letter-spacing:0px;
+      font-size:clamp(38px, 5.4vw, 70px);
+      line-height:1.08; letter-spacing:-1px;
       color:var(--text);
       animation:fadeUp 0.6s 0.1s ease both;
       margin-bottom:6px;
@@ -6334,11 +6352,11 @@ async def landing_page(request):
     }
     .hero-sub {
       font-size:clamp(16px, 2.5vw, 20px); color:var(--text2); font-weight:300;
-      max-width:540px; margin:20px auto 40px; line-height:1.6;
+      max-width:620px; margin:22px 0 36px; line-height:1.65;
       animation:fadeUp 0.6s 0.2s ease both;
     }
     .hero-actions {
-      display:flex; gap:12px; flex-wrap:wrap; justify-content:center;
+      display:flex; gap:12px; flex-wrap:wrap;
       animation:fadeUp 0.6s 0.3s ease both;
     }
     .btn-primary {
@@ -6359,12 +6377,12 @@ async def landing_page(request):
     }
     .btn-secondary:hover { background:rgba(255,255,255,0.05); border-color:rgba(255,255,255,0.25); }
     .hero-stats {
-      display:flex; gap:40px; margin-top:64px; flex-wrap:wrap; justify-content:center;
+      display:flex; gap:34px; margin-top:48px; flex-wrap:wrap;
       animation:fadeUp 0.6s 0.4s ease both;
     }
-    .stat { text-align:center; }
+    .stat { text-align:left; }
     .stat-num {
-      font-family:'Orbitron',sans-serif; font-weight:800; font-size:32px;
+      font-family:'Orbitron',sans-serif; font-weight:800; font-size:25px;
       color:var(--cyan); line-height:1;
     }
     .stat-label { font-size:12px; color:var(--text3); margin-top:4px; font-family:'JetBrains Mono',monospace; letter-spacing:0.5px; }
@@ -6387,14 +6405,63 @@ async def landing_page(request):
     }
     .section-sub { font-size:16px; color:var(--text2); max-width:520px; line-height:1.6; }
 
+    /* ── Product preview ── */
+    .product-preview {
+      position:relative; padding:1px; border-radius:22px;
+      background:linear-gradient(145deg, rgba(0,245,212,.55), rgba(167,139,250,.18), rgba(0,245,212,.08));
+      box-shadow:0 34px 90px rgba(0,0,0,.42), 0 0 55px rgba(0,245,212,.06);
+      animation:fadeUp .7s .2s ease both;
+    }
+    .preview-shell { border-radius:21px; overflow:hidden; background:rgba(9,14,22,.97); }
+    .preview-top { display:flex; align-items:center; justify-content:space-between; padding:15px 18px; border-bottom:1px solid var(--border); }
+    .preview-brand { font-family:'Orbitron',sans-serif; font-size:12px; font-weight:800; }
+    .preview-online { color:var(--green); font:500 9px 'JetBrains Mono',monospace; letter-spacing:1.5px; }
+    .preview-body { display:grid; grid-template-columns:72px 1fr; min-height:390px; }
+    .preview-nav { border-right:1px solid var(--border); padding:18px 12px; display:flex; flex-direction:column; gap:13px; }
+    .preview-nav span { height:8px; border-radius:4px; background:#1a2836; }
+    .preview-nav span.active { background:var(--cyan); box-shadow:0 0 12px rgba(0,245,212,.45); }
+    .preview-main { padding:23px; min-width:0; }
+    .preview-kicker { color:var(--cyan); font:500 9px 'JetBrains Mono',monospace; letter-spacing:2px; }
+    .preview-title { font-family:'Orbitron',sans-serif; font-size:18px; margin:7px 0 19px; }
+    .preview-alert { display:flex; gap:12px; align-items:center; padding:13px; border-radius:10px; border:1px solid rgba(0,245,212,.22); background:rgba(0,245,212,.055); }
+    .preview-avatar { width:38px; height:38px; border-radius:10px; display:grid; place-items:center; background:linear-gradient(135deg,var(--cyan),#168cff); color:#071014; font-weight:800; }
+    .preview-lines { flex:1; }
+    .preview-lines b { display:block; font-size:12px; }
+    .preview-lines small { color:var(--text3); font:400 9px 'JetBrains Mono',monospace; }
+    .preview-live { color:#ff4d6d; font:600 9px 'JetBrains Mono',monospace; }
+    .preview-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:11px; }
+    .preview-mini { padding:14px; min-height:91px; border:1px solid rgba(255,255,255,.07); border-radius:10px; background:rgba(255,255,255,.025); }
+    .preview-mini .icon { font-size:18px; }
+    .preview-mini b { display:block; font-size:11px; margin:8px 0 2px; }
+    .preview-mini small { color:var(--text3); font-size:9px; }
+    .preview-command { margin-top:11px; padding:13px; border-radius:10px; background:#060a0f; border:1px solid rgba(167,139,250,.2); color:var(--text2); font:400 10px 'JetBrains Mono',monospace; }
+    .preview-command strong { color:var(--purple); }
+
+    /* ── Product pillars ── */
+    .pillar-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:18px; margin-top:52px; }
+    .pillar-card {
+      padding:30px; border-radius:18px; min-height:390px; display:flex; flex-direction:column;
+      background:linear-gradient(155deg,rgba(18,29,44,.94),rgba(10,16,25,.92));
+      border:1px solid var(--border); position:relative; overflow:hidden;
+    }
+    .pillar-card::before { content:''; position:absolute; width:180px; height:180px; right:-65px; top:-75px; border-radius:50%; background:radial-gradient(circle,rgba(0,245,212,.12),transparent 70%); }
+    .pillar-card.purple::before { background:radial-gradient(circle,rgba(167,139,250,.16),transparent 70%); }
+    .pillar-number { color:var(--cyan); font:500 10px 'JetBrains Mono',monospace; letter-spacing:2px; }
+    .pillar-icon { font-size:32px; margin:20px 0 16px; }
+    .pillar-title { font:800 19px 'Orbitron',sans-serif; line-height:1.25; margin-bottom:10px; }
+    .pillar-desc { color:var(--text2); font-size:14px; line-height:1.65; margin-bottom:22px; }
+    .feature-list { list-style:none; margin:auto 0 0; display:flex; flex-direction:column; gap:10px; }
+    .feature-list li { color:#c4ced9; font-size:12px; line-height:1.45; padding-left:18px; position:relative; }
+    .feature-list li::before { content:'+'; position:absolute; left:0; color:var(--cyan); font:700 12px 'JetBrains Mono',monospace; }
+
     /* ── Feature grid ── */
     .feature-grid {
       display:grid;
-      grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));
-      gap:16px; margin-top:56px;
+      grid-template-columns:repeat(3,1fr);
+      gap:14px; margin-top:48px;
     }
     .feature-card {
-      padding:28px; border-radius:14px;
+      padding:24px; border-radius:14px;
       background:rgba(13,20,32,0.8);
       border:1px solid var(--border);
       transition:all 0.3s;
@@ -6420,6 +6487,18 @@ async def landing_page(request):
       background:rgba(0,245,212,0.08); color:var(--cyan);
       border:1px solid rgba(0,245,212,0.15);
     }
+
+    /* ── Reliability strip ── */
+    .reliability {
+      display:grid; grid-template-columns:.8fr 1.2fr; gap:50px; align-items:center;
+      padding:44px; border:1px solid var(--border); border-radius:20px;
+      background:linear-gradient(120deg,rgba(0,245,212,.045),rgba(13,20,32,.8));
+    }
+    .signal-list { display:grid; gap:10px; }
+    .signal { display:flex; align-items:center; gap:12px; padding:13px 15px; border-radius:10px; background:rgba(8,12,18,.72); border:1px solid rgba(255,255,255,.06); }
+    .signal-dot { width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 8px rgba(57,217,138,.7); flex:0 0 auto; }
+    .signal b { display:block; font-size:12px; }
+    .signal small { color:var(--text3); font-size:10px; }
 
     /* ── How it works ── */
     .steps { display:flex; flex-direction:column; gap:0; margin-top:56px; max-width:600px; }
@@ -6498,12 +6577,26 @@ async def landing_page(request):
       .nav-links { gap:0; }
       .nav-link { display:none; }
       .nav-btn { padding:7px 13px; font-size:12px; }
-      .hero { padding-left:20px; padding-right:20px; }
+      .hero { grid-template-columns:1fr; padding:104px 20px 64px; gap:46px; }
       .hero-badge { max-width:100%; text-align:center; line-height:1.5; }
+      .hero-title { font-size:clamp(36px,12vw,54px); }
+      .product-preview { width:100%; }
+      .preview-body { grid-template-columns:54px 1fr; min-height:350px; }
+      .preview-main { padding:18px 14px; }
+      .pillar-grid, .feature-grid, .reliability { grid-template-columns:1fr; }
+      .pillar-card { min-height:0; }
+      .reliability { padding:28px 22px; gap:28px; }
       .cta-section { padding:72px 18px; }
       .cta-inner { padding:48px 22px; }
       footer { padding:28px 20px; justify-content:center; text-align:center; }
       .footer-links { justify-content:center; width:100%; }
+    }
+    @media (min-width:701px) and (max-width:980px) {
+      .hero { grid-template-columns:1fr; max-width:760px; }
+      .product-preview { max-width:620px; width:100%; }
+      .pillar-grid { grid-template-columns:1fr; }
+      .pillar-card { min-height:0; }
+      .feature-grid { grid-template-columns:repeat(2,1fr); }
     }
   </style>
 </head>
@@ -6518,22 +6611,23 @@ async def landing_page(request):
     ExcelProtocol
   </a>
   <div class="nav-links">
-    <a class="nav-link" href="#features">Features</a>
+    <a class="nav-link" href="#platform">Platform</a>
+    <a class="nav-link" href="#features">More features</a>
+    <a class="nav-link" href="#reliability">Reliability</a>
     <a class="nav-link" href="#how-it-works">How it works</a>
-    <a class="nav-link" href="/terms">Terms</a>
-    <a class="nav-link" href="/privacy">Privacy</a>
     <a class="nav-btn" href="/app/">Dashboard</a>
   </div>
 </nav>
 
 <!-- Hero -->
 <section class="hero">
+  <div class="hero-copy">
   <div class="hero-badge">
     <div class="pulse-dot"></div>
-    Discord + Twitch — one connected community
+    Discord · Twitch · OBS · one command center
   </div>
-  <h1 class="hero-title">Your community.<br><span>Better connected.</span></h1>
-  <p class="hero-sub">One polished bot for your Discord and Twitch community — instant live alerts, roles, safety tools, voice rooms, creator integrations, and an easy web dashboard.</p>
+  <h1 class="hero-title">Run the stream.<br><span>Grow the community.</span></h1>
+  <p class="hero-sub">ExcelProtocol connects your Discord server, Twitch chat, channel rewards, OBS overlays, and giveaways in one polished dashboard built for creator communities.</p>
   <div class="hero-actions">
     <a class="btn-primary" href="https://discord.com/oauth2/authorize?client_id=1472217050104729701">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057c.002.022.015.043.03.056a19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/></svg>
@@ -6545,82 +6639,162 @@ async def landing_page(request):
   </div>
   <div class="hero-stats">
     <div class="stat">
-      <div class="stat-num">instant</div>
-      <div class="stat-label">notification speed</div>
+      <div class="stat-num">EventSub</div>
+      <div class="stat-label">instant live detection</div>
     </div>
     <div class="stat">
-      <div class="stat-num">one</div>
-      <div class="stat-label">simple dashboard</div>
+      <div class="stat-num">3-in-1</div>
+      <div class="stat-label">Discord · Twitch · OBS</div>
     </div>
     <div class="stat">
-      <div class="stat-num">20+</div>
-      <div class="stat-label">features</div>
+      <div class="stat-num">No-code</div>
+      <div class="stat-label">visual dashboard</div>
+    </div>
+  </div>
+  </div>
+  <div class="product-preview" aria-label="ExcelProtocol dashboard preview">
+    <div class="preview-shell">
+      <div class="preview-top">
+        <div class="preview-brand">ExcelProtocol <span style="color:var(--cyan)">DASHBOARD</span></div>
+        <div class="preview-online">● ONLINE</div>
+      </div>
+      <div class="preview-body">
+        <div class="preview-nav"><span></span><span class="active"></span><span></span><span></span><span></span><span></span></div>
+        <div class="preview-main">
+          <div class="preview-kicker">STREAMING &amp; TWITCH</div>
+          <div class="preview-title">Creator Command Center</div>
+          <div class="preview-alert">
+            <div class="preview-avatar">E</div>
+            <div class="preview-lines"><b>stayexcellent is live</b><small>Alert delivered · role updated</small></div>
+            <div class="preview-live">● LIVE</div>
+          </div>
+          <div class="preview-grid">
+            <div class="preview-mini"><div class="icon">🎁</div><b>Fortuna</b><small>Giveaway ready</small></div>
+            <div class="preview-mini"><div class="icon">🎬</div><b>OBS Overlay</b><small>Source connected</small></div>
+            <div class="preview-mini"><div class="icon">💬</div><b>Chat Commands</b><small>Custom variables</small></div>
+            <div class="preview-mini"><div class="icon">🛡️</div><b>Health Check</b><small>No critical issues</small></div>
+          </div>
+          <div class="preview-command"><strong>!sync @viewer</strong> → Vibe match: 94% · LEGENDARY 👑</div>
+        </div>
+      </div>
     </div>
   </div>
 </section>
 
 <div class="divider"></div>
 
-<!-- Features -->
+<!-- Platform pillars -->
+<section id="platform">
+  <div class="section-inner">
+    <div class="section-label">Three connected systems</div>
+    <h2 class="section-title">Everything around your stream,<br>finally working together</h2>
+    <p class="section-sub">Build the Discord community, make Twitch chat interactive, and control what viewers see in OBS without stitching together a pile of separate bots.</p>
+    <div class="pillar-grid">
+      <div class="pillar-card">
+        <div class="pillar-number">01 · DISCORD</div>
+        <div class="pillar-icon">📡</div>
+        <div class="pillar-title">Live alerts &amp;<br>community operations</div>
+        <div class="pillar-desc">Turn a Twitch stream into an organized Discord experience—from the instant someone goes live through every role, celebration, and channel update.</div>
+        <ul class="feature-list">
+          <li>Instant EventSub alerts with per-streamer channels</li>
+          <li>Automatic live roles and Discord-to-Twitch links</li>
+          <li>Notification history, milestones, and delivery diagnostics</li>
+          <li>Reaction roles, birthdays, welcomes, and voice rooms</li>
+        </ul>
+      </div>
+      <div class="pillar-card purple">
+        <div class="pillar-number">02 · TWITCH</div>
+        <div class="pillar-icon">💬</div>
+        <div class="pillar-title">Chat, rewards &amp;<br>viewer interaction</div>
+        <div class="pillar-desc">Give your chat commands that feel personal and channel rewards that do something memorable—managed visually instead of through configuration files.</div>
+        <ul class="feature-list">
+          <li>Custom commands with targets, counters, choices, and randomizers</li>
+          <li>Toggleable built-in commands, uptime, shoutouts, and clips</li>
+          <li>Channel Point reward creation and trigger management</li>
+          <li>Owner-authorized OAuth with automatic token refresh</li>
+        </ul>
+      </div>
+      <div class="pillar-card">
+        <div class="pillar-number">03 · OBS</div>
+        <div class="pillar-icon">🎬</div>
+        <div class="pillar-title">Overlays, videos &amp;<br>ExcelFortuna</div>
+        <div class="pillar-desc">Let chat and rewards drive a broadcast-ready browser source with queueing, editing controls, resilient reconnects, and a complete giveaway system.</div>
+        <ul class="feature-list">
+          <li>Queued YouTube video and audio triggers</li>
+          <li>Timeline trimming, volume preview, progress, and TV framing</li>
+          <li>Restart-safe browser source reconnection</li>
+          <li>Customizable ExcelFortuna wheel, entry rules, and history</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- Supporting features -->
 <section id="features">
   <div class="section-inner">
-    <div class="section-label">What it does</div>
-    <h2 class="section-title">Everything your creator<br>community needs</h2>
-    <p class="section-sub">From going live to growing a welcoming, well-managed server, ExcelProtocol keeps your creator community connected in one place.</p>
+    <div class="section-label">Built around the community</div>
+    <h2 class="section-title">The rest of the server<br>doesn't get left behind</h2>
+    <p class="section-sub">ExcelProtocol handles the everyday community work too, with focused tools instead of a maze of commands.</p>
     <div class="feature-grid">
       <div class="feature-card">
-        <div class="feature-icon">📺</div>
-        <div class="feature-title">Instant Stream Notifications</div>
-        <div class="feature-desc">Powered by Twitch EventSub webhooks — notifications fire the moment a streamer goes live, not after a polling delay.</div>
-        <span class="feature-tag">EventSub</span>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">⚙️</div>
-        <div class="feature-title">Web Dashboard</div>
-        <div class="feature-desc">Configure your server visually, add streamers, manage channels and roles, or use the guided setup wizard — no command chains required.</div>
-        <span class="feature-tag">No-code setup</span>
-      </div>
-      <div class="feature-card">
         <div class="feature-icon">🎭</div>
-        <div class="feature-title">Reaction Roles</div>
-        <div class="feature-desc">Create fully customisable role panels with single-choice, multi-choice, or add-only modes. Fully managed from the dashboard.</div>
-        <span class="feature-tag">Roles</span>
+        <div class="feature-title">Roles that stay organized</div>
+        <div class="feature-desc">Build reaction-role panels, link Discord members to Twitch alerts, and manage live roles without manual cleanup.</div>
+        <span class="feature-tag">Reaction + live roles</span>
       </div>
       <div class="feature-card">
         <div class="feature-icon">👋</div>
-        <div class="feature-title">Welcome, Goodbye &amp; Birthdays</div>
-        <div class="feature-desc">Make members feel at home with custom arrival and farewell messages, plus automatic birthday announcements for your community.</div>
-        <span class="feature-tag">Community</span>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🔊</div>
-        <div class="feature-title">Dynamic Voice Rooms</div>
-        <div class="feature-desc">Members create personal voice rooms simply by joining a trigger channel, then rename, lock, limit, or manage their temporary space.</div>
-        <span class="feature-tag">Voice</span>
+        <div class="feature-title">Personal community moments</div>
+        <div class="feature-desc">Color-matched welcome and goodbye banners, birthday announcements with optional years, and polished previews before saving.</div>
+        <span class="feature-tag">Welcome + birthdays</span>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🛡️</div>
-        <div class="feature-title">Safety &amp; Cleanup</div>
-        <div class="feature-desc">Protect new joins with configurable account checks and keep busy channels tidy using automatic cleanup rules that preserve pinned messages.</div>
-        <span class="feature-tag">Moderation</span>
+        <div class="feature-title">Safety without busywork</div>
+        <div class="feature-desc">Screen suspicious new accounts, preserve pinned messages during cleanup, and diagnose missing channel permissions from the dashboard.</div>
+        <span class="feature-tag">Safety + cleanup</span>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">🟣</div>
-        <div class="feature-title">Twitch Chat &amp; Rewards</div>
-        <div class="feature-desc">Create custom chat commands, connect channel point rewards, and give your Twitch community interactive tools managed from the same dashboard.</div>
-        <span class="feature-tag">Creator tools</span>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🎬</div>
-        <div class="feature-title">OBS Video Overlay</div>
-        <div class="feature-desc">Trigger queued YouTube videos from Twitch chat or channel point rewards using a cloud-hosted OBS browser source with skip and volume controls.</div>
-        <span class="feature-tag">Interactive</span>
+        <div class="feature-icon">🔊</div>
+        <div class="feature-title">Dynamic voice rooms</div>
+        <div class="feature-desc">Members create temporary voice rooms by joining a trigger channel, then rename, lock, limit, and manage their own space.</div>
+        <span class="feature-tag">Join to create</span>
       </div>
       <div class="feature-card">
         <div class="feature-icon">📊</div>
-        <div class="feature-title">Stats &amp; Leaderboards</div>
-        <div class="feature-desc">Display live server counts, track streams and hours, celebrate milestones, and compare consistency, total time, or longest streams.</div>
-        <span class="feature-tag">Insights</span>
+        <div class="feature-title">Useful history &amp; insights</div>
+        <div class="feature-desc">Track stream frequency, hours, longest sessions, delivery history, server counts, and milestones without external spreadsheets.</div>
+        <span class="feature-tag">Stats + leaderboards</span>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">⚙️</div>
+        <div class="feature-title">A dashboard people can use</div>
+        <div class="feature-desc">Search large server lists, filter streamer links, preview changes, submit suggestions, and see configuration issues in one place.</div>
+        <span class="feature-tag">Visual management</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- Reliability -->
+<section id="reliability">
+  <div class="section-inner">
+    <div class="reliability">
+      <div>
+        <div class="section-label">Built to keep running</div>
+        <h2 class="section-title">A deploy shouldn't derail a stream</h2>
+        <p class="section-sub">Persistent settings, EventSub reconciliation, overlay reconnect protection, and visible health checks help ExcelProtocol recover cleanly instead of making you rebuild your setup.</p>
+      </div>
+      <div class="signal-list">
+        <div class="signal"><div class="signal-dot"></div><div><b>EventSub reconciliation</b><small>Repairs missing subscriptions and stale live state.</small></div></div>
+        <div class="signal"><div class="signal-dot"></div><div><b>Persistent configuration</b><small>Dashboard settings and renewable Twitch credentials survive deploys.</small></div></div>
+        <div class="signal"><div class="signal-dot"></div><div><b>OBS reconnect protection</b><small>Browser sources recover without routine cache clearing.</small></div></div>
+        <div class="signal"><div class="signal-dot"></div><div><b>Permission and delivery diagnostics</b><small>Find channel overrides and recent notification failures quickly.</small></div></div>
       </div>
     </div>
   </div>
@@ -6644,7 +6818,7 @@ async def landing_page(request):
         </div>
         <div class="step-content">
           <div class="step-title">Add ExcelProtocol to your server</div>
-          <div class="step-desc">Click "Add to Discord" and select your server. The bot joins with all required permissions.</div>
+          <div class="step-desc">Click "Add to Discord," select your server, and review the requested permissions. Channel or category overrides can still be adjusted later.</div>
         </div>
       </div>
       <div class="step">
@@ -6664,7 +6838,7 @@ async def landing_page(request):
         </div>
         <div class="step-content">
           <div class="step-title">Choose what your community needs</div>
-          <div class="step-desc">Use the setup wizard or configure live alerts, roles, welcomes, voice rooms, safety tools, Twitch features, and more individually.</div>
+          <div class="step-desc">Review a setup plan or configure live alerts, roles, welcomes, voice rooms, moderation, Twitch tools, and OBS features individually.</div>
         </div>
       </div>
       <div class="step">
@@ -6674,7 +6848,7 @@ async def landing_page(request):
         </div>
         <div class="step-content">
           <div class="step-title">Let ExcelProtocol handle the routine</div>
-          <div class="step-desc">Live alerts, celebrations, cleanup, statistics, and community tools keep running automatically in the cloud.</div>
+          <div class="step-desc">Live alerts, chat interactions, overlays, celebrations, cleanup, and statistics keep running automatically in the cloud.</div>
         </div>
       </div>
     </div>
@@ -6686,8 +6860,8 @@ async def landing_page(request):
 <!-- CTA -->
 <section class="cta-section">
   <div class="cta-inner">
-    <h2 class="cta-title">Ready to level up your community?</h2>
-    <p class="cta-sub">Add ExcelProtocol in seconds and bring your Discord and Twitch communities together with one easy, creator-focused toolkit.</p>
+    <h2 class="cta-title">One dashboard. The whole community.</h2>
+    <p class="cta-sub">Bring Discord, Twitch, OBS, and your viewers into one creator-focused workflow without giving up control of the details.</p>
     <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
       <a class="btn-primary" href="https://discord.com/oauth2/authorize?client_id=1472217050104729701">
         Add to Discord — it's free
@@ -6754,73 +6928,85 @@ async def landing_page(request):
 async def terms_page(request):
     html = _legal_html(
         "Terms of Service",
-        "Last updated: April 7, 2026",
+        "Last updated: October 9, 2026",
         """
+        <div class="notice">These Terms govern the ExcelProtocol Discord bot, web dashboard, Twitch integrations, OBS browser sources, companion integrations, and related services (together, the "Service").</div>
+
         <h2>1. Acceptance of Terms</h2>
-        <p>By adding ExcelProtocol to your Discord server, using the ExcelProtocol dashboard at excelprotocol.fly.dev, or otherwise interacting with any ExcelProtocol service, you agree to be bound by these Terms of Service. If you do not agree, you must remove the bot from your server and discontinue use immediately.</p>
-        <p>ExcelProtocol is operated by an independent developer ("we", "us", "our"). These terms constitute a legally binding agreement between you and us.</p>
+        <p>By adding ExcelProtocol to a Discord server, signing into the dashboard, connecting a Twitch account, using an ExcelProtocol chat command or overlay, or otherwise using the Service, you agree to these Terms. If you do not agree, do not use the Service.</p>
+        <p>ExcelProtocol is operated by an independent developer ("ExcelProtocol", "we", "us", or "our"). If you use the Service for a server, organization, or other entity, you confirm that you have authority to act for it.</p>
 
         <h2>2. Eligibility</h2>
-        <p>You must be at least 18 years of age to use ExcelProtocol. By using the service, you confirm that you meet this requirement. We do not knowingly collect data from or provide services to individuals under 18.</p>
+        <p>You must meet the minimum age required by Discord, Twitch, and the laws where you live. If you are not old enough to agree to these Terms yourself, a parent or legal guardian must agree on your behalf.</p>
 
         <h2>3. Description of Service</h2>
-        <p>ExcelProtocol is a Discord bot and associated web dashboard that provides the following features:</p>
+        <p>ExcelProtocol provides tools for creator communities, including:</p>
         <ul>
-          <li>Twitch stream live notifications to Discord channels</li>
-          <li>Reaction roles and server role management</li>
-          <li>Twitch channel point reward integrations via EventSub webhooks</li>
-          <li>Server statistics tracking and display</li>
-          <li>Birthday tracking, chat commands, and other community utilities</li>
+          <li>Twitch live alerts, stream history, milestones, Discord live roles, and notification diagnostics</li>
+          <li>Reaction roles, welcome and goodbye banners, birthdays, voice rooms, statistics, safety checks, and cleanup tools</li>
+          <li>Twitch chat commands, clip creation, broadcaster OAuth, Channel Point rewards, and EventSub integrations</li>
+          <li>OBS browser sources for video or audio triggers and ExcelFortuna giveaways</li>
+          <li>A web dashboard for configuration, health information, support requests, and authorized administration</li>
         </ul>
-        <p>We reserve the right to modify, suspend, or discontinue any feature at any time without notice.</p>
+        <p>Features may change, be limited, or be discontinued. Some features require separate authorization, specific Discord permissions, Twitch eligibility, an active stream, OBS, or third-party services.</p>
 
         <h2>4. User Responsibilities</h2>
-        <p>As a server administrator or user of ExcelProtocol, you agree to:</p>
+        <p>You are responsible for your server configuration, connected accounts, submitted content, and use of the Service. You agree to:</p>
         <ul>
-          <li>Use the service only for lawful purposes and in compliance with Discord's Terms of Service and Community Guidelines</li>
-          <li>Not attempt to abuse, exploit, reverse-engineer, or circumvent any feature or security measure of the bot or dashboard</li>
-          <li>Not use the service to send unsolicited messages, spam, or harassing content</li>
-          <li>Ensure that your use of the bot complies with applicable laws in your jurisdiction</li>
-          <li>Take responsibility for all activity that occurs under your Discord server's use of ExcelProtocol</li>
+          <li>Use ExcelProtocol lawfully and follow the applicable Discord, Twitch, YouTube, and other third-party terms</li>
+          <li>Obtain any permissions or consents needed before storing birthdays, linking Discord members to Twitch accounts, or enabling automated actions</li>
+          <li>Use only media, messages, commands, and reward content that you have the right to use</li>
+          <li>Review permissions and test moderation, cleanup, role, notification, reward, and overlay settings before relying on them</li>
+          <li>Keep connected Discord and Twitch accounts secure and promptly revoke access if you suspect compromise</li>
         </ul>
 
-        <h2>5. Dashboard Access and Authentication</h2>
-        <p>The ExcelProtocol dashboard uses Discord OAuth2 for authentication. You must have a valid Discord account and the necessary server permissions to access server-specific settings. You are responsible for maintaining the security of your Discord account.</p>
-        <p>We do not store your Discord password. Authentication tokens are used solely to verify your identity and manage your server settings.</p>
+        <h2>5. Accounts, Permissions, and Authorized Actions</h2>
+        <p>The dashboard uses Discord OAuth2 to verify identity and server-management access. Twitch features use Twitch OAuth and request only the scopes required for enabled functionality. We do not ask for or store your Discord or Twitch password.</p>
+        <p>When you enable a feature, you authorize ExcelProtocol to perform the actions clearly associated with it—for example, sending notifications, managing configured roles or channels, creating a Twitch clip, posting in Twitch chat, managing rewards, or displaying an OBS overlay event. You can disable features, disconnect Twitch, revoke keys, or remove the bot at any time.</p>
 
-        <h2>6. Twitch Integration</h2>
-        <p>ExcelProtocol integrates with Twitch's API and EventSub webhook service to provide stream notifications. By using stream notification features, you acknowledge that:</p>
+        <h2>6. Acceptable Use</h2>
+        <p>You may not use or attempt to use the Service to:</p>
         <ul>
-          <li>Twitch usernames entered into the bot are stored in our database and used to register webhook subscriptions with Twitch</li>
-          <li>Stream data (titles, game categories, thumbnails, viewer counts) is fetched from Twitch's public API and displayed in Discord</li>
-          <li>We are not affiliated with Twitch Interactive, Inc.</li>
-          <li>Notification accuracy depends on Twitch's API availability and EventSub delivery, which we do not control</li>
+          <li>Send spam, harassment, deceptive messages, illegal content, or content that violates another person's rights</li>
+          <li>Artificially inflate engagement, evade platform restrictions, scrape data, or profile users for advertising or eligibility decisions</li>
+          <li>Probe, exploit, disrupt, reverse engineer, overload, or bypass access controls, rate limits, or security measures</li>
+          <li>Obtain credentials or access servers, accounts, channels, overlays, or data without authorization</li>
+          <li>Use automated moderation or cleanup in a reckless manner or misrepresent ExcelProtocol as Discord- or Twitch-operated</li>
         </ul>
 
-        <h2>7. Optional Tips and Donations</h2>
-        <p>ExcelProtocol offers an optional tip feature accessible via the /tip command. Any tips or donations made are entirely voluntary and non-refundable. Tips do not grant any additional features, access, or service guarantees. We are not responsible for any issues arising from third-party payment processors used to facilitate tips.</p>
+        <h2>7. User Content and Intellectual Property</h2>
+        <p>You retain ownership of content you submit, such as custom messages, command responses, reward titles, video links, giveaway titles, and suggestions. You grant us a limited, non-exclusive license to host, process, transmit, and display that content only as needed to operate and improve the Service.</p>
+        <p>ExcelProtocol's name, branding, source materials, interface, and original assets remain the property of their respective owners. Third-party content and trademarks remain the property of their owners.</p>
 
-        <h2>8. Data and Privacy</h2>
-        <p>Your use of ExcelProtocol is also governed by our <a href="/privacy">Privacy Policy</a>, which is incorporated into these Terms by reference. By using the service, you consent to the data practices described in the Privacy Policy.</p>
+        <h2>8. Third-Party Platforms and Content</h2>
+        <p>ExcelProtocol depends on Discord, Twitch, YouTube, Fly.io, Google Fonts, and optional services such as Ko-fi. Their availability and terms are outside our control. Twitch notifications, clips, rewards, chat, embedded media, and Discord actions may fail or change when those providers experience outages, revoke authorization, alter APIs, or enforce their policies.</p>
+        <p>Linking or playing a YouTube video does not grant you rights to that content. You are responsible for ensuring your use of media is permitted.</p>
 
-        <h2>9. Intellectual Property</h2>
-        <p>ExcelProtocol, its name, logo, and associated materials are the intellectual property of the developer. You may not reproduce, distribute, or create derivative works without explicit written permission.</p>
+        <h2>9. Optional Tips</h2>
+        <p>The <code>/tip</code> command links to Ko-fi. Tips are voluntary, are handled by that third party, and do not purchase features or guarantee availability. Refunds and payment issues are governed by the payment provider's terms.</p>
 
-        <h2>10. Disclaimer of Warranties</h2>
+        <h2>10. Privacy</h2>
+        <p>Our <a href="/privacy">Privacy Policy</a> explains what data is processed, why it is used, retention periods, sharing, and available rights. Server administrators are responsible for telling their communities about configured features where required.</p>
+
+        <h2>11. Availability and Changes</h2>
+        <p>We may modify, limit, suspend, or discontinue all or part of the Service, including free features, at any time. We aim to avoid disruption but do not promise uninterrupted availability, permanent data storage, backward compatibility, or any particular feature.</p>
+
+        <h2>12. Suspension and Termination</h2>
+        <p>We may restrict or terminate access when reasonably necessary to protect users, platforms, or the Service; comply with law or platform requirements; respond to abuse or security risk; or address a violation of these Terms.</p>
+        <p>You may stop using the Service at any time. Removing the bot starts a seven-day re-invite grace period before guild-scoped data is deleted. You may also contact us to request deletion sooner, subject to any data we must retain by law.</p>
+
+        <h2>13. Disclaimer of Warranties</h2>
         <p>ExcelProtocol is provided "as is" and "as available" without warranties of any kind, either express or implied. We do not warrant that the service will be uninterrupted, error-free, or free of harmful components. Notification delivery depends on third-party services (Discord, Twitch) that we do not control.</p>
 
-        <h2>11. Limitation of Liability</h2>
-        <p>To the maximum extent permitted by applicable law, we shall not be liable for any indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use ExcelProtocol, including but not limited to missed stream notifications, loss of data, or server disruption.</p>
+        <h2>14. Limitation of Liability</h2>
+        <p>To the maximum extent permitted by law, ExcelProtocol and its operator will not be liable for indirect, incidental, special, consequential, exemplary, or punitive damages, or for loss of data, revenue, goodwill, content, access, or opportunities arising from the Service. This includes missed notifications, incorrect automated actions, deleted messages, role or channel changes, unavailable overlays, or giveaway outcomes.</p>
+        <p>Nothing in these Terms excludes liability that cannot legally be excluded or limits rights that applicable consumer law does not allow us to limit.</p>
 
-        <h2>12. Termination</h2>
-        <p>We reserve the right to terminate or restrict access to ExcelProtocol for any server or user at our sole discretion, without notice, for conduct that we believe violates these Terms or is harmful to other users, us, or third parties.</p>
-        <p>You may terminate your use at any time by removing the bot from your Discord server and contacting us to request data deletion.</p>
+        <h2>15. Changes to These Terms</h2>
+        <p>We may update these Terms as the Service, law, or platform requirements change. The date above shows the latest revision. When practical, material changes will be announced through the dashboard or support server. Continued use after an updated version takes effect means you accept the revised Terms.</p>
 
-        <h2>13. Changes to Terms</h2>
-        <p>We may update these Terms at any time. Continued use of ExcelProtocol after changes are posted constitutes acceptance of the revised Terms. We will endeavour to notify users of significant changes via the bot's support channels.</p>
-
-        <h2>14. Contact</h2>
-        <p>For questions about these Terms, contact us via Discord: <strong>stayexcellent</strong></p>
+        <h2>16. Contact</h2>
+        <p>Questions, reports, or legal requests may be sent to <strong>stayexcellent</strong> on Discord or through the <a href="https://discord.gg/Z4unn5DHgD">ExcelProtocol support server</a>.</p>
         """
     )
     return web.Response(text=html, content_type="text/html")
@@ -6829,93 +7015,116 @@ async def terms_page(request):
 async def privacy_page(request):
     html = _legal_html(
         "Privacy Policy",
-        "Last updated: April 7, 2026",
+        "Last updated: October 9, 2026",
         """
-        <h2>1. Overview</h2>
-        <p>This Privacy Policy explains what data ExcelProtocol collects, how it is used, and your rights regarding that data. We are committed to being transparent and only collecting what is necessary to operate the service.</p>
-        <p>ExcelProtocol is hosted on Fly.io (Frankfurt, EU region). Data is stored in a SQLite database on persistent Fly.io storage volumes.</p>
+        <div class="notice">This Policy describes how ExcelProtocol processes information through its Discord bot, dashboard, Twitch integrations, OBS browser sources, companion integrations, support tools, and related services. It does not replace the privacy policies of Discord, Twitch, YouTube, Fly.io, Google, or Ko-fi.</div>
 
-        <h2>2. What Data We Collect</h2>
-        <p><strong>Discord Data</strong> — When you add ExcelProtocol to a Discord server, we collect and store:</p>
+        <h2>1. Controller and Contact</h2>
+        <p>The independent operator of ExcelProtocol is the controller responsible for the processing described here. Privacy questions and data requests may be sent to <strong>stayexcellent</strong> on Discord or through the <a href="https://discord.gg/Z4unn5DHgD">ExcelProtocol support server</a>.</p>
+        <p>The Service is hosted on Fly.io in the Frankfurt region. Its primary application database is stored on a persistent Fly.io volume.</p>
+
+        <h2>2. Data We Process</h2>
+        <p><strong>Discord account and server data</strong></p>
         <ul>
-          <li>Discord Server (Guild) ID — to associate settings with your server</li>
-          <li>Discord Channel IDs — to know which channels to send notifications to</li>
-          <li>Discord Role IDs — for reaction roles and ping role features</li>
-          <li>Discord User IDs — for birthday tracking and command usage</li>
-          <li>Discord Message IDs — to track sent notification messages for auto-deletion</li>
+          <li>Discord user ID, username, avatar reference, and the servers you can manage while you are signed into the dashboard</li>
+          <li>Guild, channel, role, category, message, and member IDs needed for configured features</li>
+          <li>Server settings, setup metadata, reaction-role content, welcome or goodbye text, voice-room settings, and permission state</li>
+          <li>Birthday day and month, optional birth year, and the associated Discord user ID when the birthday feature is used</li>
+          <li>User ID, username, action, reason, and timestamp for configured safety actions and authorized admin activity</li>
+          <li>Suggestion text, internal comments, usernames, user IDs, guild ID, and timestamps when the suggestion feature is used</li>
         </ul>
-        <p>We do not store Discord message content, usernames, profile pictures, or any personal user data beyond what is listed above.</p>
 
-        <p><strong>Twitch Data</strong> — To provide stream notifications, we store:</p>
+        <p><strong>Twitch and streaming data</strong></p>
         <ul>
-          <li>Twitch usernames (login names) of streamers added to a server</li>
-          <li>Twitch user IDs — used internally to register EventSub webhooks with Twitch</li>
-          <li>Broadcaster OAuth tokens — only if you connect your Twitch account for Channel Rewards; stored and used solely to manage channel point rewards on your behalf</li>
+          <li>Twitch logins and user IDs for broadcasters and monitored streamers, including optional links to Discord members</li>
+          <li>Stream start and end times, notification status, milestone state, and temporary public stream details fetched from Twitch</li>
+          <li>Custom command text, settings, total-use counts, and per-viewer Twitch ID or login and use count</li>
+          <li>Broadcaster OAuth access and refresh tokens, granted scopes, and token-expiry information for authorized Twitch features</li>
+          <li>Reward identifiers and titles, video links, trim points, volume, hotkey, and overlay appearance settings</li>
+          <li>Giveaway configuration, entry and redemption identifiers, Twitch user IDs, logins, display names, eligibility notes, winners, and timestamps</li>
         </ul>
-        <p>Stream data (titles, categories, thumbnails, viewer counts) is fetched from Twitch's API in real time and is not permanently stored.</p>
 
-        <p><strong>Dashboard Authentication</strong> — When you log in via Discord OAuth2, we receive a temporary access token to verify your identity and server permissions. This is stored as a short-lived session cookie and not persisted in our database.</p>
-
-        <p><strong>Notification Logs</strong> — We maintain a log of when stream notifications were sent (streamer name, guild ID, timestamp, status). This is used for debugging and is automatically trimmed to the most recent 30 days.</p>
-
-        <p><strong>Tips and Donations</strong> — ExcelProtocol does not directly process payments. If you tip via the /tip command, you are redirected to a third-party platform. We do not receive or store your payment information.</p>
-
-        <h2>3. How We Use Your Data</h2>
-        <p>Data collected by ExcelProtocol is used exclusively to:</p>
+        <p><strong>Operational and security data</strong></p>
         <ul>
-          <li>Deliver stream notifications to the correct Discord channels</li>
-          <li>Manage reaction roles and server configuration</li>
-          <li>Display server statistics in stat channels</li>
-          <li>Process Twitch channel point reward triggers for connected streamers</li>
-          <li>Track and send birthday notifications where enabled</li>
-          <li>Debug delivery failures and monitor service health</li>
+          <li>Notification message IDs and delivery logs, permission issues, unresolvable Twitch accounts, and health state</li>
+          <li>Hashed companion or plugin keys, opaque OBS overlay tokens, access timestamps, and revocation state</li>
+          <li>A random dashboard session identifier stored in a secure, HTTP-only cookie; the corresponding session data is held in application memory</li>
+          <li>Standard web-server and platform logs, which may include request time, route, error information, and network metadata such as IP address</li>
         </ul>
-        <p>We do not sell, rent, or share your data with third parties for commercial purposes.</p>
+        <p>Discord OAuth access tokens are used to complete sign-in and fetch identity and manageable-server information; they are not stored in the application database. We never receive your Discord or Twitch password.</p>
 
-        <h2>4. Data Sharing</h2>
-        <p>We share data with the following third parties only as required to operate the service:</p>
+        <h2>3. Sources of Data</h2>
+        <p>We receive data directly from dashboard users and command users; from server owners or administrators who configure features; from interactions with the bot, Twitch chat, Channel Points, or giveaways; and from Discord and Twitch APIs. This means some information may be configured by a server administrator rather than supplied directly by the affected member or viewer.</p>
+
+        <h2>4. Purposes and Legal Bases</h2>
+        <p>Where data-protection law requires a legal basis, processing is based on one or more of the following:</p>
         <ul>
-          <li><strong>Discord Inc.</strong> — to send messages, manage roles, and authenticate users</li>
-          <li><strong>Twitch Interactive, Inc.</strong> — to register EventSub webhooks and fetch stream data</li>
-          <li><strong>Fly.io</strong> — our hosting provider, which stores the database on its infrastructure</li>
+          <li><strong>Performance of the Service:</strong> authenticating dashboard users, applying settings, delivering alerts, running commands, rewards, overlays, roles, voice rooms, birthdays, and giveaways</li>
+          <li><strong>Legitimate interests:</strong> securing the Service, preventing abuse, diagnosing failures, maintaining short operational histories, and improving reliability</li>
+          <li><strong>Consent or user direction:</strong> optional Twitch OAuth permissions, birthday information, optional integrations, and actions explicitly initiated by authorized users where consent is the appropriate basis</li>
+          <li><strong>Legal obligations:</strong> responding to valid legal requests and protecting legal rights</li>
         </ul>
-        <p>We do not share your data with advertisers, analytics platforms, or any other third parties.</p>
+        <p>We do not sell personal data, use it for behavioral advertising, or use Discord or Twitch data to build advertising profiles.</p>
 
-        <h2>5. Data Retention</h2>
+        <h2>5. How Data Is Used and Displayed</h2>
+        <p>Data is used only to operate, secure, support, and improve the stated features. Depending on server configuration, selected information may be displayed in Discord messages, role panels, welcome or birthday posts, Twitch chat messages, OBS browser sources, dashboards, statistics, leaderboards, or giveaway wheels and history.</p>
+        <p>Server owners and administrators choose many of these destinations. They are independently responsible for configuring access appropriately and providing any notices or permissions their communities require.</p>
+
+        <h2>6. Service Providers and Data Sharing</h2>
+        <p>We disclose data only as needed to operate the Service, comply with law, protect rights and security, or follow your direction:</p>
         <ul>
-          <li>Server settings, streamer lists, and role configurations are retained until you remove the bot or request deletion</li>
-          <li>Notification message IDs are removed automatically when streamers go offline</li>
-          <li>Notification logs are trimmed automatically after 30 days</li>
-          <li>Broadcaster OAuth tokens are retained until you disconnect your Twitch account or remove the bot</li>
+          <li><strong>Discord:</strong> authentication, server and member information, messages, channels, roles, voice rooms, and moderation actions</li>
+          <li><strong>Twitch:</strong> OAuth, EventSub, public stream data, chat, clips, Channel Points, rewards, and giveaway interactions</li>
+          <li><strong>Fly.io:</strong> application hosting, network delivery, logs, and persistent database storage</li>
+          <li><strong>YouTube/Google:</strong> embedded video playback, reward-video previews, and web-font delivery; those providers may receive device and network information</li>
+          <li><strong>Ko-fi:</strong> optional tips after you follow the external link; ExcelProtocol does not receive card or payment-account details</li>
         </ul>
-        <p>When you remove ExcelProtocol from your Discord server, all data associated with that server is automatically deleted from our database.</p>
+        <p>We do not disclose Discord or Twitch API data to data brokers, advertising networks, or unrelated third parties. Providers may process data in countries outside your own under their own terms and transfer safeguards.</p>
 
-        <h2>6. Your Rights</h2>
-        <p>You have the right to:</p>
+        <h2>7. Cookies and External Media</h2>
+        <p>ExcelProtocol sets one strictly necessary dashboard session cookie named <code>ep_session</code>. It is Secure, HTTP-only, SameSite=Lax, and expires after up to seven days. We do not use advertising or analytics cookies.</p>
+        <p>Google Fonts and YouTube embeds are third-party resources. Loading them may allow Google or YouTube to receive network and device information and apply their own technologies under their privacy terms. YouTube previews load only where the relevant video or overlay feature is used.</p>
+
+        <h2>8. Retention</h2>
         <ul>
-          <li>Request a copy of the data we hold about your server</li>
-          <li>Request deletion — remove the bot to trigger automatic deletion, or contact us directly</li>
-          <li>Correct inaccurate data — use the dashboard or slash commands at any time</li>
+          <li>Dashboard sessions remain in memory for no more than seven days and are also removed on logout or restart</li>
+          <li>Notification delivery logs are automatically trimmed after 30 days</li>
+          <li>Per-server and global stream-event history keeps the current and previous calendar month</li>
+          <li>Notification message IDs are normally removed when a stream ends; temporary voice-room records are removed when rooms close</li>
+          <li>Custom-command per-viewer counters are deleted when that command is deleted</li>
+          <li>Twitch OAuth tokens remain until the account is disconnected, authorization is revoked, the related server data is deleted, or a valid deletion request is completed</li>
+          <li>Server configuration, birthdays, safety records, reward settings, OBS settings, and giveaway data are retained while needed for the enabled feature or its requested history</li>
+          <li>Suggestions and their comments remain until an authorized admin deletes them or a valid deletion request is completed</li>
+          <li>Admin audit history is limited to the latest 100 actions</li>
         </ul>
-        <p>To exercise any of these rights, contact us via Discord: <strong>stayexcellent</strong></p>
+        <p>Removing the bot starts a seven-day grace period so an accidental removal can be reversed. If the bot is not re-added, guild-scoped configuration and history are deleted after that period. Some short-lived global stream history may remain until its normal rolling cleanup because the same streamer can be tracked by multiple servers. Data may be retained longer only when required by law or reasonably necessary to resolve abuse, security, or legal claims.</p>
 
-        <h2>7. Security</h2>
-        <p>We take reasonable technical measures to protect your data, including:</p>
+        <h2>9. Automated Moderation</h2>
+        <p>If a server administrator enables the safety filter, ExcelProtocol can automatically kick or ban a joining member based on configured signals such as account age, username patterns, or the absence of an avatar. The administrator chooses the signals, minimum age, bypass role, and action. ExcelProtocol does not infer sensitive traits or use these checks for advertising or credit-like decisions.</p>
+        <p>Affected users should contact that server's owner or moderators to contest a decision. Server administrators can inspect safety records, change the rules, disable the feature, or reverse Discord actions where Discord permits.</p>
+
+        <h2>10. Your Choices and Rights</h2>
+        <p>Depending on where you live, you may have rights to access, correct, delete, restrict, object to processing, or receive a portable copy of personal data, and to withdraw consent where processing is based on consent. You may also complain to your local data-protection authority.</p>
         <ul>
-          <li>HTTPS-only access to the dashboard and webhook endpoints</li>
-          <li>HMAC-SHA256 signature verification on all incoming Twitch EventSub webhook requests</li>
-          <li>Session-based authentication with short-lived tokens for the dashboard</li>
+          <li>Use the dashboard or commands to correct or delete many settings directly</li>
+          <li>Disconnect Twitch to stop authorized Twitch processing and remove stored broadcaster tokens</li>
+          <li>Delete a custom command to remove its per-viewer counters</li>
+          <li>Remove the bot to begin guild-data deletion, or contact us for a specific access or deletion request</li>
         </ul>
-        <p>No system is completely secure. We are not liable for unauthorised access resulting from factors outside our control.</p>
+        <p>To protect users, we may need to verify your Discord or Twitch identity and authority over the relevant server or account before fulfilling a request.</p>
 
-        <h2>8. Children's Privacy</h2>
-        <p>ExcelProtocol is not intended for use by anyone under 18 years of age. We do not knowingly collect personal data from minors. If you believe a minor has used ExcelProtocol, please contact us and we will delete the relevant data.</p>
+        <h2>11. Security</h2>
+        <p>Safeguards include HTTPS, secure and HTTP-only session cookies, Discord permission checks, owner/admin access controls, OAuth state validation, hashed plugin keys, Twitch EventSub HMAC-SHA256 verification, scoped Twitch authorization, and restricted dashboard routes. OAuth tokens and overlay URLs should still be treated as secrets.</p>
+        <p>No online system is completely secure. If you believe credentials, overlay URLs, or personal data have been exposed, revoke the affected authorization or key and contact us promptly.</p>
 
-        <h2>9. Changes to This Policy</h2>
-        <p>We may update this Privacy Policy from time to time. The "Last updated" date at the top will reflect any changes. Continued use of ExcelProtocol after changes constitutes acceptance of the revised policy.</p>
+        <h2>12. Children</h2>
+        <p>ExcelProtocol is not intended for anyone below the minimum age required by Discord, Twitch, or applicable law. Server administrators should not submit information about a child who is not permitted to use those services. Contact us if you believe prohibited child data has been provided.</p>
 
-        <h2>10. Contact</h2>
-        <p>For any privacy-related questions or data requests, contact us via Discord: <strong>stayexcellent</strong></p>
+        <h2>13. Changes to This Policy</h2>
+        <p>We may update this Policy when features, providers, retention practices, or legal requirements change. The date above identifies the latest version. Material changes will be announced through the dashboard or support server when practical.</p>
+
+        <h2>14. Contact and Requests</h2>
+        <p>For privacy questions or data requests, contact <strong>stayexcellent</strong> on Discord or use the <a href="https://discord.gg/Z4unn5DHgD">ExcelProtocol support server</a>. Include the relevant Discord server ID, Discord user ID, or Twitch login where appropriate, but never send a password, OAuth token, or secret key.</p>
         """
     )
     return web.Response(text=html, content_type="text/html")

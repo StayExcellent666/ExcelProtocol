@@ -861,6 +861,31 @@ class TestDevDashboardRoutes:
         assert 'token:"$choice(yes|no|maybe)"' in source
         assert "LIVE PREVIEW" in source
 
+    def test_landing_page_reflects_current_product_pillars(self):
+        import inspect
+
+        source = inspect.getsource(dashboard_server.landing_page)
+        assert "Discord · Twitch · OBS · one command center" in source
+        assert 'id="platform"' in source
+        assert "ExcelFortuna" in source
+        assert "Custom commands with targets, counters, choices, and randomizers" in source
+        assert 'id="reliability"' in source
+        assert "The bot joins with all required permissions" not in source
+
+    def test_legal_pages_disclose_current_data_and_retention(self):
+        import inspect
+
+        terms = inspect.getsource(dashboard_server.terms_page)
+        privacy = inspect.getsource(dashboard_server.privacy_page)
+        assert "October 9, 2026" in terms
+        assert "Twitch chat commands, clip creation" in terms
+        assert "seven-day re-invite grace period" in terms
+        assert "October 9, 2026" in privacy
+        assert "per-viewer Twitch ID or login and use count" in privacy
+        assert "Giveaway configuration" in privacy
+        assert "Automated Moderation" in privacy
+        assert "current and previous calendar month" in privacy
+
     @pytest.mark.asyncio
     async def test_shared_fortuna_start_engine_broadcasts_state(self, monkeypatch):
         broadcasts = []
