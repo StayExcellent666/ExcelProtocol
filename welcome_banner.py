@@ -171,7 +171,7 @@ def _hue_shift_image(
 
 def _circle_crop(img: Image.Image, size: int) -> Image.Image:
     """Crop an avatar image to a circle of the given diameter with alpha."""
-    img = img.resize((size, size), Image.LANCZOS).convert("RGBA")
+    img = img.resize((size, size), Image.Resampling.LANCZOS).convert("RGBA")
     mask = Image.new("L", (size, size), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
     out = Image.new("RGBA", (size, size), (0, 0, 0, 0))

@@ -7,11 +7,46 @@ Covers:
 """
 import hmac as _hmac
 import hashlib as _hashlib
+import inspect
+from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
 # Import after conftest sets env vars
 import dashboard_server
+
+
+class TestDashboardSecurityHardening:
+    def test_cors_uses_explicit_production_origin(self):
+        assert dashboard_server.CORS_ALLOWED_ORIGINS == (
+            "https://excelprotocol.fly.dev",
+        )
+        source = inspect.getsource(dashboard_server.create_dashboard_app)
+        assert '"*": ResourceOptions' not in source
+        assert "for origin in CORS_ALLOWED_ORIGINS" in source
+
+    def test_security_headers_cover_api_responses(self):
+        from aiohttp import web
+
+        response = web.Response()
+        dashboard_server._apply_security_headers(
+            SimpleNamespace(path="/api/me"), response
+        )
+
+        assert response.headers["Strict-Transport-Security"].startswith("max-age=")
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+        assert response.headers["Cache-Control"] == "no-store"
+
+    def test_fly_forces_https(self):
+        fly_config = (Path(__file__).parents[1] / "fly.toml").read_text(encoding="utf-8")
+        assert "force_https = true" in fly_config
+
+    def test_sensitive_local_files_are_gitignored(self):
+        ignore = (Path(__file__).parents[1] / ".gitignore").read_text(encoding="utf-8")
+        assert "*.db" in ignore
+        assert ".env" in ignore
 
 
 class _FakeDashboardRequest(dict):
@@ -330,7 +365,10 @@ class TestGuildFortunaAccess:
 class TestDevDashboardRoutes:
     """The developer panels must have matching backend endpoints."""
 
-    def test_blacklist_and_stream_event_routes_registered(self):
+    def test_blacklist_and_stream_event_routes_registered(self, monkeypatch):
+        # Static build paths can be inaccessible in restricted local test
+        # sandboxes; they are unrelated to these API route assertions.
+        monkeypatch.setattr(dashboard_server.os.path, "exists", lambda _path: False)
         app = dashboard_server.create_dashboard_app()
         routes = {
             (route.method, route.resource.canonical)

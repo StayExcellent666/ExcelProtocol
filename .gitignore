@@ -1,0 +1,33 @@
+# Local secrets and runtime data
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Dashboard build and dependencies
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+
+# Logs and editor/OS files
+*.log
+logs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+

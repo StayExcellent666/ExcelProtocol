@@ -35,6 +35,15 @@ TWITCH_CLIENT_SECRET  = os.getenv("TWITCH_CLIENT_SECRET", "")
 BOT_OWNER_ID          = os.getenv("BOT_OWNER_ID", "")
 DEV_TOKEN             = os.getenv("DEV_TOKEN", "")
 PORT                  = int(os.getenv("DASHBOARD_PORT", 8080))
+CORS_ALLOWED_ORIGINS  = tuple(
+    origin.strip().rstrip("/")
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS", "https://excelprotocol.fly.dev"
+    ).split(",")
+    if origin.strip()
+)
+if any("*" in origin for origin in CORS_ALLOWED_ORIGINS):
+    raise RuntimeError("CORS_ALLOWED_ORIGINS must list explicit origins; wildcards are forbidden")
 
 # Stable for one deployed source revision. OBS overlays compare this value
 # after reconnecting so a plain process restart keeps the active player alive,
@@ -512,6 +521,27 @@ async def auth_middleware(request: web.Request, handler):
 
     request["session"] = session
     return await handler(request)
+
+
+def _apply_security_headers(request: web.Request, response: web.StreamResponse):
+    """Apply browser hardening headers without changing response bodies."""
+    response.headers.setdefault(
+        "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+    )
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+    )
+    if request.path.startswith("/api/") and request.path != "/api/eventsub/callback":
+        response.headers.setdefault("Cache-Control", "no-store")
+
+
+async def add_security_headers(request: web.Request, response: web.StreamResponse):
+    """aiohttp response-prepare hook for the synchronous header policy."""
+    _apply_security_headers(request, response)
 
 @web.middleware
 async def admin_audit_middleware(request: web.Request, handler):
@@ -7321,9 +7351,17 @@ def create_dashboard_app(bot=None):
         app.router.add_static("/app/assets", path=os.path.join(dist_path, "assets"), name="frontend_assets")
         app.router.add_static("/app",        path=dist_path,                          name="frontend_static")
 
+    # The production dashboard is same-origin, so CORS is only needed for
+    # explicitly configured browser clients (for example a local Vite server).
+    # Never reflect arbitrary origins while allowing session cookies.
     cors = cors_setup(app, defaults={
-        "*": ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*",
-                             allow_methods=["GET", "POST", "DELETE", "PATCH", "OPTIONS"])
+        origin: ResourceOptions(
+            allow_credentials=True,
+            expose_headers=("Content-Length",),
+            allow_headers=("Authorization", "Content-Type"),
+            allow_methods=("GET", "POST", "DELETE", "PATCH", "OPTIONS"),
+        )
+        for origin in CORS_ALLOWED_ORIGINS
     })
     for route in list(app.router.routes()):
         try:
@@ -7338,5 +7376,7 @@ def create_dashboard_app(bot=None):
         if _http_session and not _http_session.closed:
             await _http_session.close()
     app.on_cleanup.append(on_cleanup)
+
+    app.on_response_prepare.append(add_security_headers)
 
     return app
