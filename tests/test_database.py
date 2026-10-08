@@ -36,6 +36,28 @@ class TestSchema:
         assert cols["clip_duration"] == "45"
         assert cols["clip_cooldown"] == "60"
 
+    def test_twitch_channels_has_overlay_appearance_defaults(self, db):
+        conn = db.get_connection()
+        cols = {
+            r[1]: r[4]
+            for r in conn.execute("PRAGMA table_info(twitch_channels)").fetchall()
+        }
+        conn.close()
+        assert cols["overlay_show_progress"] == "1"
+        assert cols["overlay_tv_frame"] == "0"
+
+    def test_overlay_appearance_round_trip(self, db):
+        db.set_twitch_channel(123, "streamer")
+        assert db.get_overlay_appearance(123) == {
+            "show_progress": True,
+            "tv_frame": False,
+        }
+        db.set_overlay_appearance(123, False, True)
+        assert db.get_overlay_appearance(123) == {
+            "show_progress": False,
+            "tv_frame": True,
+        }
+
     def test_bot_status_rotation_round_trip(self, db):
         assert db.get_bot_statuses() == []
         statuses = [

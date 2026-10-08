@@ -3095,6 +3095,31 @@ function RewardTrimTimeline({ duration, start, end, onChange, onPreview }) {
   </div>;
 }
 
+function OverlayAppearanceControls({ appearance, onToggle, saving, saved }) {
+  const options = [
+    { key:"show_progress", title:"Playback progress", detail:"Show the timeline and remaining time for reward videos and !play." },
+    { key:"tv_frame", title:"3D TV frame", detail:"Add a raised frame and inward edge shadow around videos." },
+  ];
+  return <div style={{marginTop:14,paddingTop:13,borderTop:"1px solid var(--border)",display:"flex",flexDirection:"column",gap:11}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+      <span style={{fontSize:11,fontWeight:750,color:"var(--text2)",fontFamily:"'JetBrains Mono',monospace",letterSpacing:.5}}>PLAYBACK APPEARANCE</span>
+      <span style={{fontSize:10,color:"var(--text3)"}}>Applies to channel rewards and !play · captions stay off</span>
+      {saving&&<span style={{fontSize:10,color:"var(--cyan)"}}>Saving…</span>}
+      {saved&&!saving&&<span style={{fontSize:10,color:"var(--green)"}}>✓ Saved</span>}
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(230px,1fr))",gap:9}}>
+      {options.map(option=>{
+        const enabled=!!appearance[option.key];
+        return <button key={option.key} type="button" onClick={()=>onToggle(option.key,!enabled)} disabled={saving}
+          style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,textAlign:"left",padding:"10px 12px",borderRadius:8,border:`1px solid ${enabled?"rgba(0,245,212,.45)":"var(--border)"}`,background:enabled?"rgba(0,245,212,.07)":"rgba(8,11,15,.55)",cursor:saving?"wait":"pointer",opacity:saving?.7:1}}>
+          <span><span style={{display:"block",fontSize:12,color:enabled?"var(--cyan)":"var(--text2)",fontWeight:700}}>{option.title}</span><span style={{display:"block",fontSize:10,color:"var(--text3)",marginTop:3,lineHeight:1.35}}>{option.detail}</span></span>
+          <span style={{width:42,height:23,borderRadius:12,background:enabled?"var(--cyan)":"var(--border2)",position:"relative",flexShrink:0,boxShadow:enabled?"0 0 10px rgba(0,245,212,.35)":"none"}}><span style={{position:"absolute",top:3,left:enabled?21:3,width:17,height:17,borderRadius:"50%",background:"#fff",transition:"left .2s"}} /></span>
+        </button>;
+      })}
+    </div>
+  </div>;
+}
+
 function ChannelRewardsTab({ guildId }) {
   const [bcast, setBcast]         = useState(null);
   const [loading, setLoading]     = useState(true);
@@ -3106,6 +3131,9 @@ function ChannelRewardsTab({ guildId }) {
   const [copied, setCopied]       = useState(false);
   const [overlayVolume, setOverlayVolume] = useState(100);
   const [volumeSaved, setVolumeSaved]     = useState(false);
+  const [overlayAppearance, setOverlayAppearance] = useState({ show_progress:true, tv_frame:false });
+  const [appearanceSaving, setAppearanceSaving] = useState(false);
+  const [appearanceSaved, setAppearanceSaved] = useState(false);
   const [previewSeek, setPreviewSeek]     = useState(null);
   const [previewDuration, setPreviewDuration] = useState(0);
 
@@ -3115,6 +3143,10 @@ function ChannelRewardsTab({ guildId }) {
       const data = await apiFetch(`/api/guild/${guildId}/broadcaster`);
       setBcast(data);
       setOverlayVolume(data.overlay_volume ?? 100);
+      setOverlayAppearance({
+        show_progress: data.show_progress !== false,
+        tv_frame: data.tv_frame === true,
+      });
     }
     catch(e) { console.error(e); }
     setLoading(false);
@@ -3228,6 +3260,26 @@ function ChannelRewardsTab({ guildId }) {
     } catch(e) { console.error("Failed to save volume:", e); }
   };
 
+  const saveAppearance = async (key, enabled) => {
+    const previous = overlayAppearance;
+    const next = { ...previous, [key]:enabled };
+    setOverlayAppearance(next);
+    setAppearanceSaving(true);
+    setAppearanceSaved(false);
+    try {
+      await apiFetch(`/api/guild/${guildId}/twitch/overlay-appearance`, {
+        method:"POST",
+        body:JSON.stringify(next),
+      });
+      setAppearanceSaved(true);
+      setTimeout(()=>setAppearanceSaved(false),2000);
+    } catch(e) {
+      setOverlayAppearance(previous);
+      alert("Failed to save playback appearance: " + e.message);
+    }
+    setAppearanceSaving(false);
+  };
+
   const testOverlay = async () => {
     try {
       await apiFetch(`/api/guild/${guildId}/twitch/overlay-volume`, { method:"POST", body: JSON.stringify({ volume: overlayVolume }) });
@@ -3292,6 +3344,7 @@ function ChannelRewardsTab({ guildId }) {
             <button onClick={testOverlay} style={{ ...C.btnSecondary, padding:"4px 10px", fontSize:12, flexShrink:0 }}>▶ Test</button>
             {volumeSaved && <span style={{ fontSize:11, color:"var(--green)", fontFamily:"'Outfit',sans-serif" }}>✓</span>}
           </div>
+          <OverlayAppearanceControls appearance={overlayAppearance} onToggle={saveAppearance} saving={appearanceSaving} saved={appearanceSaved} />
         </div>
       )}
     </div>
@@ -3324,6 +3377,7 @@ function ChannelRewardsTab({ guildId }) {
           <button onClick={testOverlay} style={{ ...C.btnSecondary, padding:"4px 10px", fontSize:12, flexShrink:0 }}>▶ Test</button>
           {volumeSaved && <span style={{ fontSize:11, color:"var(--green)", fontFamily:"'Outfit',sans-serif" }}>✓</span>}
         </div>
+        <OverlayAppearanceControls appearance={overlayAppearance} onToggle={saveAppearance} saving={appearanceSaving} saved={appearanceSaved} />
       </div>
 
       {/* Rewards list */}

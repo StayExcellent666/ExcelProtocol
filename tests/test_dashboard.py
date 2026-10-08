@@ -366,6 +366,7 @@ class TestDevDashboardRoutes:
         assert ("POST", "/api/dev/bot-statuses") in routes
         assert ("GET", "/api/dev/server-info/{guild_id}") in routes
         assert ("PATCH", "/api/dev/server-info/{guild_id}/permission-dm") in routes
+        assert ("POST", "/api/guild/{guild_id}/twitch/overlay-appearance") in routes
         assert ("GET", "/api/dev/admins") in routes
         assert ("POST", "/api/dev/admins") in routes
         assert ("DELETE", "/api/dev/admins/{user_id}") in routes
@@ -841,6 +842,14 @@ class TestDevDashboardRoutes:
         assert '`/api/guild/${guildId}/fortuna/plugin-keys`' not in source
         overlay = (Path(__file__).parent.parent / "fortuna_overlay.html").read_text(encoding="utf-8")
         assert 'event.type==="layout"' in overlay
+
+    def test_video_overlay_disables_captions_and_supports_appearance_settings(self):
+        import inspect
+        source = inspect.getsource(dashboard_server.overlay_page)
+        assert "cc_load_policy: 0" in source
+        assert 'setOption("captions", "track"' in source
+        assert 'msg.type === "set_appearance"' in source
+        assert 'classList.toggle("tv-frame"' in source
 
     @pytest.mark.asyncio
     async def test_shared_fortuna_start_engine_broadcasts_state(self, monkeypatch):

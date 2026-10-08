@@ -2155,6 +2155,7 @@ async def get_twitch_info(request):
     except Exception as e:
         logger.warning(f"Could not check mod status for {channel}: {e}")
 
+    appearance = _bot_ref.db.get_overlay_appearance(int(guild_id))
     return web.json_response({
         "linked": True,
         "channel": channel,
@@ -2169,6 +2170,7 @@ async def get_twitch_info(request):
         "clip_cooldown": row.get("clip_cooldown", 60) if row else 60,
         "clip_scope_status": clip_scope_status,
         "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100,
+        **appearance,
     })
 
 async def set_play_enabled(request):
@@ -2277,6 +2279,48 @@ async def set_overlay_volume(request):
     if dead:
         conns.difference_update(dead)
     return web.json_response({"ok": True, "volume": volume})
+
+
+async def set_overlay_appearance(request):
+    """Save and live-apply playback styling shared by rewards and !play."""
+    guild_id = request.match_info["guild_id"]
+    body = await request.json()
+    show_progress = body.get("show_progress")
+    tv_frame = body.get("tv_frame")
+    if not isinstance(show_progress, bool) or not isinstance(tv_frame, bool):
+        raise web.HTTPBadRequest(reason="show_progress and tv_frame must be booleans")
+    import asyncio as _asyncio
+    if _bot_ref:
+        await _asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: _bot_ref.db.set_overlay_appearance(
+                int(guild_id), show_progress, tv_frame,
+            ),
+        )
+    else:
+        await db_execute(
+            "UPDATE twitch_channels SET overlay_show_progress = ?, overlay_tv_frame = ? WHERE guild_id = ?",
+            (int(show_progress), int(tv_frame), guild_id),
+        )
+    payload = json.dumps({
+        "type": "set_appearance",
+        "show_progress": show_progress,
+        "tv_frame": tv_frame,
+    })
+    conns = _overlay_connections.get(str(guild_id), set())
+    dead = set()
+    for ws in conns:
+        try:
+            await ws.send_str(payload)
+        except Exception:
+            dead.add(ws)
+    if dead:
+        conns.difference_update(dead)
+    return web.json_response({
+        "ok": True,
+        "show_progress": show_progress,
+        "tv_frame": tv_frame,
+    })
 
 
 async def play_test_overlay(request):
@@ -2778,6 +2822,11 @@ async def overlay_ws(request):
         await ws.send_str(json.dumps({"type": "hello", "overlay_version": OVERLAY_BUILD_ID}))
         volume = _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100
         await ws.send_str(json.dumps({"type": "set_volume", "volume": volume}))
+        appearance = (
+            _bot_ref.db.get_overlay_appearance(int(guild_id))
+            if _bot_ref else {"show_progress": True, "tv_frame": False}
+        )
+        await ws.send_str(json.dumps({"type": "set_appearance", **appearance}))
     except Exception:
         pass
     try:
@@ -2829,6 +2878,24 @@ async def overlay_page(request):
     pointer-events:none;
   }}
   #yt-player, #yt-player iframe {{ display:block; width:100%; height:100%; pointer-events:none; }}
+  #yt-player {{ position:relative; z-index:1; }}
+  #player-sizer.tv-frame {{
+    padding:14px;
+    overflow:hidden;
+    border:6px solid #15191f;
+    border-radius:20px;
+    background:linear-gradient(145deg,#343a42 0%,#0a0c10 45%,#252a31 100%);
+    box-shadow:0 16px 38px rgba(0,0,0,.72),0 0 0 2px rgba(255,255,255,.12);
+  }}
+  #player-sizer.tv-frame::after {{
+    content:"";
+    position:absolute;
+    z-index:10;
+    inset:14px;
+    border-radius:7px;
+    pointer-events:none;
+    box-shadow:inset 0 0 34px rgba(0,0,0,.88),inset 0 0 7px rgba(0,0,0,.95);
+  }}
   #bottom-overlay {{
     position:absolute;
     bottom:0; left:0; right:0;
@@ -2890,6 +2957,8 @@ const guildId = "{guild_id}";
 const overlayBuild = "{OVERLAY_BUILD_ID}";
 const rdm = document.getElementById("rdm");
 const frameWrap = document.getElementById("frame-wrap");
+const playerSizer = document.getElementById("player-sizer");
+const bottomOverlay = document.getElementById("bottom-overlay");
 const progressWrap = document.getElementById("progress-wrap");
 const progressFill = document.getElementById("progress-bar-fill");
 const progressTimer = document.getElementById("progress-timer");
@@ -2898,10 +2967,13 @@ let playing = false;
 let player = null;
 let ytReady = false;
 let savedVolume = 100;
+let showProgress = true;
+let tvFrameEnabled = false;
 let progressInterval = null;
 let playbackRecoveryTimer = null;
 let currentStart = 0;
 let currentEnd = null;
+let currentAudioOnly = false;
 
 
 function formatTime(seconds) {{
@@ -2911,6 +2983,11 @@ function formatTime(seconds) {{
 
 function startProgress() {{
   if (progressInterval) clearInterval(progressInterval);
+  if (!showProgress || currentAudioOnly) {{
+    stopProgress();
+    return;
+  }}
+  bottomOverlay.style.display = "flex";
   progressWrap.style.display = "flex";
   progressInterval = setInterval(() => {{
     if (!player || typeof player.getCurrentTime !== "function") return;
@@ -2936,6 +3013,19 @@ function stopProgress() {{
   progressWrap.style.display = "none";
   progressFill.style.width = "0%";
   progressTimer.textContent = "0:00";
+}}
+
+function applyAppearance() {{
+  playerSizer.classList.toggle("tv-frame", tvFrameEnabled && !currentAudioOnly);
+  bottomOverlay.style.display = showProgress && !currentAudioOnly ? "flex" : "none";
+  if (!showProgress || currentAudioOnly) stopProgress();
+  else if (playing && player && player.getPlayerState() === YT.PlayerState.PLAYING) startProgress();
+}}
+
+function disableCaptions(target = player) {{
+  if (!target) return;
+  try {{ target.setOption("captions", "track", {{}}); }} catch {{}}
+  try {{ target.unloadModule("captions"); }} catch {{}}
 }}
 
 function onYouTubeIframeAPIReady() {{
@@ -2994,6 +3084,11 @@ function handleSocketMessage(e) {{
     savedVolume = msg.volume;
     if (player) player.setVolume(msg.volume);
   }}
+  if (msg.type === "set_appearance") {{
+    showProgress = msg.show_progress !== false;
+    tvFrameEnabled = msg.tv_frame === true;
+    applyAppearance();
+  }}
   if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
   if (msg.type === "skip") {{
     if (player) {{ player.stopVideo(); }}
@@ -3039,6 +3134,7 @@ function onPlayerStateChange(e) {{
   if (e.data === YT.PlayerState.PLAYING) {{
     if (playbackRecoveryTimer) clearTimeout(playbackRecoveryTimer);
     playbackRecoveryTimer = null;
+    disableCaptions(e.target);
     startProgress();
   }}
   if (e.data === YT.PlayerState.ENDED && playing) {{
@@ -3074,20 +3170,23 @@ function processQueue() {{
   currentStart = Math.max(0, Number(item.start_seconds || 0));
   const requestedEnd = Number(item.end_seconds || 0);
   currentEnd = requestedEnd > currentStart ? requestedEnd : null;
+  currentAudioOnly = Boolean(item.audio_only);
   rdm.textContent = "";
   rdm.style.display = "none";
   frameWrap.style.display = "flex";
-  frameWrap.style.opacity = item.audio_only ? "0" : "1";
+  frameWrap.style.opacity = currentAudioOnly ? "0" : "1";
+  applyAppearance();
   if (player) {{
     player.loadVideoById({{ videoId, startSeconds: currentStart, ...(currentEnd ? {{ endSeconds: currentEnd }} : {{}}) }});
     player.setVolume(volume);
+    setTimeout(() => disableCaptions(player), 250);
   }} else {{
     player = new YT.Player("yt-player", {{
       height: "100%", width: "100%",
       videoId: videoId,
-      playerVars: {{ autoplay: 1, controls: 0, disablekb: 1, modestbranding: 1, rel: 0, iv_load_policy: 3, start: currentStart, ...(currentEnd ? {{ end: currentEnd }} : {{}}) }},
+      playerVars: {{ autoplay: 1, controls: 0, disablekb: 1, modestbranding: 1, rel: 0, iv_load_policy: 3, cc_load_policy: 0, start: currentStart, ...(currentEnd ? {{ end: currentEnd }} : {{}}) }},
       events: {{
-        onReady: e => {{ e.target.setVolume(volume); e.target.playVideo(); }},
+        onReady: e => {{ disableCaptions(e.target); e.target.setVolume(volume); e.target.playVideo(); }},
         onStateChange: onPlayerStateChange,
         onError: onPlayerError
       }}
@@ -3108,6 +3207,10 @@ function processQueue() {{
 async def get_broadcaster_info(request):
     """Return connection status and channel rewards for a guild."""
     guild_id = request.match_info["guild_id"]
+    appearance = (
+        _bot_ref.db.get_overlay_appearance(int(guild_id))
+        if _bot_ref else {"show_progress": True, "tv_frame": False}
+    )
     rows = await db_fetch("SELECT twitch_login, twitch_user_id, access_token FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
     if not rows:
         return web.json_response({"connected": False})
@@ -3147,7 +3250,16 @@ async def get_broadcaster_info(request):
         elif resp.status == 403:
             # Not affiliate/partner
             rows2 = await db_fetch("SELECT twitch_login FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
-            return web.json_response({"connected": True, "not_affiliate": True, "twitch_login": rows2[0]["twitch_login"] if rows2 else "", "rewards": [], "triggers": [], "overlay_url": f"https://excelprotocol.fly.dev/overlay/{guild_id}", "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100})
+            return web.json_response({
+                "connected": True,
+                "not_affiliate": True,
+                "twitch_login": rows2[0]["twitch_login"] if rows2 else "",
+                "rewards": [],
+                "triggers": [],
+                "overlay_url": f"https://excelprotocol.fly.dev/overlay/{guild_id}",
+                "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100,
+                **appearance,
+            })
     except Exception as e:
         logger.error(f"Error fetching rewards for guild {guild_id}: {e}")
 
@@ -3161,6 +3273,7 @@ async def get_broadcaster_info(request):
         "triggers": triggers,
         "overlay_url": f"https://excelprotocol.fly.dev/overlay/{guild_id}",
         "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100,
+        **appearance,
     })
 
 async def upsert_reward_trigger(request):
@@ -6888,6 +7001,7 @@ def create_dashboard_app(bot=None):
     app.router.add_post  ("/api/guild/{guild_id}/twitch/clip-settings",      set_clip_settings)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/builtin-commands/{command_name}", set_builtin_command_enabled)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/overlay-volume",      set_overlay_volume)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/overlay-appearance",  set_overlay_appearance)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/play-test",           play_test_overlay)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/hotkey-test",          hotkey_test)
     app.router.add_get   ("/api/guild/{guild_id}/members",                     get_guild_members)

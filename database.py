@@ -472,6 +472,20 @@ class Database:
         except Exception:
             pass  # Column already exists
 
+        # Shared OBS playback appearance for both reward videos and !play.
+        # Keep the existing progress display on after migration; the optional
+        # TV frame is opt-in so current overlays do not unexpectedly change.
+        for column_sql, column_name in (
+            ('ALTER TABLE twitch_channels ADD COLUMN overlay_show_progress INTEGER NOT NULL DEFAULT 1', 'overlay_show_progress'),
+            ('ALTER TABLE twitch_channels ADD COLUMN overlay_tv_frame INTEGER NOT NULL DEFAULT 0', 'overlay_tv_frame'),
+        ):
+            try:
+                cursor.execute(column_sql)
+                conn.commit()
+                logger.info("Migration: added %s to twitch_channels", column_name)
+            except Exception:
+                pass  # Column already exists
+
         # Twitch clip command settings. Disabled by default so adding the
         # feature never changes chat behaviour until a server enables it.
         for column_sql, column_name in (
@@ -3155,6 +3169,33 @@ class Database:
         cursor.execute(
             'UPDATE twitch_channels SET overlay_volume = ? WHERE guild_id = ?',
             (max(0, min(100, volume)), guild_id)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_overlay_appearance(self, guild_id: int) -> Dict[str, bool]:
+        """Return shared playback styling for reward videos and !play."""
+        conn = self.get_connection()
+        row = conn.execute(
+            '''SELECT overlay_show_progress, overlay_tv_frame
+               FROM twitch_channels WHERE guild_id = ?''',
+            (guild_id,),
+        ).fetchone()
+        conn.close()
+        return {
+            'show_progress': bool(row[0]) if row else True,
+            'tv_frame': bool(row[1]) if row else False,
+        }
+
+    def set_overlay_appearance(self, guild_id: int, show_progress: bool,
+                               tv_frame: bool):
+        """Persist shared playback styling for reward videos and !play."""
+        conn = self.get_connection()
+        conn.execute(
+            '''UPDATE twitch_channels
+               SET overlay_show_progress = ?, overlay_tv_frame = ?
+               WHERE guild_id = ?''',
+            (1 if show_progress else 0, 1 if tv_frame else 0, guild_id),
         )
         conn.commit()
         conn.close()
