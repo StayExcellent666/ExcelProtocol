@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import secrets
+import time
 import aiosqlite
 import aiohttp as http_client
 from datetime import datetime, timedelta, timezone
@@ -156,6 +157,11 @@ _eventsub_seen: dict = {}
 
 # Bot reference — set by create_dashboard_app() so we can reload views
 _bot_ref = None
+
+# Serialises owner-console sends so two clicks cannot bypass the cooldown.
+_twitch_chat_console_lock = asyncio.Lock()
+_twitch_chat_console_last_sent_at = 0.0
+TWITCH_CHAT_CONSOLE_COOLDOWN_SECONDS = 10
 
 # ── DB Helper ─────────────────────────────────────────────────────────────────
 async def db_fetch(query: str, params: tuple = ()):
@@ -4043,6 +4049,147 @@ async def set_bot_statuses(request):
     return web.json_response({"ok": True, "statuses": statuses, "rotation_seconds": 20})
 
 
+def _find_twitch_chat_channel(chat_bot, channel_login: str):
+    """Return a usable joined TwitchIO channel, tolerating reconnect cache gaps."""
+    login = str(channel_login or "").strip().lstrip("#").lower()
+    try:
+        cached = chat_bot.get_channel(login)
+    except (AttributeError, KeyError, TypeError):
+        cached = None
+    if cached is not None:
+        return cached
+    return next(
+        (
+            channel for channel in (getattr(chat_bot, "connected_channels", []) or [])
+            if str(getattr(channel, "name", "") or "").lower() == login
+        ),
+        None,
+    )
+
+
+async def owner_twitch_chat_send(request):
+    """Owner-only: join one Twitch channel on demand and send one visible message."""
+    global _twitch_chat_console_last_sent_at
+
+    _require_owner(request)
+    chat_bot = getattr(_bot_ref, "twitch_chat_bot", None) if _bot_ref else None
+    if chat_bot is None:
+        raise web.HTTPServiceUnavailable(
+            reason="The Twitch chat bot is not running. Check its connection first."
+        )
+
+    body = await request.json()
+    channel_login = _normalise_twitch_login(body.get("channel"))
+    message = str(body.get("message") or "").strip()
+    if not 1 <= len(message) <= 500:
+        raise web.HTTPBadRequest(reason="Message must be between 1 and 500 characters")
+    if any(ord(character) < 32 for character in message):
+        raise web.HTTPBadRequest(reason="Message must be a single line without control characters")
+    if message.startswith("/"):
+        raise web.HTTPBadRequest(
+            reason="Slash commands are blocked here; send a visible chat message instead"
+        )
+
+    async with _twitch_chat_console_lock:
+        now = time.monotonic()
+        elapsed = now - _twitch_chat_console_last_sent_at
+        if elapsed < TWITCH_CHAT_CONSOLE_COOLDOWN_SECONDS:
+            retry_after = max(1, int(TWITCH_CHAT_CONSOLE_COOLDOWN_SECONDS - elapsed + 0.999))
+            raise web.HTTPTooManyRequests(
+                reason=f"Please wait {retry_after} second{'s' if retry_after != 1 else ''} before sending again",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        channel = _find_twitch_chat_channel(chat_bot, channel_login)
+        joined_now = channel is None
+        if joined_now:
+            try:
+                await chat_bot.join_channels([channel_login])
+                # TwitchIO schedules the JOIN and populates its channel cache
+                # after Twitch acknowledges it, so allow a short bounded wait.
+                for _ in range(20):
+                    await asyncio.sleep(0.25)
+                    channel = _find_twitch_chat_channel(chat_bot, channel_login)
+                    if channel is not None:
+                        break
+            except Exception as exc:
+                logger.warning(
+                    "Owner Twitch console could not join @%s: %s",
+                    channel_login,
+                    exc,
+                )
+                raise web.HTTPBadGateway(
+                    reason="Twitch rejected the channel join. Check the bot connection and channel name."
+                ) from exc
+        if channel is None:
+            raise web.HTTPGatewayTimeout(
+                reason="Twitch did not confirm the channel join. Check the channel name and try again."
+            )
+
+        try:
+            await channel.send(message)
+        except Exception as exc:
+            logger.warning(
+                "Owner Twitch console could not send in @%s: %s",
+                channel_login,
+                exc,
+            )
+            raise web.HTTPBadGateway(
+                reason="Twitch rejected the message. The bot may be banned or unable to chat there."
+            ) from exc
+
+        _twitch_chat_console_last_sent_at = time.monotonic()
+
+    sent_at = datetime.now(timezone.utc).isoformat()
+    session = request["session"]
+    try:
+        await db_execute(
+            """INSERT INTO admin_audit_log
+               (admin_id, admin_username, guild_id, method, endpoint, detail)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                str(session.get("user_id") or BOT_OWNER_ID or "owner"),
+                str(session.get("username") or "Bot owner"),
+                f"twitch:{channel_login}",
+                "POST",
+                "/api/dev/twitch-chat/send",
+                json.dumps(
+                    {
+                        "channel": channel_login,
+                        "message": message,
+                        "joined_now": joined_now,
+                        "sent_at": sent_at,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        await db_execute(
+            """DELETE FROM admin_audit_log WHERE id NOT IN (
+               SELECT id FROM admin_audit_log ORDER BY id DESC LIMIT 100)"""
+        )
+    except Exception as exc:
+        # The message has already been sent. Never report it as failed and risk
+        # a duplicate just because the secondary audit write failed.
+        logger.error("Owner Twitch console audit write failed: %s", exc)
+
+    logger.info(
+        "Owner sent a Twitch chat message in @%s (joined_now=%s, length=%d)",
+        channel_login,
+        joined_now,
+        len(message),
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "channel": channel_login,
+            "joined_now": joined_now,
+            "sent_at": sent_at,
+            "bot_account": os.getenv("TWITCH_BOT_USERNAME", ""),
+        }
+    )
+
+
 async def get_owner_server_info(request):
     """Return an owner-only operational profile for one connected guild."""
     _require_owner(request)
@@ -4362,12 +4509,7 @@ def _fortuna_chat_channel(channel_login: str):
     """Return the joined TwitchIO channel used for Fortuna chat messages."""
     if not _bot_ref or not getattr(_bot_ref, "twitch_chat_bot", None):
         return None
-    login = str(channel_login or "").lower()
-    return next(
-        (candidate for candidate in _bot_ref.twitch_chat_bot.connected_channels
-         if str(getattr(candidate, "name", "") or "").lower() == login),
-        None,
-    )
+    return _find_twitch_chat_channel(_bot_ref.twitch_chat_bot, channel_login)
 
 
 async def _fortuna_send_chat(channel_login: str, message: str) -> bool:
@@ -7260,6 +7402,7 @@ def create_dashboard_app(bot=None):
     app.router.add_delete("/api/admin/suggestions/{suggestion_id}", delete_suggestion)
     app.router.add_get("/api/dev/bot-statuses", get_bot_statuses)
     app.router.add_post("/api/dev/bot-statuses", set_bot_statuses)
+    app.router.add_post("/api/dev/twitch-chat/send", owner_twitch_chat_send)
     app.router.add_get("/api/dev/server-info/{guild_id}", get_owner_server_info)
     app.router.add_patch("/api/dev/server-info/{guild_id}/permission-dm", set_owner_permission_dm_mute)
     app.router.add_patch("/api/dev/server-info/{guild_id}/bot-owner-permission-dm", set_bot_owner_permission_dm_mute)

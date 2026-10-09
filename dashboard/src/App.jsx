@@ -5558,6 +5558,74 @@ function BotStatusTab() {
   );
 }
 
+function TwitchChatConsoleTab() {
+  const [channel, setChannel] = useState("");
+  const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+
+  const cleanChannel = channel.trim().replace(/^@/, "").toLowerCase();
+  const validChannel = /^[a-z0-9_]{1,25}$/.test(cleanChannel);
+  const validMessage = message.trim().length > 0 && message.trim().length <= 500 && !message.trim().startsWith("/") && !/[\r\n]/.test(message);
+
+  const send = async event => {
+    event.preventDefault();
+    if (!validChannel || !validMessage || sending) return;
+    setSending(true); setError(""); setResult(null);
+    try {
+      const response = await apiFetch("/api/dev/twitch-chat/send", {
+        method:"POST",
+        body:JSON.stringify({ channel:cleanChannel, message:message.trim() }),
+      });
+      setResult(response);
+      setMessage("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return <div>
+    <PageHeader title="Twitch Chat Console" subtitle="Owner-only one-off messages from the configured Twitch bot" />
+    <div style={{...C.card,maxWidth:760}}>
+      <div style={{display:"flex",gap:12,alignItems:"flex-start",padding:"12px 14px",marginBottom:18,borderRadius:8,background:"rgba(145,70,255,.08)",border:"1px solid rgba(145,70,255,.22)"}}>
+        <img src="/app/icons/twitch.png" alt="" style={{width:28,height:28,objectFit:"contain",flexShrink:0}} />
+        <div>
+          <div style={{fontSize:13,color:"var(--text)",fontWeight:600}}>The bot joins the channel only when needed.</div>
+          <div style={{fontSize:11,color:"var(--text3)",lineHeight:1.5,marginTop:3}}>The message is public and visibly sent by the configured bot account. Sends have a 10-second cooldown and are recorded in the audit log. Slash commands are blocked.</div>
+        </div>
+      </div>
+      <form onSubmit={send}>
+        <Field label="Twitch Channel">
+          <CyanInput value={channel} onChange={e=>setChannel(e.target.value)} maxLength={26} placeholder="streamername" autoComplete="off" />
+          {channel.trim() && !validChannel && <div style={{fontSize:10,color:"var(--red)",marginTop:5}}>Enter a valid Twitch username.</div>}
+        </Field>
+        <Field label="Message">
+          <textarea
+            value={message}
+            onChange={e=>setMessage(e.target.value)}
+            maxLength={500}
+            rows={5}
+            placeholder="Type the one-off chat message…"
+            style={{...C.input,resize:"vertical",fontFamily:"'Outfit',sans-serif",fontSize:13,lineHeight:1.5}}
+          />
+          <div style={{display:"flex",justifyContent:"space-between",gap:12,marginTop:5,fontSize:10,fontFamily:"'JetBrains Mono',monospace"}}>
+            <span style={{color:message.trim().startsWith("/")||/[\r\n]/.test(message)?"var(--red)":"var(--text3)"}}>{message.trim().startsWith("/") ? "Slash commands cannot be sent." : /[\r\n]/.test(message) ? "Use a single-line message." : "Public Twitch chat message"}</span>
+            <span style={{color:message.length>450?"var(--yellow)":"var(--text3)"}}>{message.length}/500</span>
+          </div>
+        </Field>
+        {error && <div style={{padding:"10px 12px",marginBottom:13,borderRadius:7,color:"var(--red)",background:"var(--red-dim)",border:"1px solid rgba(255,77,109,.28)",fontSize:12}}>⚠️ {error}</div>}
+        {result && <div style={{padding:"10px 12px",marginBottom:13,borderRadius:7,color:"var(--green)",background:"rgba(57,217,138,.08)",border:"1px solid rgba(57,217,138,.25)",fontSize:12}}>✓ Sent to @{result.channel}{result.joined_now ? " after joining the channel" : ""}{result.bot_account ? ` as @${result.bot_account.replace(/^@/, "")}` : ""}.</div>}
+        <div style={{display:"flex",justifyContent:"flex-end"}}>
+          <button type="submit" disabled={!validChannel||!validMessage||sending} style={{...C.btnPrimary,opacity:(!validChannel||!validMessage||sending)?0.45:1}}>{sending?"Joining & Sending…":"Join & Send Message"}</button>
+        </div>
+      </form>
+    </div>
+  </div>;
+}
+
 function AdminAuditLogTab() {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -5573,7 +5641,7 @@ function AdminAuditLogTab() {
     <div>
       <div style={{ marginBottom:16 }}>
         <h2 style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:22, color:"var(--text)", margin:0, textShadow:"0 0 20px rgba(0,245,212,0.4)" }}>Admin Audit Log</h2>
-        <div style={{ fontSize:12, color:"var(--text3)", marginTop:4 }}>Last 100 admin actions on servers they don't own. Owner-only.</div>
+        <div style={{ fontSize:12, color:"var(--text3)", marginTop:4 }}>Last 100 privileged dashboard actions. Owner-only.</div>
       </div>
       {loading ? <Spinner /> : entries.length === 0 ? (
         <div style={{ color:"var(--text3)", fontSize:13, padding:"40px 0", textAlign:"center" }}>No admin actions recorded yet.</div>
@@ -5593,6 +5661,7 @@ function AdminAuditLogTab() {
                 <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
                   Guild: {e.guild_id} · {new Date(e.timestamp).toLocaleString()}
                 </div>
+                {e.detail && <div style={{fontSize:10,color:"var(--text2)",fontFamily:"'JetBrains Mono',monospace",marginTop:5,whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{e.detail}</div>}
               </div>
             </div>
           ))}
@@ -5788,6 +5857,7 @@ export default function App() {
   const managementTabs = effectivelyDev ? [
     { id:"serverinfo",     icon:"/app/icons/gear.png", label:"Server Info"         },
     { id:"botstatus",      icon:"/app/icons/message.png", label:"Bot Status"       },
+    { id:"twitchchatconsole", icon:"/app/icons/twitch.png", label:"Twitch Chat Console" },
     { id:"adminmanager",   icon:"/app/icons/people.png", label:"Dashboard Admins"  },
   ] : [];
   const feedbackTabs = (effectivelyDev || effectivelyAdmin || isAdmin) ? [
@@ -5955,6 +6025,7 @@ export default function App() {
               {activeTab==="healthcheck"   && (effectivelyDev || effectivelyAdmin || isAdmin) && <HealthCheckTab ownerView={effectivelyDev} />}
               {activeTab==="serverinfo"    && effectivelyDev && <ServerInfoTab guildId={activeGuild} />}
               {activeTab==="botstatus"     && effectivelyDev && <BotStatusTab />}
+              {activeTab==="twitchchatconsole" && effectivelyDev && <TwitchChatConsoleTab />}
               {activeTab==="adminmanager"  && effectivelyDev && <AdminManagerTab />}
               {activeTab==="suggestioninbox" && (effectivelyDev || effectivelyAdmin || isAdmin) && <SuggestionInboxTab />}
               {activeTab==="fortuna"       && <FortunaTab guildId={activeGuild} />}

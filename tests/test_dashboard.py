@@ -402,6 +402,7 @@ class TestDevDashboardRoutes:
         assert ("GET", "/auth/twitch/bot/login") in routes
         assert ("GET", "/api/dev/bot-statuses") in routes
         assert ("POST", "/api/dev/bot-statuses") in routes
+        assert ("POST", "/api/dev/twitch-chat/send") in routes
         assert ("GET", "/api/dev/server-info/{guild_id}") in routes
         assert ("PATCH", "/api/dev/server-info/{guild_id}/permission-dm") in routes
         assert ("POST", "/api/guild/{guild_id}/twitch/overlay-appearance") in routes
@@ -456,6 +457,121 @@ class TestDevDashboardRoutes:
         dashboard_server._require_owner({"session": {"dev": True}})
         with pytest.raises(web.HTTPForbidden):
             dashboard_server._require_owner({"session": {"admin": True}})
+
+    @pytest.mark.asyncio
+    async def test_owner_twitch_console_joins_sends_and_audits(self, monkeypatch):
+        import json
+
+        sent = []
+        joined = []
+        writes = []
+
+        class FakeChannel:
+            name = "friendly_streamer"
+
+            async def send(self, message):
+                sent.append(message)
+
+        class FakeChatBot:
+            def __init__(self):
+                self.connected_channels = []
+
+            async def join_channels(self, channels):
+                joined.extend(channels)
+                self.connected_channels.append(FakeChannel())
+
+        class FakeBot:
+            twitch_chat_bot = FakeChatBot()
+
+        class Request(dict):
+            async def json(self):
+                return {
+                    "channel": "@Friendly_Streamer",
+                    "message": "Happy birthday! 🎉",
+                }
+
+        async def fake_execute(query, params=()):
+            writes.append((query, params))
+
+        monkeypatch.setattr(dashboard_server, "_bot_ref", FakeBot())
+        monkeypatch.setattr(dashboard_server, "db_execute", fake_execute)
+        monkeypatch.setattr(dashboard_server, "_twitch_chat_console_last_sent_at", 0.0)
+        request = Request({
+            "session": {"dev": True, "user_id": "42", "username": "Owner"},
+        })
+
+        response = await dashboard_server.owner_twitch_chat_send(request)
+        payload = json.loads(response.text)
+
+        assert joined == ["friendly_streamer"]
+        assert sent == ["Happy birthday! 🎉"]
+        assert payload["ok"] is True
+        assert payload["joined_now"] is True
+        audit_params = writes[0][1]
+        assert audit_params[:5] == (
+            "42", "Owner", "twitch:friendly_streamer", "POST",
+            "/api/dev/twitch-chat/send",
+        )
+        assert "Happy birthday!" in audit_params[5]
+
+    @pytest.mark.asyncio
+    async def test_twitch_console_is_owner_only_and_blocks_slash_commands(self, monkeypatch):
+        from aiohttp import web
+
+        class Request(dict):
+            def __init__(self, session, message="hello"):
+                super().__init__(session=session)
+                self.message = message
+
+            async def json(self):
+                return {"channel": "streamer", "message": self.message}
+
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.owner_twitch_chat_send(
+                Request({"admin": True, "user_id": "99"})
+            )
+
+        monkeypatch.setattr(
+            dashboard_server,
+            "_bot_ref",
+            SimpleNamespace(twitch_chat_bot=SimpleNamespace()),
+        )
+        with pytest.raises(web.HTTPBadRequest, match="Slash commands are blocked"):
+            await dashboard_server.owner_twitch_chat_send(
+                Request({"dev": True}, "/ban somebody")
+            )
+
+    @pytest.mark.asyncio
+    async def test_twitch_console_enforces_send_cooldown(self, monkeypatch):
+        from aiohttp import web
+
+        class FakeChannel:
+            name = "streamer"
+
+            async def send(self, _message):
+                return None
+
+        class Request(dict):
+            async def json(self):
+                return {"channel": "streamer", "message": "hello"}
+
+        async def fake_execute(_query, _params=()):
+            return None
+
+        monkeypatch.setattr(
+            dashboard_server,
+            "_bot_ref",
+            SimpleNamespace(
+                twitch_chat_bot=SimpleNamespace(connected_channels=[FakeChannel()]),
+            ),
+        )
+        monkeypatch.setattr(dashboard_server, "db_execute", fake_execute)
+        monkeypatch.setattr(dashboard_server, "_twitch_chat_console_last_sent_at", 0.0)
+        request = Request(session={"dev": True, "user_id": "42", "username": "Owner"})
+
+        await dashboard_server.owner_twitch_chat_send(request)
+        with pytest.raises(web.HTTPTooManyRequests):
+            await dashboard_server.owner_twitch_chat_send(request)
 
     @pytest.mark.asyncio
     async def test_dashboard_admin_add_applies_live_and_secret_fallback_cannot_be_removed(self, monkeypatch):
