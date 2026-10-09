@@ -6409,12 +6409,6 @@ def _legal_html(title, subtitle, body_html):
 </html>"""
 
 
-async def landing_protocol_logo(request):
-    """Serve the clean brand mark independently from the dashboard build asset."""
-    logo_path = os.path.join(os.path.dirname(__file__), "dashboard", "public", "protocol.png")
-    return web.FileResponse(logo_path)
-
-
 async def landing_page(request):
     html = """<!DOCTYPE html>
 <html lang="en">
@@ -6428,6 +6422,7 @@ async def landing_page(request):
   <meta property="og:description" content="Connect Discord, Twitch chat, channel rewards, OBS overlays, and giveaways without juggling separate tools.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://excelprotocol.fly.dev/">
+  <link rel="icon" href="/app/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800;900&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
   <script>if(new URLSearchParams(location.search).has('preview'))document.documentElement.classList.add('motion-preview');</script>
@@ -7250,7 +7245,7 @@ async def landing_page(request):
               <circle class="route-packet packet-obs" r="4"><animateMotion dur="1.45s" repeatCount="indefinite" path="M217 323 Q196 365 170 425"></animateMotion></circle>
             </svg>
             <div class="core-center">
-              <img class="core-logo" src="/landing-protocol.png" alt="ExcelProtocol triangle logo">
+              <img class="core-logo" src="/app/protocol.png" alt="ExcelProtocol triangle logo">
             </div>
             <div class="core-node node-discord"><span>📡</span>DISCORD</div>
             <div class="core-node node-twitch"><span>💬</span>TWITCH</div>
@@ -7742,7 +7737,8 @@ async def landing_page(request):
     }, 1650);
   }
 
-  if (!reducedMotion && window.matchMedia('(pointer:fine)').matches) {
+  // Direct pointer interaction remains available even when automatic motion is reduced.
+  if (window.matchMedia('(pointer:fine)').matches) {
     consoleBoard.addEventListener('pointermove', event => {
       consoleManualUntil = Date.now() + 900;
       const boardBox = consoleBoard.getBoundingClientRect();
@@ -8035,7 +8031,6 @@ def create_dashboard_app(bot=None):
     app = web.Application(middlewares=[error_logging_middleware, auth_middleware, admin_audit_middleware])
 
     app.router.add_get("/health",            health)
-    app.router.add_get("/landing-protocol.png", landing_protocol_logo)
     app.router.add_get("/companion/version",             handle_companion_version)
     app.router.add_get("/companion/guild/{guild_id}",    handle_companion_guild_info)
     app.router.add_get("/",                   landing_page)

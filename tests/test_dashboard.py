@@ -1032,7 +1032,8 @@ class TestDevDashboardRoutes:
         assert "prefers-reduced-motion:reduce" in source
         assert "commandExamples" in source
         assert "updateProtocolCore" in source
-        assert 'class="core-logo" src="/landing-protocol.png"' in source
+        assert 'class="core-logo" src="/app/protocol.png"' in source
+        assert 'rel="icon" href="/app/favicon.svg"' in source
         assert 'id="core-step"' in source
         assert 'id="feature-console"' in source
         assert 'id="console-reticle"' in source
