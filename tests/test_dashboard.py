@@ -1022,8 +1022,21 @@ class TestDevDashboardRoutes:
         assert "Discord · Twitch · OBS · one command center" in source
         assert 'id="platform"' in source
         assert "ExcelFortuna" in source
-        assert "Custom commands with targets, counters, choices, and randomizers" in source
+        assert 'class="system-stage"' in source
+        assert 'data-system="twitch"' in source
+        assert "Commands and rewards feel native to your channel." in source
         assert 'id="reliability"' in source
+        assert 'class="protocol-rail"' in source
+        assert 'id="scroll-progress"' in source
+        assert "IntersectionObserver" in source
+        assert "prefers-reduced-motion:reduce" in source
+        assert "commandExamples" in source
+        assert "updateProtocolCore" in source
+        assert 'class="core-logo" src="/landing-protocol.png"' in source
+        assert 'id="core-step"' in source
+        assert 'id="feature-console"' in source
+        assert 'id="console-reticle"' in source
+        assert "setFeatureSignal" in source
         assert "The bot joins with all required permissions" not in source
 
     def test_legal_pages_disclose_current_data_and_retention(self):

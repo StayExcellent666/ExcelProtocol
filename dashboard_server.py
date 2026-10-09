@@ -6409,6 +6409,12 @@ def _legal_html(title, subtitle, body_html):
 </html>"""
 
 
+async def landing_protocol_logo(request):
+    """Serve the clean brand mark independently from the dashboard build asset."""
+    logo_path = os.path.join(os.path.dirname(__file__), "dashboard", "public", "protocol.png")
+    return web.FileResponse(logo_path)
+
+
 async def landing_page(request):
     html = """<!DOCTYPE html>
 <html lang="en">
@@ -6424,6 +6430,7 @@ async def landing_page(request):
   <meta property="og:url" content="https://excelprotocol.fly.dev/">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800;900&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <script>if(new URLSearchParams(location.search).has('preview'))document.documentElement.classList.add('motion-preview');</script>
   <style>
     :root {
       --bg:       #080c12;
@@ -6445,6 +6452,35 @@ async def landing_page(request):
       background:var(--bg);
       color:var(--text);
       overflow-x:hidden;
+      min-height:100%;
+      background-image:
+        radial-gradient(circle at 18% 8%, rgba(0,245,212,.075), transparent 28%),
+        radial-gradient(circle at 82% 16%, rgba(167,139,250,.075), transparent 30%),
+        linear-gradient(180deg, #080c12 0%, #070b11 48%, #080c12 100%);
+    }
+    body::before {
+      content:''; position:fixed; inset:0; z-index:0; pointer-events:none;
+      background-image:
+        linear-gradient(rgba(0,245,212,.022) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,245,212,.022) 1px, transparent 1px);
+      background-size:64px 64px;
+      mask-image:linear-gradient(to bottom, black, transparent 86%);
+    }
+    body::after {
+      content:''; position:fixed; inset:0; z-index:150; pointer-events:none;
+      box-shadow:inset 0 0 140px rgba(0,0,0,.72);
+    }
+
+    .scroll-progress {
+      position:fixed; left:0; top:0; width:0; height:2px; z-index:200;
+      background:linear-gradient(90deg,var(--cyan),#62a8ff,var(--purple));
+      box-shadow:0 0 16px rgba(0,245,212,.85); transform-origin:left;
+    }
+    .cursor-glow {
+      position:fixed; width:480px; height:480px; left:0; top:0; z-index:0;
+      border-radius:50%; pointer-events:none; opacity:.32;
+      background:radial-gradient(circle,rgba(0,245,212,.105),transparent 66%);
+      transform:translate3d(-50%,-50%,0); will-change:transform;
     }
 
     /* ── Canvas background ── */
@@ -6461,7 +6497,9 @@ async def landing_page(request):
       background:rgba(8,12,18,0.85);
       backdrop-filter:blur(16px);
       border-bottom:1px solid var(--border);
+      transition:height .25s ease, background .25s ease, box-shadow .25s ease;
     }
+    nav.scrolled { height:54px; background:rgba(6,10,16,.94); box-shadow:0 12px 40px rgba(0,0,0,.3); }
     .nav-logo {
       display:flex; align-items:center; gap:10px;
       font-family:'Orbitron',sans-serif; font-weight:800; font-size:17px;
@@ -6489,6 +6527,14 @@ async def landing_page(request):
       display:grid; grid-template-columns:minmax(0,1.04fr) minmax(360px,.96fr);
       gap:64px; align-items:center; max-width:1180px; margin:0 auto;
       padding:112px 32px 72px;
+      isolation:isolate;
+    }
+    .hero::before {
+      content:''; position:absolute; width:760px; height:760px; right:-270px; top:-160px;
+      border-radius:50%; z-index:-1; pointer-events:none;
+      background:repeating-radial-gradient(circle,rgba(0,245,212,.07) 0 1px,transparent 1px 58px);
+      mask-image:radial-gradient(circle,black 0 44%,transparent 72%);
+      animation:orbitDrift 18s linear infinite;
     }
     .hero-copy { min-width:0; }
     .hero-badge {
@@ -6499,6 +6545,7 @@ async def landing_page(request):
       font-family:'JetBrains Mono',monospace; letter-spacing:1px;
       text-transform:uppercase; margin-bottom:28px;
       animation:fadeUp 0.6s ease both;
+      box-shadow:inset 0 0 18px rgba(57,217,138,.04),0 0 24px rgba(57,217,138,.04);
     }
     .pulse-dot {
       width:6px; height:6px; border-radius:50%; background:var(--green);
@@ -6521,6 +6568,7 @@ async def landing_page(request):
       background:linear-gradient(135deg, var(--cyan) 0%, var(--purple) 100%);
       -webkit-background-clip:text; -webkit-text-fill-color:transparent;
       background-clip:text;
+      background-size:180% 180%; animation:gradientShift 5s ease infinite;
     }
     .hero-sub {
       font-size:clamp(16px, 2.5vw, 20px); color:var(--text2); font-weight:300;
@@ -6537,7 +6585,14 @@ async def landing_page(request):
       background:var(--cyan); color:#080c12; text-decoration:none;
       font-family:'Outfit',sans-serif; letter-spacing:-0.2px;
       transition:all 0.2s; box-shadow:0 4px 24px rgba(0,245,212,0.3);
+      position:relative; overflow:hidden;
     }
+    .btn-primary::after {
+      content:''; position:absolute; top:-80%; left:-45%; width:34%; height:250%;
+      background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);
+      transform:rotate(20deg); transition:transform .55s ease;
+    }
+    .btn-primary:hover::after { transform:translateX(420%) rotate(20deg); }
     .btn-primary:hover { transform:translateY(-2px); box-shadow:0 8px 32px rgba(0,245,212,0.45); }
     .btn-secondary {
       display:inline-flex; align-items:center; gap:8px;
@@ -6553,6 +6608,8 @@ async def landing_page(request):
       animation:fadeUp 0.6s 0.4s ease both;
     }
     .stat { text-align:left; }
+    .stat { position:relative; padding-left:12px; }
+    .stat::before { content:''; position:absolute; left:0; top:1px; bottom:0; width:1px; background:linear-gradient(var(--cyan),transparent); }
     .stat-num {
       font-family:'Orbitron',sans-serif; font-weight:800; font-size:25px;
       color:var(--cyan); line-height:1;
@@ -6583,57 +6640,275 @@ async def landing_page(request):
       background:linear-gradient(145deg, rgba(0,245,212,.55), rgba(167,139,250,.18), rgba(0,245,212,.08));
       box-shadow:0 34px 90px rgba(0,0,0,.42), 0 0 55px rgba(0,245,212,.06);
       animation:fadeUp .7s .2s ease both;
+      transform:perspective(1100px) rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg));
+      transform-style:preserve-3d; transition:transform .16s ease-out,box-shadow .3s ease;
+      will-change:transform;
     }
-    .preview-shell { border-radius:21px; overflow:hidden; background:rgba(9,14,22,.97); }
+    .product-preview:hover { box-shadow:0 42px 110px rgba(0,0,0,.5),0 0 70px rgba(0,245,212,.12); }
+    .product-preview::before {
+      content:''; position:absolute; inset:-1px; border-radius:23px; padding:1px; pointer-events:none;
+      background:conic-gradient(from var(--border-angle,0deg),transparent 0 20%,rgba(0,245,212,.8) 28%,transparent 36% 70%,rgba(167,139,250,.7) 78%,transparent 86%);
+      -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+      -webkit-mask-composite:xor; mask-composite:exclude;
+      animation:borderOrbit 7s linear infinite;
+    }
+    .preview-shell { border-radius:21px; overflow:hidden; background:rgba(9,14,22,.97); position:relative; transform:translateZ(1px); }
+    .preview-shell::after {
+      content:''; position:absolute; inset:0; pointer-events:none; opacity:.75;
+      background:linear-gradient(115deg,transparent 15%,rgba(255,255,255,.045) 30%,transparent 44%);
+      transform:translateX(-120%); animation:screenSheen 8s ease-in-out infinite;
+    }
+    .preview-scan {
+      position:absolute; z-index:5; left:0; right:0; top:-20%; height:90px; pointer-events:none;
+      background:linear-gradient(to bottom,transparent,rgba(0,245,212,.035),rgba(0,245,212,.11),transparent);
+      animation:scanDown 6s linear infinite;
+    }
     .preview-top { display:flex; align-items:center; justify-content:space-between; padding:15px 18px; border-bottom:1px solid var(--border); }
     .preview-brand { font-family:'Orbitron',sans-serif; font-size:12px; font-weight:800; }
-    .preview-online { color:var(--green); font:500 9px 'JetBrains Mono',monospace; letter-spacing:1.5px; }
+    .preview-online { color:var(--green); font:500 9px 'JetBrains Mono',monospace; letter-spacing:1.5px; text-shadow:0 0 10px rgba(57,217,138,.8); animation:onlinePulse 2.2s ease-in-out infinite; }
     .preview-body { display:grid; grid-template-columns:72px 1fr; min-height:390px; }
     .preview-nav { border-right:1px solid var(--border); padding:18px 12px; display:flex; flex-direction:column; gap:13px; }
-    .preview-nav span { height:8px; border-radius:4px; background:#1a2836; }
+    .preview-nav span { height:8px; border-radius:4px; background:#1a2836; animation:navSignal 5s ease-in-out infinite; }
+    .preview-nav span:nth-child(2) { animation-delay:.25s; }
+    .preview-nav span:nth-child(3) { animation-delay:.5s; }
     .preview-nav span.active { background:var(--cyan); box-shadow:0 0 12px rgba(0,245,212,.45); }
     .preview-main { padding:23px; min-width:0; }
     .preview-kicker { color:var(--cyan); font:500 9px 'JetBrains Mono',monospace; letter-spacing:2px; }
     .preview-title { font-family:'Orbitron',sans-serif; font-size:18px; margin:7px 0 19px; }
-    .preview-alert { display:flex; gap:12px; align-items:center; padding:13px; border-radius:10px; border:1px solid rgba(0,245,212,.22); background:rgba(0,245,212,.055); }
+    .preview-alert { display:flex; gap:12px; align-items:center; padding:13px; border-radius:10px; border:1px solid rgba(0,245,212,.22); background:rgba(0,245,212,.055); animation:alertGlow 3s ease-in-out infinite; }
     .preview-avatar { width:38px; height:38px; border-radius:10px; display:grid; place-items:center; background:linear-gradient(135deg,var(--cyan),#168cff); color:#071014; font-weight:800; }
     .preview-lines { flex:1; }
     .preview-lines b { display:block; font-size:12px; }
     .preview-lines small { color:var(--text3); font:400 9px 'JetBrains Mono',monospace; }
     .preview-live { color:#ff4d6d; font:600 9px 'JetBrains Mono',monospace; }
     .preview-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:11px; }
-    .preview-mini { padding:14px; min-height:91px; border:1px solid rgba(255,255,255,.07); border-radius:10px; background:rgba(255,255,255,.025); }
+    .preview-mini { padding:14px; min-height:91px; border:1px solid rgba(255,255,255,.07); border-radius:10px; background:rgba(255,255,255,.025); transition:transform .25s ease,border-color .25s ease,background .25s ease; }
+    .preview-mini:hover { transform:translateY(-3px); border-color:rgba(0,245,212,.24); background:rgba(0,245,212,.045); }
     .preview-mini .icon { font-size:18px; }
     .preview-mini b { display:block; font-size:11px; margin:8px 0 2px; }
     .preview-mini small { color:var(--text3); font-size:9px; }
-    .preview-command { margin-top:11px; padding:13px; border-radius:10px; background:#060a0f; border:1px solid rgba(167,139,250,.2); color:var(--text2); font:400 10px 'JetBrains Mono',monospace; }
+    .preview-command { margin-top:11px; padding:13px; border-radius:10px; background:#060a0f; border:1px solid rgba(167,139,250,.2); color:var(--text2); font:400 10px 'JetBrains Mono',monospace; transition:opacity .2s ease,transform .2s ease; }
+    .preview-command.switching { opacity:.15; transform:translateY(4px); }
     .preview-command strong { color:var(--purple); }
 
-    /* ── Product pillars ── */
-    .pillar-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:18px; margin-top:52px; }
-    .pillar-card {
-      padding:30px; border-radius:18px; min-height:390px; display:flex; flex-direction:column;
-      background:linear-gradient(155deg,rgba(18,29,44,.94),rgba(10,16,25,.92));
-      border:1px solid var(--border); position:relative; overflow:hidden;
+    .orbit-chip {
+      position:absolute; z-index:8; display:flex; align-items:center; gap:7px;
+      padding:7px 10px; border-radius:999px; white-space:nowrap;
+      color:#cad5e2; background:rgba(8,13,20,.9); border:1px solid rgba(255,255,255,.09);
+      box-shadow:0 12px 28px rgba(0,0,0,.32); backdrop-filter:blur(10px);
+      font:500 9px 'JetBrains Mono',monospace; letter-spacing:.8px;
+      animation:chipFloat 4s ease-in-out infinite;
     }
-    .pillar-card::before { content:''; position:absolute; width:180px; height:180px; right:-65px; top:-75px; border-radius:50%; background:radial-gradient(circle,rgba(0,245,212,.12),transparent 70%); }
-    .pillar-card.purple::before { background:radial-gradient(circle,rgba(167,139,250,.16),transparent 70%); }
-    .pillar-number { color:var(--cyan); font:500 10px 'JetBrains Mono',monospace; letter-spacing:2px; }
-    .pillar-icon { font-size:32px; margin:20px 0 16px; }
-    .pillar-title { font:800 19px 'Orbitron',sans-serif; line-height:1.25; margin-bottom:10px; }
-    .pillar-desc { color:var(--text2); font-size:14px; line-height:1.65; margin-bottom:22px; }
-    .feature-list { list-style:none; margin:auto 0 0; display:flex; flex-direction:column; gap:10px; }
-    .feature-list li { color:#c4ced9; font-size:12px; line-height:1.45; padding-left:18px; position:relative; }
-    .feature-list li::before { content:'+'; position:absolute; left:0; color:var(--cyan); font:700 12px 'JetBrains Mono',monospace; }
+    .orbit-chip i { width:6px; height:6px; border-radius:50%; background:var(--cyan); box-shadow:0 0 10px rgba(0,245,212,.9); }
+    .orbit-discord { left:-31px; top:18%; }
+    .orbit-twitch { right:-28px; top:43%; animation-delay:-1.3s; }
+    .orbit-obs { left:12%; bottom:-17px; animation-delay:-2.6s; }
+
+    /* ── Scroll-reactive protocol core ── */
+    .system-stage {
+      --core-rx:0deg; --core-ry:0deg; --core-shift-x:0px; --core-shift-y:0px;
+      display:grid; grid-template-columns:minmax(390px,.95fr) minmax(360px,1.05fr);
+      gap:clamp(42px,7vw,96px); margin-top:64px; position:relative;
+    }
+    .core-column { position:relative; min-height:1320px; }
+    .core-sticky { position:sticky; top:120px; height:520px; display:grid; place-items:center; perspective:1100px; }
+    .protocol-core {
+      width:min(100%,500px); aspect-ratio:1; position:relative; border-radius:50%;
+      transform-style:preserve-3d;
+      transform:translate3d(var(--core-shift-x),var(--core-shift-y),0) rotateX(var(--core-rx)) rotateY(var(--core-ry));
+      transition:transform .18s ease-out;
+      background:radial-gradient(circle at 50% 50%,rgba(0,245,212,.07),rgba(5,9,15,.2) 44%,transparent 72%);
+      filter:drop-shadow(0 35px 65px rgba(0,0,0,.42));
+    }
+    .core-scroll-plane { position:absolute; inset:0; border-radius:50%; transform:rotate(var(--core-spin,0deg)); transition:transform .14s linear; }
+    .core-halo { position:absolute; inset:8%; border-radius:50%; background:radial-gradient(circle,rgba(0,245,212,.1),transparent 67%); filter:blur(10px); animation:haloBreathe 3.4s ease-in-out infinite; }
+    .core-ring { position:absolute; inset:12%; border-radius:50%; border:1px solid rgba(0,245,212,.22); }
+    .core-ring::before,.core-ring::after { display:none; }
+    .ring-a { animation:coreSpin 17s linear infinite; }
+    .ring-b { inset:22%; border-color:rgba(167,139,250,.25); border-style:dashed; animation:coreSpinReverse 13s linear infinite; }
+    .ring-b::before,.ring-b::after { background:var(--purple); box-shadow:0 0 16px var(--purple); }
+    .ring-c { inset:33%; border-color:rgba(255,255,255,.1); animation:coreSpin 9s linear infinite; }
+    .core-links { position:absolute; inset:0; width:100%; height:100%; overflow:visible; }
+    .core-link { fill:none; stroke:rgba(108,133,157,.22); stroke-width:1.2; stroke-dasharray:7 8; transition:stroke .45s ease,stroke-width .45s ease,filter .45s ease; animation:linkFlow 2s linear infinite; }
+    .route-packet { fill:#dffffb; opacity:0; filter:drop-shadow(0 0 7px var(--cyan)); transition:opacity .35s ease; }
+    .system-stage[data-active="discord"] .packet-discord,
+    .system-stage[data-active="twitch"] .packet-twitch,
+    .system-stage[data-active="obs"] .packet-obs { opacity:1; }
+    .core-center {
+      position:absolute; left:50%; top:calc(50% + 20px); width:156px; height:142px; transform:translate(-50%,-50%) translateZ(45px) rotate(var(--core-roll,0deg));
+      transform-origin:50% 50%; display:grid; place-items:center; overflow:visible;
+    }
+    .core-logo {
+      width:286px; height:286px; object-fit:contain; position:absolute; left:50%; top:50%; z-index:1;
+      transform:translate(-50%,-50%);
+      mix-blend-mode:screen; filter:contrast(1.2) brightness(1.08) saturate(1.05) drop-shadow(0 0 5px rgba(0,245,212,.9)) drop-shadow(0 0 18px rgba(0,245,212,.3));
+      user-select:none; pointer-events:none;
+    }
+    .core-node {
+      position:absolute; width:112px; padding:13px 11px; border-radius:14px; z-index:3;
+      background:rgba(8,14,23,.94); border:1px solid rgba(255,255,255,.09);
+      box-shadow:0 16px 38px rgba(0,0,0,.34); color:#8191a4;
+      font:600 10px 'JetBrains Mono',monospace; text-align:center; letter-spacing:1px;
+      transition:transform .45s cubic-bezier(.2,.8,.2,1),color .45s ease,border-color .45s ease,box-shadow .45s ease,background .45s ease;
+    }
+    .core-node span { display:block; font-size:22px; margin-bottom:6px; filter:grayscale(.5); transition:filter .45s ease,transform .45s ease; }
+    .node-discord { left:4%; top:17%; transform:translateZ(12px); }
+    .node-twitch { right:1%; top:26%; transform:translateZ(12px); }
+    .node-obs { left:22%; bottom:3%; transform:translateZ(12px); }
+    .system-stage[data-active="discord"] .node-discord,
+    .system-stage[data-active="twitch"] .node-twitch,
+    .system-stage[data-active="obs"] .node-obs {
+      color:#ecffff; border-color:rgba(0,245,212,.58); background:rgba(8,25,29,.96);
+      box-shadow:0 0 0 5px rgba(0,245,212,.045),0 18px 42px rgba(0,0,0,.4),0 0 34px rgba(0,245,212,.18);
+      transform:translateZ(34px) scale(1.08);
+    }
+    .system-stage[data-active="discord"] .node-discord span,
+    .system-stage[data-active="twitch"] .node-twitch span,
+    .system-stage[data-active="obs"] .node-obs span { filter:none; transform:scale(1.08); }
+    .system-stage[data-active="discord"] .link-discord,
+    .system-stage[data-active="twitch"] .link-twitch,
+    .system-stage[data-active="obs"] .link-obs { stroke:var(--cyan); stroke-width:2.3; filter:drop-shadow(0 0 5px rgba(0,245,212,.75)); }
+    .core-status { position:absolute; left:50%; bottom:-3px; transform:translateX(-50%); color:var(--cyan); font:500 9px 'JetBrains Mono',monospace; letter-spacing:2px; white-space:nowrap; }
+    .core-status::before { content:''; display:inline-block; width:6px; height:6px; margin-right:8px; border-radius:50%; background:var(--green); box-shadow:0 0 10px var(--green); }
+    .core-feedback { position:absolute; left:50%; bottom:-43px; width:min(250px,65%); transform:translateX(-50%); display:grid; grid-template-columns:24px 1fr 24px; align-items:center; gap:9px; color:#65768a; font:500 8px 'JetBrains Mono',monospace; letter-spacing:1px; }
+    .core-track { height:2px; position:relative; overflow:visible; border-radius:4px; background:rgba(255,255,255,.1); }
+    .core-track-fill { position:absolute; inset:0 auto 0 0; width:var(--route-progress,0%); border-radius:inherit; background:linear-gradient(90deg,var(--cyan),var(--purple)); box-shadow:0 0 12px rgba(0,245,212,.55); transition:width .16s linear; }
+    .core-track-dot { position:absolute; top:50%; width:7px; height:7px; border-radius:50%; transform:translate(-50%,-50%); background:#182432; border:1px solid #43536a; transition:background .35s ease,border-color .35s ease,box-shadow .35s ease; }
+    .core-track-dot:nth-child(2) { left:0; }
+    .core-track-dot:nth-child(3) { left:50%; }
+    .core-track-dot:nth-child(4) { left:100%; }
+    .system-stage[data-active="discord"] .core-track-dot:nth-child(2),
+    .system-stage[data-active="twitch"] .core-track-dot:nth-child(3),
+    .system-stage[data-active="obs"] .core-track-dot:nth-child(4) { background:var(--cyan); border-color:var(--cyan); box-shadow:0 0 12px rgba(0,245,212,.8); }
+    .core-step { color:var(--cyan); text-align:right; }
+    .core-feedback-end { text-align:left; }
+    .core-scroll-hint { position:absolute; left:50%; bottom:-72px; transform:translateX(-50%); color:#536377; font:500 7px 'JetBrains Mono',monospace; letter-spacing:2px; white-space:nowrap; opacity:.85; }
+    .core-scroll-hint span { display:inline-block; color:var(--cyan); animation:scrollNudge 1.4s ease-in-out infinite; }
+    .system-panels { display:flex; flex-direction:column; gap:26vh; padding:44px 0 200px; }
+    .system-panel {
+      min-height:270px; padding:34px; border-radius:20px; position:relative; overflow:hidden;
+      display:flex; flex-direction:column; justify-content:center;
+      background:linear-gradient(145deg,rgba(16,26,40,.88),rgba(8,13,21,.86));
+      border:1px solid rgba(255,255,255,.075); opacity:.48; transform:translateX(24px) scale(.96);
+      transition:opacity .55s ease,transform .55s cubic-bezier(.2,.8,.2,1),border-color .55s ease,box-shadow .55s ease;
+    }
+    .system-panel::before { content:''; position:absolute; inset:0; background:radial-gradient(380px circle at 100% 0%,rgba(0,245,212,.12),transparent 62%); opacity:0; transition:opacity .5s ease; }
+    .system-panel.is-active { opacity:1; transform:none; border-color:rgba(0,245,212,.3); box-shadow:0 30px 75px rgba(0,0,0,.25); }
+    .system-panel.is-active::before { opacity:1; }
+    .system-index { color:var(--cyan); font:500 10px 'JetBrains Mono',monospace; letter-spacing:2px; margin-bottom:18px; position:relative; }
+    .system-title { font:800 clamp(25px,3vw,36px) 'Orbitron',sans-serif; line-height:1.15; margin-bottom:12px; position:relative; }
+    .system-desc { color:var(--text2); font-size:15px; line-height:1.55; max-width:450px; position:relative; }
+    .system-chips { display:flex; gap:8px; flex-wrap:wrap; margin-top:22px; position:relative; }
+    .system-chips span { padding:6px 9px; border-radius:6px; background:rgba(0,245,212,.07); border:1px solid rgba(0,245,212,.15); color:#a8c8c6; font:500 9px 'JetBrains Mono',monospace; letter-spacing:.5px; }
+
+    /* ── Community systems lab ── */
+    .feature-console {
+      margin-top:48px; border:1px solid rgba(0,245,212,.2); border-radius:18px;
+      overflow:hidden; background:rgba(7,12,19,.9); position:relative;
+      box-shadow:0 24px 70px rgba(0,0,0,.28),inset 0 1px rgba(255,255,255,.025);
+    }
+    .console-header {
+      height:43px; padding:0 17px; display:flex; align-items:center; justify-content:space-between; gap:18px;
+      border-bottom:1px solid rgba(0,245,212,.12); background:rgba(10,17,26,.92);
+      color:#86aaa8; font:500 9px 'JetBrains Mono',monospace; letter-spacing:1.5px; text-transform:uppercase;
+    }
+    .console-header > span:first-child { display:flex; align-items:center; gap:9px; white-space:nowrap; }
+    .console-header i { width:6px; height:6px; border-radius:50%; background:var(--green); box-shadow:0 0 10px rgba(57,217,138,.9); }
+    .console-status { color:var(--cyan); text-align:right; transition:opacity .18s ease; }
+    .console-board {
+      height:310px; position:relative; overflow:hidden; isolation:isolate;
+      background:
+        radial-gradient(circle at 50% 47%,rgba(0,245,212,.08),transparent 28%),
+        linear-gradient(rgba(0,245,212,.025) 1px,transparent 1px),
+        linear-gradient(90deg,rgba(0,245,212,.025) 1px,transparent 1px),
+        #070c13;
+      background-size:auto,32px 32px,32px 32px,auto;
+    }
+    .console-board::before,.console-board::after {
+      content:''; position:absolute; z-index:0; pointer-events:none;
+    }
+    .console-board::before {
+      inset:0; opacity:.32;
+      background:repeating-linear-gradient(0deg,transparent 0,transparent 3px,rgba(255,255,255,.018) 4px);
+    }
+    .console-board::after { inset:18px; border:1px solid rgba(0,245,212,.055); clip-path:polygon(0 0,18% 0,18% 1px,1px 1px,1px 28%,0 28%,0 0,100% 0,100% 28%,calc(100% - 1px) 28%,calc(100% - 1px) 1px,82% 1px,82% 0,100% 0,100% 100%,82% 100%,82% calc(100% - 1px),calc(100% - 1px) calc(100% - 1px),calc(100% - 1px) 72%,100% 72%,100% 100%,0 100%,0 72%,1px 72%,1px calc(100% - 1px),18% calc(100% - 1px),18% 100%,0 100%); }
+    .console-scan {
+      position:absolute; z-index:2; top:0; bottom:0; left:-8%; width:18%; pointer-events:none;
+      border-right:1px solid rgba(0,245,212,.52);
+      background:linear-gradient(90deg,transparent,rgba(0,245,212,.02),rgba(0,245,212,.1));
+      filter:drop-shadow(0 0 10px rgba(0,245,212,.62)); animation:consoleScan 3.4s linear infinite;
+    }
+    .console-traces { position:absolute; z-index:1; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
+    .console-traces path { fill:none; stroke:rgba(0,245,212,.22); stroke-width:1.25; stroke-dasharray:7 9; animation:traceFlow 1.45s linear infinite; transition:stroke .25s ease,stroke-width .25s ease,filter .25s ease; }
+    .console-traces circle { fill:#070c13; stroke:rgba(0,245,212,.38); stroke-width:1.3; }
+    .console-packet { fill:#effffc !important; stroke:none !important; opacity:0; filter:drop-shadow(0 0 7px var(--cyan)); transition:opacity .2s ease; }
+    .feature-console[data-active-feature="0"] .trace-0,.feature-console[data-active-feature="1"] .trace-1,
+    .feature-console[data-active-feature="2"] .trace-2,.feature-console[data-active-feature="3"] .trace-3,
+    .feature-console[data-active-feature="4"] .trace-4,.feature-console[data-active-feature="5"] .trace-5 { stroke:rgba(0,245,212,.78); stroke-width:2; filter:drop-shadow(0 0 4px rgba(0,245,212,.7)); }
+    .feature-console[data-active-feature="0"] .packet-0,.feature-console[data-active-feature="1"] .packet-1,
+    .feature-console[data-active-feature="2"] .packet-2,.feature-console[data-active-feature="3"] .packet-3,
+    .feature-console[data-active-feature="4"] .packet-4,.feature-console[data-active-feature="5"] .packet-5 { opacity:1; }
+    .console-chip {
+      position:absolute; z-index:4; left:50%; top:50%; width:116px; height:88px; transform:translate(-50%,-50%);
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      border:1px solid rgba(0,245,212,.48); border-radius:10px;
+      background:linear-gradient(145deg,rgba(14,31,39,.98),rgba(7,13,21,.98));
+      box-shadow:0 0 36px rgba(0,245,212,.12),inset 0 0 22px rgba(0,245,212,.045);
+      animation:chipBreathe 2.2s ease-in-out infinite;
+    }
+    .console-chip::before,.console-chip::after { content:''; position:absolute; inset:-7px; border:1px solid rgba(0,245,212,.09); border-radius:13px; }
+    .console-chip::after { inset:-13px; border-style:dashed; opacity:.45; }
+    .console-chip span,.console-chip small { font:500 8px 'JetBrains Mono',monospace; letter-spacing:1.5px; color:#6e9694; }
+    .console-chip strong { color:var(--cyan); font:800 27px 'Orbitron',sans-serif; line-height:1.15; text-shadow:0 0 18px rgba(0,245,212,.45); }
+    .console-node {
+      position:absolute; z-index:4; width:142px; min-height:47px; padding:9px 12px;
+      display:flex; align-items:center; gap:9px; border:1px solid rgba(112,142,160,.19); border-radius:8px;
+      background:rgba(10,17,26,.94); color:#799895;
+      font:500 8px 'JetBrains Mono',monospace; letter-spacing:1px; text-transform:uppercase;
+      transition:border-color .22s ease,color .22s ease,box-shadow .22s ease,transform .22s ease;
+    }
+    .console-node::before { content:''; position:absolute; left:-4px; top:50%; width:7px; height:7px; transform:translateY(-50%) rotate(45deg); background:#31434d; transition:background .22s ease,box-shadow .22s ease; }
+    .console-node span { font-size:17px; filter:grayscale(.55); transition:filter .22s ease; }
+    .console-node.is-active {
+      color:#d9fffa; border-color:rgba(0,245,212,.62); transform:translateY(-2px);
+      box-shadow:0 0 22px rgba(0,245,212,.14),inset 0 0 16px rgba(0,245,212,.035);
+      animation:nodeSignal .85s ease-out;
+    }
+    .console-node.is-active::before { background:var(--cyan); box-shadow:0 0 11px rgba(0,245,212,.9); }
+    .console-node.is-active span { filter:none; }
+    .console-node[data-feature="0"] { left:12%; top:14%; }
+    .console-node[data-feature="1"] { right:12%; top:14%; }
+    .console-node[data-feature="2"] { left:3%; bottom:12%; }
+    .console-node[data-feature="3"] { left:27%; bottom:7%; }
+    .console-node[data-feature="4"] { right:27%; bottom:7%; }
+    .console-node[data-feature="5"] { right:3%; bottom:12%; }
+    .console-reticle {
+      position:absolute; z-index:6; left:0; top:0; width:54px; height:54px; opacity:0; pointer-events:none;
+      border:1px solid rgba(0,245,212,.38); border-radius:50%; transform:translate3d(-100px,-100px,0);
+      box-shadow:0 0 22px rgba(0,245,212,.12); transition:opacity .18s ease;
+    }
+    .console-reticle::before,.console-reticle::after { content:''; position:absolute; background:rgba(0,245,212,.55); }
+    .console-reticle::before { left:50%; top:-7px; bottom:-7px; width:1px; }
+    .console-reticle::after { top:50%; left:-7px; right:-7px; height:1px; }
+    .feature-console:hover .console-reticle { opacity:1; }
+    .console-corner {
+      position:absolute; z-index:3; right:14px; top:12px; color:#395653;
+      font:500 7px/1.7 'JetBrains Mono',monospace; letter-spacing:1px; text-align:right; pointer-events:none;
+    }
+    @keyframes consoleScan { from { transform:translateX(0); } to { transform:translateX(650%); } }
+    @keyframes traceFlow { to { stroke-dashoffset:-32; } }
+    @keyframes chipBreathe { 0%,100% { box-shadow:0 0 26px rgba(0,245,212,.1),inset 0 0 18px rgba(0,245,212,.035); } 50% { box-shadow:0 0 52px rgba(0,245,212,.24),inset 0 0 25px rgba(0,245,212,.08); } }
+    @keyframes nodeSignal { 0% { box-shadow:0 0 0 rgba(0,245,212,0); } 35% { box-shadow:0 0 34px rgba(0,245,212,.32),inset 0 0 22px rgba(0,245,212,.08); } 100% { box-shadow:0 0 22px rgba(0,245,212,.14),inset 0 0 16px rgba(0,245,212,.035); } }
+    @keyframes cardSignal { from { transform:translateX(-120%); } to { transform:translateX(420%); } }
 
     /* ── Feature grid ── */
     .feature-grid {
       display:grid;
-      grid-template-columns:repeat(3,1fr);
-      gap:14px; margin-top:48px;
+      grid-template-columns:repeat(4,1fr);
+      gap:14px; margin-top:18px;
     }
     .feature-card {
-      padding:24px; border-radius:14px;
+      padding:24px; min-height:190px; border-radius:14px;
       background:rgba(13,20,32,0.8);
       border:1px solid var(--border);
       transition:all 0.3s;
@@ -6641,17 +6916,25 @@ async def landing_page(request):
     }
     .feature-card::before {
       content:''; position:absolute; inset:0;
-      background:radial-gradient(circle at top left, rgba(0,245,212,0.05) 0%, transparent 60%);
-      opacity:0; transition:opacity 0.3s;
+      background:radial-gradient(260px circle at var(--mx,50%) var(--my,50%),rgba(0,245,212,.13),transparent 62%);
+      opacity:0; transition:opacity 0.3s; pointer-events:none;
     }
     .feature-card:hover { border-color:rgba(0,245,212,0.25); transform:translateY(-3px); }
     .feature-card:hover::before { opacity:1; }
+    .feature-card.is-signaled { border-color:rgba(0,245,212,.38); transform:translateY(-3px); box-shadow:0 12px 34px rgba(0,245,212,.065); }
+    .feature-card.is-signaled::before { opacity:.72; }
+    .feature-card.is-signaled::after {
+      content:''; position:absolute; left:0; top:0; width:28%; height:1px;
+      background:linear-gradient(90deg,transparent,var(--cyan),transparent); filter:drop-shadow(0 0 5px var(--cyan));
+      animation:cardSignal 1.15s ease-in-out infinite;
+    }
+    .feature-card:nth-child(1),.feature-card:nth-child(2) { grid-column:span 2; }
     .feature-icon { font-size:26px; margin-bottom:14px; }
     .feature-title {
       font-family:'Orbitron',sans-serif; font-weight:700; font-size:16px;
       color:var(--text); margin-bottom:8px;
     }
-    .feature-desc { font-size:14px; color:var(--text2); line-height:1.6; }
+    .feature-desc { font-size:13px; color:var(--text2); line-height:1.5; max-width:440px; }
     .feature-tag {
       display:inline-block; margin-top:12px;
       padding:3px 8px; border-radius:4px; font-size:10px;
@@ -6671,6 +6954,26 @@ async def landing_page(request):
     .signal-dot { width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 8px rgba(57,217,138,.7); flex:0 0 auto; }
     .signal b { display:block; font-size:12px; }
     .signal small { color:var(--text3); font-size:10px; }
+
+    /* ── Live protocol rail ── */
+    .protocol-rail {
+      position:relative; z-index:2; width:calc(100% - 48px); max-width:1180px; height:46px; margin:0 auto 6px; overflow:clip; contain:layout paint;
+      border:1px solid rgba(0,245,212,.11); border-radius:12px;
+      background:rgba(8,13,20,.78); box-shadow:0 18px 60px rgba(0,0,0,.22);
+      mask-image:linear-gradient(90deg,transparent,black 8%,black 92%,transparent);
+    }
+    .rail-track { position:absolute; left:0; top:0; display:flex; width:max-content; animation:railMove 28s linear infinite; }
+    .rail-set { display:flex; align-items:center; flex:none; }
+    .rail-item { display:flex; align-items:center; gap:9px; padding:13px 24px; color:#7f91a6; font:500 10px 'JetBrains Mono',monospace; letter-spacing:1.3px; text-transform:uppercase; white-space:nowrap; }
+    .rail-item::before { content:''; width:5px; height:5px; border-radius:50%; background:var(--green); box-shadow:0 0 9px rgba(57,217,138,.8); }
+    .rail-item strong { color:#c9d4df; font-weight:500; }
+
+    /* ── Scroll choreography ── */
+    .reveal { opacity:0; transform:translateY(26px); transition:opacity .7s ease,transform .7s cubic-bezier(.2,.8,.2,1); }
+    .reveal.is-visible { opacity:1; transform:translateY(0); }
+    .reveal-delay-1 { transition-delay:.08s; }
+    .reveal-delay-2 { transition-delay:.16s; }
+    .reveal-delay-3 { transition-delay:.24s; }
 
     /* ── How it works ── */
     .steps { display:flex; flex-direction:column; gap:0; margin-top:56px; max-width:600px; }
@@ -6735,6 +7038,23 @@ async def landing_page(request):
       from { opacity:0; transform:translateY(20px); }
       to   { opacity:1; transform:translateY(0); }
     }
+    @property --border-angle { syntax:'<angle>'; initial-value:0deg; inherits:false; }
+    @keyframes borderOrbit { to { --border-angle:360deg; } }
+    @keyframes gradientShift { 0%,100% { background-position:0% 50%; } 50% { background-position:100% 50%; } }
+    @keyframes orbitDrift { to { transform:rotate(360deg); } }
+    @keyframes chipFloat { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-7px); } }
+    @keyframes screenSheen { 0%,68% { transform:translateX(-120%); } 86%,100% { transform:translateX(120%); } }
+    @keyframes scanDown { from { transform:translateY(-120px); } to { transform:translateY(620px); } }
+    @keyframes onlinePulse { 0%,100% { opacity:.72; } 50% { opacity:1; } }
+    @keyframes navSignal { 0%,84%,100% { opacity:.5; } 90% { opacity:1; } }
+    @keyframes alertGlow { 0%,100% { box-shadow:inset 0 0 0 rgba(0,245,212,0); } 50% { box-shadow:inset 0 0 24px rgba(0,245,212,.035); } }
+    @keyframes railMove { to { transform:translateX(-50%); } }
+    @keyframes coreSpin { to { transform:rotate(360deg); } }
+    @keyframes coreSpinReverse { to { transform:rotate(-360deg); } }
+    @keyframes linkFlow { to { stroke-dashoffset:-30; } }
+    @keyframes haloBreathe { 0%,100% { opacity:.55; transform:scale(.96); } 50% { opacity:1; transform:scale(1.08); } }
+    @keyframes coreSweep { 0%,58% { transform:translateX(-45%) rotate(12deg); } 82%,100% { transform:translateX(45%) rotate(12deg); } }
+    @keyframes scrollNudge { 0%,100% { transform:translateY(-1px); opacity:.45; } 50% { transform:translateY(3px); opacity:1; } }
 
     /* ── Divider ── */
     .divider {
@@ -6753,27 +7073,73 @@ async def landing_page(request):
       .hero-badge { max-width:100%; text-align:center; line-height:1.5; }
       .hero-title { font-size:clamp(36px,12vw,54px); }
       .product-preview { width:100%; }
+      .orbit-chip { display:none; }
       .preview-body { grid-template-columns:54px 1fr; min-height:350px; }
       .preview-main { padding:18px 14px; }
-      .pillar-grid, .feature-grid, .reliability { grid-template-columns:1fr; }
-      .pillar-card { min-height:0; }
+      .system-stage { display:block; margin-top:42px; }
+      .core-column { min-height:0; }
+      .core-sticky { position:relative; top:auto; height:auto; min-height:360px; }
+      .protocol-core { width:min(100%,360px); transform:none !important; }
+      .core-node { width:92px; padding:10px 7px; font-size:8px; }
+      .core-node span { font-size:18px; }
+      .system-panels { gap:14px; padding:24px 0 0; }
+      .core-feedback { bottom:-35px; }
+      .core-scroll-hint { display:none; }
+      .system-panel { min-height:0; padding:26px 22px; opacity:1; transform:none; }
+      .system-title { font-size:23px; }
+      .feature-console { margin-top:34px; }
+      .console-header { height:auto; min-height:48px; padding:10px 13px; align-items:flex-start; flex-direction:column; gap:4px; }
+      .console-status { text-align:left; white-space:normal; }
+      .console-board { height:auto; min-height:0; padding:88px 12px 14px; display:grid; grid-template-columns:1fr 1fr; gap:9px; }
+      .console-board::after { inset:8px; }
+      .console-chip { top:44px; width:104px; height:65px; }
+      .console-chip strong { font-size:20px; }
+      .console-chip small { display:none; }
+      .console-traces,.console-reticle,.console-corner { display:none; }
+      .console-node { position:relative; inset:auto !important; width:auto; min-width:0; min-height:44px; padding:8px 9px; font-size:7px; transform:none !important; }
+      .console-node span { font-size:15px; }
+      .feature-grid, .reliability { grid-template-columns:1fr; }
+      .feature-card:nth-child(1),.feature-card:nth-child(2) { grid-column:auto; }
+      .feature-card { min-height:0; }
       .reliability { padding:28px 22px; gap:28px; }
       .cta-section { padding:72px 18px; }
       .cta-inner { padding:48px 22px; }
       footer { padding:28px 20px; justify-content:center; text-align:center; }
       .footer-links { justify-content:center; width:100%; }
+      .cursor-glow { display:none; }
     }
     @media (min-width:701px) and (max-width:980px) {
       .hero { grid-template-columns:1fr; max-width:760px; }
       .product-preview { max-width:620px; width:100%; }
-      .pillar-grid { grid-template-columns:1fr; }
-      .pillar-card { min-height:0; }
+      .system-stage { grid-template-columns:minmax(300px,.9fr) minmax(330px,1.1fr); gap:24px; }
+      .core-column { min-height:1180px; }
+      .core-sticky { height:430px; }
+      .core-node { width:94px; }
       .feature-grid { grid-template-columns:repeat(2,1fr); }
+    }
+    @media (prefers-reduced-motion:reduce) {
+      html { scroll-behavior:auto; }
+      *,*::before,*::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
+      .reveal { opacity:1; transform:none; }
+      .product-preview { transform:none !important; }
+      .protocol-core { transform:none !important; }
+      .route-packet,.core-scroll-hint { display:none; }
+      .console-scan,.console-reticle { display:none; }
+      .cursor-glow { display:none; }
+      html.motion-preview { scroll-behavior:smooth; }
+      html.motion-preview .console-scan { display:block; animation-duration:3.4s !important; animation-iteration-count:infinite !important; }
+      html.motion-preview .console-traces path { animation-duration:1.45s !important; animation-iteration-count:infinite !important; transition-duration:.25s !important; }
+      html.motion-preview .console-chip { animation-duration:2.2s !important; animation-iteration-count:infinite !important; }
+      html.motion-preview .console-node.is-active { animation-duration:.85s !important; animation-iteration-count:1 !important; }
+      html.motion-preview .feature-card.is-signaled::after { animation-duration:1.15s !important; animation-iteration-count:infinite !important; }
+      html.motion-preview .console-node,html.motion-preview .console-status,html.motion-preview .feature-card { transition-duration:.24s !important; }
     }
   </style>
 </head>
 <body>
 
+<div class="scroll-progress" id="scroll-progress" aria-hidden="true"></div>
+<div class="cursor-glow" id="cursor-glow" aria-hidden="true"></div>
 <canvas id="bg-canvas"></canvas>
 
 <!-- Nav -->
@@ -6825,7 +7191,11 @@ async def landing_page(request):
   </div>
   </div>
   <div class="product-preview" aria-label="ExcelProtocol dashboard preview">
+    <div class="orbit-chip orbit-discord" aria-hidden="true"><i></i>DISCORD SYNCED</div>
+    <div class="orbit-chip orbit-twitch" aria-hidden="true"><i></i>TWITCH LIVE</div>
+    <div class="orbit-chip orbit-obs" aria-hidden="true"><i></i>OBS CONNECTED</div>
     <div class="preview-shell">
+      <div class="preview-scan" aria-hidden="true"></div>
       <div class="preview-top">
         <div class="preview-brand">ExcelProtocol <span style="color:var(--cyan)">DASHBOARD</span></div>
         <div class="preview-online">● ONLINE</div>
@@ -6846,7 +7216,7 @@ async def landing_page(request):
             <div class="preview-mini"><div class="icon">💬</div><b>Chat Commands</b><small>Custom variables</small></div>
             <div class="preview-mini"><div class="icon">🛡️</div><b>Health Check</b><small>No critical issues</small></div>
           </div>
-          <div class="preview-command"><strong>!sync @viewer</strong> → Vibe match: 94% · LEGENDARY 👑</div>
+          <div class="preview-command" id="preview-command"><strong id="command-trigger">!sync @viewer</strong><span id="command-result"> → Vibe match: 94% · LEGENDARY 👑</span></div>
         </div>
       </div>
     </div>
@@ -6861,46 +7231,84 @@ async def landing_page(request):
     <div class="section-label">Three connected systems</div>
     <h2 class="section-title">Everything around your stream,<br>finally working together</h2>
     <p class="section-sub">Build the Discord community, make Twitch chat interactive, and control what viewers see in OBS without stitching together a pile of separate bots.</p>
-    <div class="pillar-grid">
-      <div class="pillar-card">
-        <div class="pillar-number">01 · DISCORD</div>
-        <div class="pillar-icon">📡</div>
-        <div class="pillar-title">Live alerts &amp;<br>community operations</div>
-        <div class="pillar-desc">Turn a Twitch stream into an organized Discord experience—from the instant someone goes live through every role, celebration, and channel update.</div>
-        <ul class="feature-list">
-          <li>Instant EventSub alerts with per-streamer channels</li>
-          <li>Automatic live roles and Discord-to-Twitch links</li>
-          <li>Notification history, milestones, and delivery diagnostics</li>
-          <li>Reaction roles, birthdays, welcomes, and voice rooms</li>
-        </ul>
+    <div class="system-stage" id="system-stage" data-active="discord">
+      <div class="core-column">
+        <div class="core-sticky">
+          <div class="protocol-core" id="protocol-core" aria-label="Animated connection between Discord, Twitch, and OBS">
+            <div class="core-scroll-plane" aria-hidden="true">
+              <div class="core-halo"></div>
+              <div class="core-ring ring-a"></div>
+              <div class="core-ring ring-b"></div>
+              <div class="core-ring ring-c"></div>
+            </div>
+            <svg class="core-links" viewBox="0 0 500 500" aria-hidden="true">
+              <path class="core-link link-discord" d="M188 200 Q148 151 78 112"></path>
+              <path class="core-link link-twitch" d="M322 214 Q359 163 431 159"></path>
+              <path class="core-link link-obs" d="M217 323 Q196 365 170 425"></path>
+              <circle class="route-packet packet-discord" r="4"><animateMotion dur="1.45s" repeatCount="indefinite" path="M188 200 Q148 151 78 112"></animateMotion></circle>
+              <circle class="route-packet packet-twitch" r="4"><animateMotion dur="1.45s" repeatCount="indefinite" path="M322 214 Q359 163 431 159"></animateMotion></circle>
+              <circle class="route-packet packet-obs" r="4"><animateMotion dur="1.45s" repeatCount="indefinite" path="M217 323 Q196 365 170 425"></animateMotion></circle>
+            </svg>
+            <div class="core-center">
+              <img class="core-logo" src="/landing-protocol.png" alt="ExcelProtocol triangle logo">
+            </div>
+            <div class="core-node node-discord"><span>📡</span>DISCORD</div>
+            <div class="core-node node-twitch"><span>💬</span>TWITCH</div>
+            <div class="core-node node-obs"><span>🎬</span>OBS</div>
+            <div class="core-status" id="core-status">DISCORD ROUTE ACTIVE</div>
+            <div class="core-feedback" aria-hidden="true">
+              <span class="core-step" id="core-step">01</span>
+              <div class="core-track"><i class="core-track-fill"></i><i class="core-track-dot"></i><i class="core-track-dot"></i><i class="core-track-dot"></i></div>
+              <span class="core-feedback-end">/03</span>
+            </div>
+            <div class="core-scroll-hint" aria-hidden="true">SCROLL TO SWITCH ROUTE <span>↓</span></div>
+          </div>
+        </div>
       </div>
-      <div class="pillar-card purple">
-        <div class="pillar-number">02 · TWITCH</div>
-        <div class="pillar-icon">💬</div>
-        <div class="pillar-title">Chat, rewards &amp;<br>viewer interaction</div>
-        <div class="pillar-desc">Give your chat commands that feel personal and channel rewards that do something memorable—managed visually instead of through configuration files.</div>
-        <ul class="feature-list">
-          <li>Custom commands with targets, counters, choices, and randomizers</li>
-          <li>Toggleable built-in commands, uptime, shoutouts, and clips</li>
-          <li>Channel Point reward creation and trigger management</li>
-          <li>Owner-authorized OAuth with automatic token refresh</li>
-        </ul>
-      </div>
-      <div class="pillar-card">
-        <div class="pillar-number">03 · OBS</div>
-        <div class="pillar-icon">🎬</div>
-        <div class="pillar-title">Overlays, videos &amp;<br>ExcelFortuna</div>
-        <div class="pillar-desc">Let chat and rewards drive a broadcast-ready browser source with queueing, editing controls, resilient reconnects, and a complete giveaway system.</div>
-        <ul class="feature-list">
-          <li>Queued YouTube video and audio triggers</li>
-          <li>Timeline trimming, volume preview, progress, and TV framing</li>
-          <li>Restart-safe browser source reconnection</li>
-          <li>Customizable ExcelFortuna wheel, entry rules, and history</li>
-        </ul>
+      <div class="system-panels">
+        <article class="system-panel is-active" data-system="discord">
+          <div class="system-index">01 · DISCORD</div>
+          <h3 class="system-title">Alerts become community action.</h3>
+          <p class="system-desc">Live alerts land fast. Roles and channels update themselves.</p>
+          <div class="system-chips"><span>EventSub</span><span>Live roles</span><span>Diagnostics</span></div>
+        </article>
+        <article class="system-panel" data-system="twitch">
+          <div class="system-index">02 · TWITCH</div>
+          <h3 class="system-title">Chat becomes interactive.</h3>
+          <p class="system-desc">Commands and rewards feel native to your channel.</p>
+          <div class="system-chips"><span>Custom commands</span><span>Clips</span><span>Rewards</span></div>
+        </article>
+        <article class="system-panel" data-system="obs">
+          <div class="system-index">03 · OBS</div>
+          <h3 class="system-title">Rewards become show moments.</h3>
+          <p class="system-desc">Videos, audio, and ExcelFortuna stay broadcast-ready.</p>
+          <div class="system-chips"><span>Video triggers</span><span>Reconnects</span><span>ExcelFortuna</span></div>
+        </article>
       </div>
     </div>
   </div>
 </section>
+
+<div class="protocol-rail" aria-label="Connected ExcelProtocol systems">
+  <div class="rail-track">
+    <div class="rail-set">
+      <div class="rail-item"><strong>EventSub</strong> live detection</div>
+      <div class="rail-item"><strong>Discord</strong> alerts + roles</div>
+      <div class="rail-item"><strong>Twitch</strong> chat + rewards</div>
+      <div class="rail-item"><strong>OBS</strong> resilient overlays</div>
+      <div class="rail-item"><strong>Fortuna</strong> live giveaways</div>
+      <div class="rail-item"><strong>Health</strong> automatic diagnostics</div>
+    </div>
+    <div class="rail-set" aria-hidden="true">
+      <div class="rail-item"><strong>EventSub</strong> live detection</div>
+      <div class="rail-item"><strong>Discord</strong> alerts + roles</div>
+      <div class="rail-item"><strong>Twitch</strong> chat + rewards</div>
+      <div class="rail-item"><strong>OBS</strong> resilient overlays</div>
+      <div class="rail-item"><strong>Fortuna</strong> live giveaways</div>
+      <div class="rail-item"><strong>Health</strong> automatic diagnostics</div>
+    </div>
+  </div>
+</div>
 
 <div class="divider"></div>
 
@@ -6910,41 +7318,74 @@ async def landing_page(request):
     <div class="section-label">Built around the community</div>
     <h2 class="section-title">The rest of the server<br>doesn't get left behind</h2>
     <p class="section-sub">ExcelProtocol handles the everyday community work too, with focused tools instead of a maze of commands.</p>
+    <div class="feature-console" id="feature-console" data-active-feature="0">
+      <div class="console-header">
+        <span><i></i> Community systems lab</span>
+        <span class="console-status" id="console-status">Role matrix synchronized</span>
+      </div>
+      <div class="console-board" id="console-board">
+        <div class="console-scan" aria-hidden="true"></div>
+        <svg class="console-traces" viewBox="0 0 1000 310" preserveAspectRatio="none" aria-hidden="true">
+          <path class="trace-0" d="M500 155 H190 V66"></path>
+          <path class="trace-1" d="M500 155 H810 V66"></path>
+          <path class="trace-2" d="M500 155 H76 V248"></path>
+          <path class="trace-3" d="M500 155 H340 V263"></path>
+          <path class="trace-4" d="M500 155 H660 V263"></path>
+          <path class="trace-5" d="M500 155 H924 V248"></path>
+          <circle cx="500" cy="155" r="6"></circle>
+          <circle class="console-packet packet-0" r="4"><animateMotion dur="1.15s" repeatCount="indefinite" path="M500 155 H190 V66"></animateMotion></circle>
+          <circle class="console-packet packet-1" r="4"><animateMotion dur="1.15s" repeatCount="indefinite" path="M500 155 H810 V66"></animateMotion></circle>
+          <circle class="console-packet packet-2" r="4"><animateMotion dur="1.15s" repeatCount="indefinite" path="M500 155 H76 V248"></animateMotion></circle>
+          <circle class="console-packet packet-3" r="4"><animateMotion dur="1.15s" repeatCount="indefinite" path="M500 155 H340 V263"></animateMotion></circle>
+          <circle class="console-packet packet-4" r="4"><animateMotion dur="1.15s" repeatCount="indefinite" path="M500 155 H660 V263"></animateMotion></circle>
+          <circle class="console-packet packet-5" r="4"><animateMotion dur="1.15s" repeatCount="indefinite" path="M500 155 H924 V248"></animateMotion></circle>
+        </svg>
+        <div class="console-corner">LINK 06/06<br>LATENCY 08MS<br>STATUS NOMINAL</div>
+        <div class="console-chip"><span>Community</span><strong>OS</strong><small>6 modules</small></div>
+        <div class="console-node is-active" data-feature="0"><span>🎭</span> Role matrix</div>
+        <div class="console-node" data-feature="1"><span>👋</span> Member moments</div>
+        <div class="console-node" data-feature="2"><span>🛡️</span> Safety shield</div>
+        <div class="console-node" data-feature="3"><span>🔊</span> Voice fabric</div>
+        <div class="console-node" data-feature="4"><span>📊</span> Insight feed</div>
+        <div class="console-node" data-feature="5"><span>⚙️</span> Control surface</div>
+        <div class="console-reticle" id="console-reticle" aria-hidden="true"></div>
+      </div>
+    </div>
     <div class="feature-grid">
-      <div class="feature-card">
+      <div class="feature-card" data-feature="0">
         <div class="feature-icon">🎭</div>
         <div class="feature-title">Roles that stay organized</div>
-        <div class="feature-desc">Build reaction-role panels, link Discord members to Twitch alerts, and manage live roles without manual cleanup.</div>
+        <div class="feature-desc">Self-serve roles, live-role links, and clean member mapping.</div>
         <span class="feature-tag">Reaction + live roles</span>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-feature="1">
         <div class="feature-icon">👋</div>
         <div class="feature-title">Personal community moments</div>
-        <div class="feature-desc">Color-matched welcome and goodbye banners, birthday announcements with optional years, and polished previews before saving.</div>
+        <div class="feature-desc">Matched banners and birthday moments with safe previews.</div>
         <span class="feature-tag">Welcome + birthdays</span>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-feature="2">
         <div class="feature-icon">🛡️</div>
         <div class="feature-title">Safety without busywork</div>
-        <div class="feature-desc">Screen suspicious new accounts, preserve pinned messages during cleanup, and diagnose missing channel permissions from the dashboard.</div>
+        <div class="feature-desc">Spot risky joins, protect pins, and diagnose permissions.</div>
         <span class="feature-tag">Safety + cleanup</span>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-feature="3">
         <div class="feature-icon">🔊</div>
         <div class="feature-title">Dynamic voice rooms</div>
-        <div class="feature-desc">Members create temporary voice rooms by joining a trigger channel, then rename, lock, limit, and manage their own space.</div>
+        <div class="feature-desc">Temporary rooms members can create and control.</div>
         <span class="feature-tag">Join to create</span>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-feature="4">
         <div class="feature-icon">📊</div>
         <div class="feature-title">Useful history &amp; insights</div>
-        <div class="feature-desc">Track stream frequency, hours, longest sessions, delivery history, server counts, and milestones without external spreadsheets.</div>
+        <div class="feature-desc">Stream history, milestones, delivery data, and leaderboards.</div>
         <span class="feature-tag">Stats + leaderboards</span>
       </div>
-      <div class="feature-card">
+      <div class="feature-card" data-feature="5">
         <div class="feature-icon">⚙️</div>
         <div class="feature-title">A dashboard people can use</div>
-        <div class="feature-desc">Search large server lists, filter streamer links, preview changes, submit suggestions, and see configuration issues in one place.</div>
+        <div class="feature-desc">Search, filter, preview, and configure without command hunting.</div>
         <span class="feature-tag">Visual management</span>
       </div>
     </div>
@@ -7054,43 +7495,291 @@ async def landing_page(request):
 </footer>
 
 <script>
-  // Animated particle canvas
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches && !document.documentElement.classList.contains('motion-preview');
+
+  // Responsive protocol-network canvas. Particle count and DPR are capped so
+  // the visual stays light enough for mobile and background tabs.
   const canvas = document.getElementById('bg-canvas');
   const ctx = canvas.getContext('2d');
-  let W, H, particles = [];
+  let W, H, DPR = 1, particles = [], animationFrame = 0;
+  const pointer = { x:-1000, y:-1000 };
 
   function resize() {
-    W = canvas.width  = window.innerWidth;
-    H = canvas.height = window.innerHeight;
-  }
-  resize();
-  window.addEventListener('resize', resize);
-
-  for (let i = 0; i < 60; i++) {
-    particles.push({
-      x: Math.random() * window.innerWidth,
-      y: Math.random() * window.innerHeight,
-      r: Math.random() * 1.5 + 0.3,
-      dx: (Math.random() - 0.5) * 0.3,
-      dy: (Math.random() - 0.5) * 0.3,
-      o: Math.random() * 0.4 + 0.1
-    });
+    W = window.innerWidth;
+    H = window.innerHeight;
+    DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    seedParticles();
   }
 
-  function draw() {
+  function seedParticles() {
+    const count = reducedMotion ? 24 : (W < 720 ? 30 : 58);
+    particles = Array.from({ length:count }, () => ({
+      x:Math.random() * W, y:Math.random() * H,
+      r:Math.random() * 1.35 + .35,
+      dx:(Math.random() - .5) * .22,
+      dy:(Math.random() - .5) * .22,
+      o:Math.random() * .32 + .1
+    }));
+  }
+
+  function drawNetwork() {
     ctx.clearRect(0, 0, W, H);
-    particles.forEach(p => {
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
       ctx.fillStyle = `rgba(0,245,212,${p.o})`;
       ctx.fill();
-      p.x += p.dx; p.y += p.dy;
-      if (p.x < 0 || p.x > W) p.dx *= -1;
-      if (p.y < 0 || p.y > H) p.dy *= -1;
-    });
-    requestAnimationFrame(draw);
+
+      for (let j = i + 1; j < particles.length; j++) {
+        const q = particles[j];
+        const dx = p.x - q.x, dy = p.y - q.y;
+        const distanceSq = dx * dx + dy * dy;
+        if (distanceSq < 10500) {
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y);
+          ctx.strokeStyle = `rgba(0,196,170,${.055 * (1 - distanceSq / 10500)})`;
+          ctx.stroke();
+        }
+      }
+
+      const pdx = p.x - pointer.x, pdy = p.y - pointer.y;
+      const pointerDistance = pdx * pdx + pdy * pdy;
+      if (!reducedMotion && pointerDistance < 18000) {
+        ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(pointer.x, pointer.y);
+        ctx.strokeStyle = `rgba(167,139,250,${.12 * (1 - pointerDistance / 18000)})`;
+        ctx.stroke();
+      }
+
+      if (!reducedMotion) {
+        p.x += p.dx; p.y += p.dy;
+        if (p.x < -5 || p.x > W + 5) p.dx *= -1;
+        if (p.y < -5 || p.y > H + 5) p.dy *= -1;
+      }
+    }
   }
-  draw();
+
+  function animateNetwork() {
+    drawNetwork();
+    if (!reducedMotion && !document.hidden) animationFrame = requestAnimationFrame(animateNetwork);
+  }
+
+  resize();
+  animateNetwork();
+  window.addEventListener('resize', () => { resize(); if (reducedMotion) drawNetwork(); }, { passive:true });
+  window.addEventListener('pointermove', event => { pointer.x = event.clientX; pointer.y = event.clientY; }, { passive:true });
+  document.addEventListener('visibilitychange', () => {
+    cancelAnimationFrame(animationFrame);
+    if (!document.hidden) animateNetwork();
+  });
+
+  // Scroll progress, compact nav, and soft cursor lighting.
+  const progress = document.getElementById('scroll-progress');
+  const nav = document.querySelector('nav');
+  const systemStage = document.getElementById('system-stage');
+  const protocolCore = document.getElementById('protocol-core');
+  const coreStatus = document.getElementById('core-status');
+  const coreStep = document.getElementById('core-step');
+  const systemPanels = [...document.querySelectorAll('.system-panel')];
+  const systemNames = { discord:'DISCORD ROUTE ACTIVE', twitch:'TWITCH ROUTE ACTIVE', obs:'OBS ROUTE ACTIVE' };
+
+  const updateProtocolCore = () => {
+    if (!systemStage || !systemPanels.length) return;
+    const viewportCenter = window.innerHeight * .5;
+    let activePanel = systemPanels[0];
+    let closestDistance = Infinity;
+    systemPanels.forEach(panel => {
+      const box = panel.getBoundingClientRect();
+      const distance = Math.abs(box.top + box.height * .5 - viewportCenter);
+      if (distance < closestDistance) { closestDistance = distance; activePanel = panel; }
+    });
+    const activeSystem = activePanel.dataset.system;
+    const activeIndex = systemPanels.indexOf(activePanel);
+    systemStage.dataset.active = activeSystem;
+    systemPanels.forEach(panel => panel.classList.toggle('is-active', panel === activePanel));
+    if (coreStatus) coreStatus.textContent = systemNames[activeSystem];
+    if (coreStep) coreStep.textContent = String(activeIndex + 1).padStart(2, '0');
+
+    const firstBox = systemPanels[0].getBoundingClientRect();
+    const lastBox = systemPanels[systemPanels.length - 1].getBoundingClientRect();
+    const firstCenter = window.scrollY + firstBox.top + firstBox.height * .5;
+    const lastCenter = window.scrollY + lastBox.top + lastBox.height * .5;
+    const readingPoint = window.scrollY + viewportCenter;
+    const routeProgress = Math.max(0, Math.min(1, (readingPoint - firstCenter) / Math.max(1, lastCenter - firstCenter)));
+    protocolCore?.style.setProperty('--core-roll', `${(routeProgress - .5) * 14}deg`);
+    protocolCore?.style.setProperty('--core-spin', `${routeProgress * 155}deg`);
+    protocolCore?.style.setProperty('--route-progress', `${routeProgress * 100}%`);
+  };
+  const updateScroll = () => {
+    const available = document.documentElement.scrollHeight - window.innerHeight;
+    progress.style.width = (available > 0 ? window.scrollY / available * 100 : 0) + '%';
+    nav.classList.toggle('scrolled', window.scrollY > 24);
+    updateProtocolCore();
+  };
+  updateScroll();
+  window.addEventListener('scroll', updateScroll, { passive:true });
+
+  const cursorGlow = document.getElementById('cursor-glow');
+  if (!reducedMotion && window.matchMedia('(pointer:fine)').matches) {
+    window.addEventListener('pointermove', event => {
+      cursorGlow.style.transform = `translate3d(${event.clientX - 240}px,${event.clientY - 240}px,0)`;
+    }, { passive:true });
+  }
+
+  // Depth follows the pointer over the dashboard mock-up only.
+  const preview = document.querySelector('.product-preview');
+  if (!reducedMotion && window.matchMedia('(hover:hover)').matches) {
+    preview.addEventListener('pointermove', event => {
+      const box = preview.getBoundingClientRect();
+      const x = (event.clientX - box.left) / box.width - .5;
+      const y = (event.clientY - box.top) / box.height - .5;
+      preview.style.setProperty('--ry', `${x * 7}deg`);
+      preview.style.setProperty('--rx', `${y * -6}deg`);
+    });
+    preview.addEventListener('pointerleave', () => {
+      preview.style.setProperty('--ry', '0deg');
+      preview.style.setProperty('--rx', '0deg');
+    });
+
+    systemStage?.addEventListener('pointermove', event => {
+      const box = protocolCore.getBoundingClientRect();
+      const x = Math.max(-.5, Math.min(.5, (event.clientX - box.left) / box.width - .5));
+      const y = Math.max(-.5, Math.min(.5, (event.clientY - box.top) / box.height - .5));
+      systemStage.style.setProperty('--core-ry', `${x * 14}deg`);
+      systemStage.style.setProperty('--core-rx', `${y * -12}deg`);
+      systemStage.style.setProperty('--core-shift-x', `${x * 14}px`);
+      systemStage.style.setProperty('--core-shift-y', `${y * 10}px`);
+    });
+    systemStage?.addEventListener('pointerleave', () => {
+      systemStage.style.setProperty('--core-ry', '0deg');
+      systemStage.style.setProperty('--core-rx', '0deg');
+      systemStage.style.setProperty('--core-shift-x', '0px');
+      systemStage.style.setProperty('--core-shift-y', '0px');
+    });
+  }
+
+  // Rotate through real product interactions inside the mock dashboard.
+  const commandExamples = [
+    ['!sync @viewer', ' → Vibe match: 94% · LEGENDARY 👑'],
+    ['!clip', ' → Clip created · last 45 seconds 🎬'],
+    ['Channel reward', ' → OBS video queued · source connected'],
+    ['!giveaway', ' → ExcelFortuna ready · entries open 🎁']
+  ];
+  const commandBox = document.getElementById('preview-command');
+  const commandTrigger = document.getElementById('command-trigger');
+  const commandResult = document.getElementById('command-result');
+  let commandIndex = 0;
+  if (!reducedMotion) setInterval(() => {
+    commandBox.classList.add('switching');
+    setTimeout(() => {
+      commandIndex = (commandIndex + 1) % commandExamples.length;
+      commandTrigger.textContent = commandExamples[commandIndex][0];
+      commandResult.textContent = commandExamples[commandIndex][1];
+      commandBox.classList.remove('switching');
+    }, 210);
+  }, 3200);
+
+  // Reveal content once as it enters the viewport.
+  const revealTargets = document.querySelectorAll('.section-label,.section-title,.section-sub,.feature-console,.feature-card,.signal,.step,.cta-inner');
+  revealTargets.forEach((element, index) => {
+    element.classList.add('reveal');
+    if (element.matches('.feature-card,.signal')) element.classList.add(`reveal-delay-${index % 3 + 1}`);
+  });
+  if ('IntersectionObserver' in window && !reducedMotion) {
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('is-visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold:.12, rootMargin:'0px 0px -45px' });
+    revealTargets.forEach(element => observer.observe(element));
+  } else {
+    revealTargets.forEach(element => element.classList.add('is-visible'));
+  }
+
+  // Community systems lab: cycle through modules, then let the pointer act as
+  // a scanner that locks onto the nearest node and its matching card.
+  const featureConsole = document.getElementById('feature-console');
+  const consoleBoard = document.getElementById('console-board');
+  const consoleStatus = document.getElementById('console-status');
+  const consoleReticle = document.getElementById('console-reticle');
+  const featureNodes = Array.from(document.querySelectorAll('.console-node'));
+  const featureCards = Array.from(document.querySelectorAll('.feature-card'));
+  const featureStatuses = [
+    'Role matrix synchronized',
+    'Community moments armed',
+    'Safety shield monitoring',
+    'Voice rooms standing by',
+    'Stream data indexed',
+    'Control surface online'
+  ];
+  let activeFeature = 0;
+  let consoleManualUntil = 0;
+
+  function setFeatureSignal(index) {
+    activeFeature = Number(index) || 0;
+    featureConsole.dataset.activeFeature = String(activeFeature);
+    featureNodes.forEach((node, nodeIndex) => node.classList.toggle('is-active', nodeIndex === activeFeature));
+    featureCards.forEach((card, cardIndex) => card.classList.toggle('is-signaled', cardIndex === activeFeature));
+    consoleStatus.style.opacity = '0';
+    window.setTimeout(() => {
+      consoleStatus.textContent = featureStatuses[activeFeature];
+      consoleStatus.style.opacity = '1';
+    }, reducedMotion ? 0 : 110);
+  }
+
+  setFeatureSignal(0);
+  if (!reducedMotion) {
+    window.setInterval(() => {
+      if (Date.now() >= consoleManualUntil) setFeatureSignal((activeFeature + 1) % featureNodes.length);
+    }, 1650);
+  }
+
+  if (!reducedMotion && window.matchMedia('(pointer:fine)').matches) {
+    consoleBoard.addEventListener('pointermove', event => {
+      consoleManualUntil = Date.now() + 900;
+      const boardBox = consoleBoard.getBoundingClientRect();
+      const x = event.clientX - boardBox.left;
+      const y = event.clientY - boardBox.top;
+      consoleReticle.style.transform = `translate3d(${x - 27}px,${y - 27}px,0)`;
+
+      let nearestIndex = activeFeature;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      featureNodes.forEach((node, index) => {
+        const nodeBox = node.getBoundingClientRect();
+        const dx = event.clientX - (nodeBox.left + nodeBox.width / 2);
+        const dy = event.clientY - (nodeBox.top + nodeBox.height / 2);
+        const distance = dx * dx + dy * dy;
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestIndex = index;
+        }
+      });
+      if (nearestIndex !== activeFeature) setFeatureSignal(nearestIndex);
+    });
+    consoleBoard.addEventListener('pointerleave', () => {
+      consoleManualUntil = 0;
+      consoleReticle.style.transform = 'translate3d(-100px,-100px,0)';
+    });
+  }
+
+  // Pointer-positioned light on feature cards.
+  if (!reducedMotion && window.matchMedia('(pointer:fine)').matches) {
+    document.querySelectorAll('.feature-card').forEach(card => {
+      card.addEventListener('pointermove', event => {
+        const box = card.getBoundingClientRect();
+        card.style.setProperty('--mx', event.clientX - box.left + 'px');
+        card.style.setProperty('--my', event.clientY - box.top + 'px');
+      });
+    });
+  }
 </script>
 </body>
 </html>"""
@@ -7346,6 +8035,7 @@ def create_dashboard_app(bot=None):
     app = web.Application(middlewares=[error_logging_middleware, auth_middleware, admin_audit_middleware])
 
     app.router.add_get("/health",            health)
+    app.router.add_get("/landing-protocol.png", landing_protocol_logo)
     app.router.add_get("/companion/version",             handle_companion_version)
     app.router.add_get("/companion/guild/{guild_id}",    handle_companion_guild_info)
     app.router.add_get("/",                   landing_page)
