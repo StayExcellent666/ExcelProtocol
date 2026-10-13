@@ -54,7 +54,7 @@ class TestSchema:
         }
         conn.close()
         assert cols["chat_sound_enabled"] == "0"
-        assert cols["chat_sound_name"] == "'soft_chime'"
+        assert cols["chat_sound_name"] == "'bubble_pop'"
         assert cols["chat_sound_volume"] == "35"
 
     def test_twitch_command_user_usage_schema_and_counter(self, db):
@@ -180,22 +180,34 @@ class TestSchema:
         db.set_twitch_channel(123, "Streamer")
         assert db.get_chat_sound_settings(123) == {
             "chat_sound_enabled": False,
-            "chat_sound_name": "soft_chime",
+            "chat_sound_name": "bubble_pop",
             "chat_sound_volume": 35,
         }
         assert db.get_chat_sound_targets("streamer") == []
 
-        db.set_chat_sound_settings(123, True, "digital_blip", 62)
+        db.set_chat_sound_settings(123, True, "glass_drop", 62)
         assert db.get_chat_sound_settings(123) == {
             "chat_sound_enabled": True,
-            "chat_sound_name": "digital_blip",
+            "chat_sound_name": "glass_drop",
             "chat_sound_volume": 62,
         }
         assert db.get_chat_sound_targets("#STREAMER") == [{
             "guild_id": 123,
-            "sound_name": "digital_blip",
+            "sound_name": "glass_drop",
             "volume": 62,
         }]
+
+    def test_legacy_chat_sounds_migrate_to_bubble_pop(self, db):
+        db.set_twitch_channel(123, "streamer")
+        conn = db.get_connection()
+        conn.execute(
+            "UPDATE twitch_channels SET chat_sound_name = 'soft_chime' WHERE guild_id = 123"
+        )
+        conn.commit()
+        conn.close()
+
+        db.init_database()
+        assert db.get_chat_sound_settings(123)["chat_sound_name"] == "bubble_pop"
 
     def test_bot_status_rotation_round_trip(self, db):
         assert db.get_bot_statuses() == []

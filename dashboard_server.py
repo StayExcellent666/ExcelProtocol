@@ -70,7 +70,7 @@ TWITCH_API            = "https://api.twitch.tv/helix"
 
 # WebSocket connections for overlays: {guild_id: set of ws}
 _overlay_connections: dict = {}
-CHAT_NOTIFICATION_SOUNDS = {"soft_chime", "digital_blip", "gentle_pop"}
+CHAT_NOTIFICATION_SOUNDS = {"bubble_pop", "glass_drop", "calm_pulse", "pixel_spark"}
 CHAT_NOTIFICATION_THROTTLE_SECONDS = 5.0
 _chat_sound_last_attempt: dict[str, float] = {}
 
@@ -3157,7 +3157,7 @@ let chatAudioContext = null;
 let lastChatSoundAt = 0;
 
 
-function playChatNotification(sound, volume) {{
+async function playChatNotification(sound, volume) {{
   const nowMs = Date.now();
   if (nowMs - lastChatSoundAt < 5000) return;
   lastChatSoundAt = nowMs;
@@ -3167,34 +3167,51 @@ function playChatNotification(sound, volume) {{
   if (!AudioContextClass) return;
   chatAudioContext = chatAudioContext || new AudioContextClass();
   const ctx = chatAudioContext;
-  if (ctx.state === "suspended") ctx.resume().catch(() => {{}});
-  const baseTime = ctx.currentTime + 0.015;
+  if (ctx.state === "suspended") {{
+    try {{ await ctx.resume(); }} catch {{ return; }}
+  }}
+  // Scheduling slightly ahead plus a true zero-volume attack/release keeps
+  // OBS/Chromium from entering an oscillator mid-waveform with an audible click.
+  const baseTime = ctx.currentTime + 0.04;
 
-  function tone(frequency, start, duration, type, endFrequency, gainScale) {{
+  function tone(frequency, start, duration, type, endFrequency, gainScale, attack = 0.018) {{
     const oscillator = ctx.createOscillator();
     const gain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
     const begins = baseTime + start;
     const ends = begins + duration;
     oscillator.type = type || "sine";
     oscillator.frequency.setValueAtTime(frequency, begins);
     if (endFrequency) oscillator.frequency.exponentialRampToValueAtTime(endFrequency, ends);
-    gain.gain.setValueAtTime(0.0001, begins);
-    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, level * 0.18 * (gainScale || 1)), begins + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, ends);
-    oscillator.connect(gain).connect(ctx.destination);
+    const peak = level * 0.14 * (gainScale || 1);
+    const release = Math.min(0.055, duration * 0.35);
+    gain.gain.setValueAtTime(0, begins);
+    gain.gain.linearRampToValueAtTime(peak, begins + Math.min(attack, duration * 0.3));
+    gain.gain.setValueAtTime(peak, Math.max(begins + attack, ends - release));
+    gain.gain.linearRampToValueAtTime(0, ends);
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(2800, begins);
+    filter.Q.setValueAtTime(0.35, begins);
+    oscillator.connect(filter).connect(gain).connect(ctx.destination);
     oscillator.start(begins);
-    oscillator.stop(ends + 0.02);
+    oscillator.stop(ends + 0.04);
   }}
 
-  if (sound === "digital_blip") {{
-    tone(740, 0, 0.08, "square", 980, 0.55);
-    tone(980, 0.09, 0.09, "square", 1280, 0.4);
-  }} else if (sound === "gentle_pop") {{
-    tone(420, 0, 0.16, "sine", 220, 0.9);
-    tone(840, 0.015, 0.08, "sine", 520, 0.3);
+  if (sound === "glass_drop") {{
+    tone(880, 0, 0.42, "sine", 740, 0.55, 0.02);
+    tone(1320, 0.035, 0.52, "sine", 1100, 0.22, 0.025);
+  }} else if (sound === "calm_pulse") {{
+    tone(392, 0, 0.28, "sine", 440, 0.5, 0.025);
+    tone(523.25, 0.18, 0.36, "sine", 587.33, 0.38, 0.025);
+  }} else if (sound === "pixel_spark") {{
+    tone(520, 0, 0.12, "triangle", 740, 0.32, 0.018);
+    tone(740, 0.1, 0.14, "triangle", 1040, 0.28, 0.018);
+    tone(1040, 0.21, 0.2, "sine", 1320, 0.22, 0.02);
   }} else {{
-    tone(660, 0, 0.28, "sine", 880, 0.75);
-    tone(990, 0.1, 0.34, "sine", 1320, 0.55);
+    // Soft Bubble Pop (default): a rounded downward pitch sweep with a quiet
+    // upper harmonic. Sine waves and the tapered envelope avoid sharp edges.
+    tone(620, 0, 0.24, "sine", 180, 0.82, 0.012);
+    tone(980, 0.012, 0.14, "sine", 330, 0.2, 0.01);
   }}
 }}
 

@@ -2627,39 +2627,52 @@ function customCommandPreview(template, commandName, args) {
 }
 
 let chatSoundPreviewContext = null;
-function playChatSoundPreview(sound, volume) {
+async function playChatSoundPreview(sound, volume) {
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextClass) return;
   chatSoundPreviewContext = chatSoundPreviewContext || new AudioContextClass();
   const ctx = chatSoundPreviewContext;
-  if (ctx.state === "suspended") ctx.resume();
+  if (ctx.state === "suspended") {
+    try { await ctx.resume(); } catch { return; }
+  }
   const level = Math.min(1, Math.max(0, Number(volume || 0) / 100));
   if (!level) return;
-  const baseTime = ctx.currentTime + 0.015;
-  const tone = (frequency, start, duration, type="sine", endFrequency=null, gainScale=1) => {
+  const baseTime = ctx.currentTime + 0.04;
+  const tone = (frequency, start, duration, type="sine", endFrequency=null, gainScale=1, attack=0.018) => {
     const oscillator = ctx.createOscillator();
     const gain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
     const begins = baseTime + start;
     const ends = begins + duration;
     oscillator.type = type;
     oscillator.frequency.setValueAtTime(frequency, begins);
     if (endFrequency) oscillator.frequency.exponentialRampToValueAtTime(endFrequency, ends);
-    gain.gain.setValueAtTime(0.0001, begins);
-    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, level * 0.18 * gainScale), begins + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, ends);
-    oscillator.connect(gain).connect(ctx.destination);
+    const peak = level * 0.14 * gainScale;
+    const release = Math.min(0.055, duration * 0.35);
+    gain.gain.setValueAtTime(0, begins);
+    gain.gain.linearRampToValueAtTime(peak, begins + Math.min(attack, duration * 0.3));
+    gain.gain.setValueAtTime(peak, Math.max(begins + attack, ends - release));
+    gain.gain.linearRampToValueAtTime(0, ends);
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(2800, begins);
+    filter.Q.setValueAtTime(0.35, begins);
+    oscillator.connect(filter).connect(gain).connect(ctx.destination);
     oscillator.start(begins);
-    oscillator.stop(ends + 0.02);
+    oscillator.stop(ends + 0.04);
   };
-  if (sound === "digital_blip") {
-    tone(740, 0, 0.08, "square", 980, 0.55);
-    tone(980, 0.09, 0.09, "square", 1280, 0.4);
-  } else if (sound === "gentle_pop") {
-    tone(420, 0, 0.16, "sine", 220, 0.9);
-    tone(840, 0.015, 0.08, "sine", 520, 0.3);
+  if (sound === "glass_drop") {
+    tone(880, 0, 0.42, "sine", 740, 0.55, 0.02);
+    tone(1320, 0.035, 0.52, "sine", 1100, 0.22, 0.025);
+  } else if (sound === "calm_pulse") {
+    tone(392, 0, 0.28, "sine", 440, 0.5, 0.025);
+    tone(523.25, 0.18, 0.36, "sine", 587.33, 0.38, 0.025);
+  } else if (sound === "pixel_spark") {
+    tone(520, 0, 0.12, "triangle", 740, 0.32, 0.018);
+    tone(740, 0.1, 0.14, "triangle", 1040, 0.28, 0.018);
+    tone(1040, 0.21, 0.2, "sine", 1320, 0.22, 0.02);
   } else {
-    tone(660, 0, 0.28, "sine", 880, 0.75);
-    tone(990, 0.1, 0.34, "sine", 1320, 0.55);
+    tone(620, 0, 0.24, "sine", 180, 0.82, 0.012);
+    tone(980, 0.012, 0.14, "sine", 330, 0.2, 0.01);
   }
 }
 
@@ -2677,7 +2690,7 @@ function TwitchTab({ guildId, isDev }) {
   const [savingClip, setSavingClip] = useState(false);
   const [savingBuiltin, setSavingBuiltin] = useState(null);
   const [clipForm, setClipForm] = useState({ enabled:false, duration:45, cooldown:60 });
-  const [chatSound, setChatSound] = useState({ enabled:false, sound:"soft_chime", volume:35 });
+  const [chatSound, setChatSound] = useState({ enabled:false, sound:"bubble_pop", volume:35 });
   const [savingChatSound, setSavingChatSound] = useState(false);
   const [chatSoundSaved, setChatSoundSaved] = useState(false);
   const [testingChatSound, setTestingChatSound] = useState(false);
@@ -2708,7 +2721,7 @@ function TwitchTab({ guildId, isDev }) {
       });
       setChatSound({
         enabled: !!data.chat_sound_enabled,
-        sound: data.chat_sound_name || "soft_chime",
+        sound: data.chat_sound_name || "bubble_pop",
         volume: data.chat_sound_volume ?? 35,
       });
     } catch(e) { console.error(e); }
@@ -3029,9 +3042,10 @@ function TwitchTab({ guildId, isDev }) {
         <div style={{ display:"flex", alignItems:"flex-end", gap:12, flexWrap:"wrap", marginTop:14 }}>
           <Field label="Sound">
             <CyanSelect value={chatSound.sound} onChange={e=>setChatSound(current=>({...current, sound:e.target.value}))}>
-              <option value="soft_chime">Soft Chime</option>
-              <option value="digital_blip">Digital Blip</option>
-              <option value="gentle_pop">Gentle Pop</option>
+              <option value="bubble_pop">Soft Bubble Pop</option>
+              <option value="glass_drop">Glass Drop</option>
+              <option value="calm_pulse">Calm Pulse</option>
+              <option value="pixel_spark">Pixel Spark</option>
             </CyanSelect>
           </Field>
           <Field label={`Volume · ${chatSound.volume}%`}>
