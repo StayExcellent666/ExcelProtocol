@@ -2562,6 +2562,7 @@ const CUSTOM_COMMAND_VARIABLES = [
   { token:"$target", label:"@Target", help:"First name after the command, including @; falls back to the viewer" },
   { token:"$targetname", label:"Target name", help:"First name after the command without @" },
   { token:"$args", label:"All text", help:"Everything written after the command" },
+  { token:"$rest", label:"Text after target", help:"Everything after the first target name; useful for actions and messages" },
   { token:"$channel", label:"Channel", help:"The broadcaster's Twitch channel" },
   { token:"$command", label:"Command", help:"The command that was used" },
   { token:"$count", label:"Total uses", help:"Total times this command has been used" },
@@ -2570,12 +2571,38 @@ const CUSTOM_COMMAND_VARIABLES = [
   { token:"$choice(yes|no|maybe)", label:"Random choice", help:"Randomly chooses one | separated option" },
 ];
 
+function stylizeTwitchText(value, style) {
+  const ranges={
+    bold:[0x1D5D4,0x1D5EE,0x1D7EC],
+    italic:[0x1D608,0x1D622,null],
+    boldItalic:[0x1D63C,0x1D656,0x1D7EC],
+  };
+  const [upperStart,lowerStart,digitStart]=ranges[style];
+  return Array.from(String(value||"")).map(char=>{
+    const code=char.codePointAt(0);
+    if(code>=65&&code<=90) return String.fromCodePoint(upperStart+code-65);
+    if(code>=97&&code<=122) return String.fromCodePoint(lowerStart+code-97);
+    if(digitStart!==null&&code>=48&&code<=57) return String.fromCodePoint(digitStart+code-48);
+    return char;
+  }).join("");
+}
+
+function renderTwitchTextStyles(value) {
+  const escaped="\uE000";
+  return String(value||"").replace(/\\\*/g,escaped)
+    .replace(/\*\*\*([^*\r\n]+?)\*\*\*/g,(_,text)=>stylizeTwitchText(text,"boldItalic"))
+    .replace(/\*\*([^*\r\n]+?)\*\*/g,(_,text)=>stylizeTwitchText(text,"bold"))
+    .replace(/\*([^*\r\n]+?)\*/g,(_,text)=>stylizeTwitchText(text,"italic"))
+    .replaceAll(escaped,"*");
+}
+
 function customCommandPreview(template, commandName, args) {
   const username="sampleuser";
   const displayName="SampleUser";
   const rawArgs=String(args||"").trim();
   const targetMatch=rawArgs.match(/^@?([A-Za-z0-9_]{1,25})(?:\s|$)/);
   const targetName=targetMatch?.[1]||username;
+  const remainingArgs=targetMatch?rawArgs.slice(targetMatch[0].length).trim():rawArgs;
   let rendered=String(template||"");
   rendered=rendered.replace(/\$random\(\s*(-?\d{1,7})\s*,\s*(-?\d{1,7})\s*\)/gi,(_,a,b)=>{
     let low=Math.max(-1000000,Math.min(1000000,Number(a)));
@@ -2592,10 +2619,11 @@ function customCommandPreview(template, commandName, args) {
   const variables=[
     ["$displayname",displayName],["$targetname",targetName],["$usercount","3"],
     ["$command",commandName||"!command"],["$channel","streamer"],
-    ["$target",`@${targetName}`],["$count","42"],["$args",rawArgs],["$user",username],
+    ["$target",`@${targetName}`],["$count","42"],["$rest",remainingArgs],["$args",rawArgs],["$user",username],
   ];
   variables.forEach(([variable,value])=>{rendered=rendered.split(variable).join(value);});
-  return rendered.replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim().slice(0,500);
+  rendered=renderTwitchTextStyles(rendered);
+  return Array.from(rendered.replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim()).slice(0,500).join("");
 }
 
 function TwitchTab({ guildId, isDev }) {
@@ -2723,6 +2751,22 @@ function TwitchTab({ guildId, isDev }) {
       const caret=Math.min(500,start+token.length);
       input.focus();
       input.setSelectionRange(caret,caret);
+    });
+  };
+
+  const wrapResponseSelection = (marker, fallbackText) => {
+    const input=responseRef.current;
+    const start=input?.selectionStart??form.response.length;
+    const end=input?.selectionEnd??start;
+    const selected=form.response.slice(start,end)||fallbackText;
+    const insertion=marker+selected+marker;
+    const next=form.response.slice(0,start)+insertion+form.response.slice(end);
+    setForm(current=>({...current,response:next.slice(0,500)}));
+    requestAnimationFrame(()=>{
+      if(!input) return;
+      input.focus();
+      const selectionStart=start+marker.length;
+      input.setSelectionRange(selectionStart,selectionStart+selected.length);
     });
   };
 
@@ -2931,6 +2975,17 @@ function TwitchTab({ guildId, isDev }) {
               onFocus={e=>e.target.style.borderColor="var(--cyan)"} onBlur={e=>e.target.style.borderColor="var(--border)"} />
             <div style={{fontSize:9,color:"var(--text3)",textAlign:"right",marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{form.response.length}/500</div>
           </Field>
+
+          <div>
+            <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace",marginBottom:7}}>TEXT STYLE</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              <button type="button" onClick={()=>wrapResponseSelection("**","bold text")} title="Displays as bold Unicode text in Twitch chat"
+                style={{padding:"5px 9px",borderRadius:6,border:"1px solid rgba(0,245,212,.3)",background:"rgba(0,245,212,.06)",color:"var(--cyan)",fontSize:10,fontFamily:"'JetBrains Mono',monospace",fontWeight:800,cursor:"pointer"}}>**Bold**</button>
+              <button type="button" onClick={()=>wrapResponseSelection("*","italic text")} title="Displays as italic/cursive Unicode text in Twitch chat"
+                style={{padding:"5px 9px",borderRadius:6,border:"1px solid rgba(0,245,212,.3)",background:"rgba(0,245,212,.06)",color:"var(--cyan)",fontSize:10,fontFamily:"'JetBrains Mono',monospace",fontStyle:"italic",cursor:"pointer"}}>*Italic*</button>
+            </div>
+            <div style={{fontSize:10,color:"var(--text3)",marginTop:7}}>Wrap variables too: <code>**$user**</code>. Use <code>\*</code> for a literal asterisk.</div>
+          </div>
 
           <div>
             <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace",marginBottom:7}}>CLICK TO INSERT A VARIABLE</div>
