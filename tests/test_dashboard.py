@@ -8,6 +8,7 @@ Covers:
 import hmac as _hmac
 import hashlib as _hashlib
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -406,6 +407,8 @@ class TestDevDashboardRoutes:
         assert ("GET", "/api/dev/server-info/{guild_id}") in routes
         assert ("PATCH", "/api/dev/server-info/{guild_id}/permission-dm") in routes
         assert ("POST", "/api/guild/{guild_id}/twitch/overlay-appearance") in routes
+        assert ("POST", "/api/guild/{guild_id}/twitch/chat-sound") in routes
+        assert ("POST", "/api/guild/{guild_id}/twitch/chat-sound-test") in routes
         assert ("GET", "/api/dev/admins") in routes
         assert ("POST", "/api/dev/admins") in routes
         assert ("DELETE", "/api/dev/admins/{user_id}") in routes
@@ -1015,6 +1018,27 @@ class TestDevDashboardRoutes:
         assert 'msg.type === "set_appearance"' in source
         assert 'classList.toggle("tv-frame"' in source
 
+    def test_reward_videos_preempt_and_then_resume_command_videos(self):
+        import inspect
+        source = inspect.getsource(dashboard_server.overlay_page)
+        push_source = inspect.getsource(dashboard_server.push_play_to_overlay)
+        webhook_source = inspect.getsource(dashboard_server.eventsub_callback)
+
+        assert '"source": "command"' in push_source
+        assert '"source": "reward"' in webhook_source
+        assert "const priorityQueue = [];" in source
+        assert "function preemptCommandForReward()" in source
+        assert "queue.unshift({{ ...currentItem, start_seconds: resumeAt }});" in source
+        assert "priorityQueue.length ? priorityQueue.shift() : queue.shift()" in source
+
+    def test_overlay_chat_sound_is_independent_of_video_queue(self):
+        import inspect
+        source = inspect.getsource(dashboard_server.overlay_page)
+        assert 'msg.type === "chat_notification"' in source
+        assert "playChatNotification(msg.sound, msg.volume);" in source
+        assert 'sound === "digital_blip"' in source
+        assert 'sound === "gentle_pop"' in source
+
     def test_custom_command_editor_has_variable_buttons_and_live_preview(self):
         from pathlib import Path
         source = (Path(__file__).parent.parent / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
@@ -1417,6 +1441,7 @@ class TestDevDashboardRoutes:
 
     @pytest.mark.asyncio
     async def test_twitch_chat_routes_matching_command_to_fortuna(self, monkeypatch):
+        import asyncio
         from twitch_bot import TwitchChatBot
 
         received = []
@@ -1441,6 +1466,9 @@ class TestDevDashboardRoutes:
             channel = FakeChannel()
 
         class FakeChatBot:
+            async def _notify_chat_activity(self, *_args):
+                pass
+
             async def _handle_builtin(self, *_args):
                 raise AssertionError("A matching Fortuna entry must be consumed first")
 
@@ -1451,6 +1479,7 @@ class TestDevDashboardRoutes:
             dashboard_server, "_fortuna_record_chat_entry", fake_record,
         )
         await TwitchChatBot.event_message(FakeChatBot(), FakeMessage())
+        await asyncio.sleep(0)
 
         assert received == [(
             "stayexcellent666", "!enter", "message-1",

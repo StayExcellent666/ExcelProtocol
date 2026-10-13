@@ -486,6 +486,21 @@ class Database:
             except Exception:
                 pass  # Column already exists
 
+        # Optional chat activity sound played by the existing OBS browser
+        # source. It is deliberately off after migration so current streams
+        # remain silent until a server enables it from the dashboard.
+        for column_sql, column_name in (
+            ('ALTER TABLE twitch_channels ADD COLUMN chat_sound_enabled INTEGER NOT NULL DEFAULT 0', 'chat_sound_enabled'),
+            ("ALTER TABLE twitch_channels ADD COLUMN chat_sound_name TEXT NOT NULL DEFAULT 'soft_chime'", 'chat_sound_name'),
+            ('ALTER TABLE twitch_channels ADD COLUMN chat_sound_volume INTEGER NOT NULL DEFAULT 35', 'chat_sound_volume'),
+        ):
+            try:
+                cursor.execute(column_sql)
+                conn.commit()
+                logger.info("Migration: added %s to twitch_channels", column_name)
+            except Exception:
+                pass  # Column already exists
+
         # Twitch clip command settings. Disabled by default so adding the
         # feature never changes chat behaviour until a server enables it.
         for column_sql, column_name in (
@@ -3252,6 +3267,59 @@ class Database:
         )
         conn.commit()
         conn.close()
+
+    CHAT_SOUND_NAMES = ("soft_chime", "digital_blip", "gentle_pop")
+
+    def get_chat_sound_settings(self, guild_id: int) -> Dict:
+        """Return the OBS chat notification settings for one guild."""
+        conn = self.get_connection()
+        row = conn.execute(
+            '''SELECT chat_sound_enabled, chat_sound_name, chat_sound_volume
+               FROM twitch_channels WHERE guild_id = ?''',
+            (guild_id,),
+        ).fetchone()
+        conn.close()
+        return {
+            'chat_sound_enabled': bool(row[0]) if row else False,
+            'chat_sound_name': (
+                row[1] if row and row[1] in self.CHAT_SOUND_NAMES else 'soft_chime'
+            ),
+            'chat_sound_volume': max(0, min(100, int(row[2]))) if row else 35,
+        }
+
+    def set_chat_sound_settings(self, guild_id: int, enabled: bool,
+                                sound_name: str, volume: int):
+        """Persist one guild's OBS chat notification settings."""
+        if sound_name not in self.CHAT_SOUND_NAMES:
+            raise ValueError("Unknown chat notification sound")
+        conn = self.get_connection()
+        conn.execute(
+            '''UPDATE twitch_channels
+               SET chat_sound_enabled = ?, chat_sound_name = ?, chat_sound_volume = ?
+               WHERE guild_id = ?''',
+            (1 if enabled else 0, sound_name, max(0, min(100, int(volume))), guild_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_chat_sound_targets(self, twitch_channel: str) -> List[Dict]:
+        """Return enabled guild overlays linked to a Twitch chat channel."""
+        conn = self.get_connection()
+        rows = conn.execute(
+            '''SELECT guild_id, chat_sound_name, chat_sound_volume
+               FROM twitch_channels
+               WHERE lower(twitch_channel) = ? AND chat_sound_enabled = 1''',
+            (str(twitch_channel or '').strip().lstrip('#').lower(),),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                'guild_id': row[0],
+                'sound_name': row[1] if row[1] in self.CHAT_SOUND_NAMES else 'soft_chime',
+                'volume': max(0, min(100, int(row[2]))),
+            }
+            for row in rows
+        ]
 
     def cleanup_guild(self, guild_id: int):
         """Remove guild-scoped data after the seven-day re-invite grace period.

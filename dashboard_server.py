@@ -70,6 +70,9 @@ TWITCH_API            = "https://api.twitch.tv/helix"
 
 # WebSocket connections for overlays: {guild_id: set of ws}
 _overlay_connections: dict = {}
+CHAT_NOTIFICATION_SOUNDS = {"soft_chime", "digital_blip", "gentle_pop"}
+CHAT_NOTIFICATION_THROTTLE_SECONDS = 5.0
+_chat_sound_last_attempt: dict[str, float] = {}
 
 # ExcelFortuna display clients, grouped by Twitch broadcaster ID. The shared set
 # keeps legacy native sources compatible; the browser-only set powers the
@@ -95,11 +98,53 @@ async def push_play_to_overlay(twitch_channel: str, video_url: str, requester: s
     guilds = _bot_ref.db.get_guilds_for_twitch_channel(twitch_channel)
     if not guilds:
         return False
-    payload = _json.dumps({"type": "play", "video_url": video_url, "volume": 1.0, "redeemer": requester})
+    payload = _json.dumps({
+        "type": "play", "source": "command", "video_url": video_url,
+        "volume": 1.0, "redeemer": requester,
+    })
     pushed = False
     for g in guilds:
         gid = str(g['guild_id'])
         conns = _overlay_connections.get(gid, set())
+        dead = set()
+        for ws in conns:
+            try:
+                await ws.send_str(payload)
+                pushed = True
+            except Exception:
+                dead.add(ws)
+        if dead:
+            conns.difference_update(dead)
+    return pushed
+
+
+async def push_chat_notification_to_overlay(twitch_channel: str) -> bool:
+    """Play one throttled chat activity sound on each enabled guild overlay."""
+    if not _bot_ref:
+        return False
+    channel = str(twitch_channel or "").strip().lstrip("#").lower()
+    if not channel:
+        return False
+    now = asyncio.get_running_loop().time()
+    if now - _chat_sound_last_attempt.get(channel, 0.0) < CHAT_NOTIFICATION_THROTTLE_SECONDS:
+        return False
+    # Reserve the throttle window before any WebSocket await so bursts cannot
+    # race several notification tasks through at once. This also caps database
+    # reads for channels where the feature is disabled.
+    _chat_sound_last_attempt[channel] = now
+    targets = _bot_ref.db.get_chat_sound_targets(channel)
+    if not targets:
+        return False
+
+    pushed = False
+    for target in targets:
+        guild_id = str(target["guild_id"])
+        payload = json.dumps({
+            "type": "chat_notification",
+            "sound": target["sound_name"],
+            "volume": target["volume"],
+        })
+        conns = _overlay_connections.get(guild_id, set())
         dead = set()
         for ws in conns:
             try:
@@ -2195,6 +2240,7 @@ async def get_twitch_info(request):
         logger.warning(f"Could not check mod status for {channel}: {e}")
 
     appearance = _bot_ref.db.get_overlay_appearance(int(guild_id))
+    chat_sound = _bot_ref.db.get_chat_sound_settings(int(guild_id))
     return web.json_response({
         "linked": True,
         "channel": channel,
@@ -2210,6 +2256,7 @@ async def get_twitch_info(request):
         "clip_scope_status": clip_scope_status,
         "overlay_volume": _bot_ref.db.get_overlay_volume(int(guild_id)) if _bot_ref else 100,
         **appearance,
+        **chat_sound,
     })
 
 async def set_play_enabled(request):
@@ -2360,6 +2407,76 @@ async def set_overlay_appearance(request):
         "show_progress": show_progress,
         "tv_frame": tv_frame,
     })
+
+
+def _parse_chat_sound_settings(body: dict) -> tuple[bool, str, int]:
+    enabled = body.get("enabled")
+    sound_name = str(body.get("sound", "")).strip()
+    if not isinstance(enabled, bool):
+        raise web.HTTPBadRequest(reason="enabled must be true or false")
+    if sound_name not in CHAT_NOTIFICATION_SOUNDS:
+        raise web.HTTPBadRequest(reason="Unknown chat notification sound")
+    try:
+        volume = int(body.get("volume", 35))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="volume must be a number")
+    if not 0 <= volume <= 100:
+        raise web.HTTPBadRequest(reason="volume must be between 0 and 100")
+    return enabled, sound_name, volume
+
+
+async def set_chat_sound_settings(request):
+    """Save a guild's optional Twitch chat activity sound."""
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    guild_id = int(request.match_info["guild_id"])
+    enabled, sound_name, volume = _parse_chat_sound_settings(await request.json())
+    await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: _bot_ref.db.set_chat_sound_settings(
+            guild_id, enabled, sound_name, volume,
+        ),
+    )
+    return web.json_response({
+        "ok": True,
+        "chat_sound_enabled": enabled,
+        "chat_sound_name": sound_name,
+        "chat_sound_volume": volume,
+    })
+
+
+async def test_chat_sound(request):
+    """Play the selected chat sound once in a connected OBS overlay."""
+    guild_id = str(request.match_info["guild_id"])
+    body = await request.json()
+    sound_name = str(body.get("sound", "")).strip()
+    if sound_name not in CHAT_NOTIFICATION_SOUNDS:
+        raise web.HTTPBadRequest(reason="Unknown chat notification sound")
+    try:
+        volume = int(body.get("volume", 35))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="volume must be a number")
+    if not 0 <= volume <= 100:
+        raise web.HTTPBadRequest(reason="volume must be between 0 and 100")
+
+    payload = json.dumps({
+        "type": "chat_notification",
+        "sound": sound_name,
+        "volume": volume,
+        "test": True,
+    })
+    conns = _overlay_connections.get(guild_id, set())
+    dead = set()
+    pushed = False
+    for ws in conns:
+        try:
+            await ws.send_str(payload)
+            pushed = True
+        except Exception:
+            dead.add(ws)
+    if dead:
+        conns.difference_update(dead)
+    return web.json_response({"ok": True, "connected": pushed})
 
 
 async def play_test_overlay(request):
@@ -2851,6 +2968,7 @@ async def eventsub_callback(request):
                     import json as _json
                     payload = _json.dumps({
                         "type": "play",
+                        "source": "reward",
                         "video_url": trigger["video_url"],
                         "volume": trigger["volume"],
                         "audio_only": bool(trigger.get("audio_only")),
@@ -3022,7 +3140,9 @@ const progressWrap = document.getElementById("progress-wrap");
 const progressFill = document.getElementById("progress-bar-fill");
 const progressTimer = document.getElementById("progress-timer");
 const queue = [];
+const priorityQueue = [];
 let playing = false;
+let currentItem = null;
 let player = null;
 let ytReady = false;
 let savedVolume = 100;
@@ -3033,6 +3153,50 @@ let playbackRecoveryTimer = null;
 let currentStart = 0;
 let currentEnd = null;
 let currentAudioOnly = false;
+let chatAudioContext = null;
+let lastChatSoundAt = 0;
+
+
+function playChatNotification(sound, volume) {{
+  const nowMs = Date.now();
+  if (nowMs - lastChatSoundAt < 5000) return;
+  lastChatSoundAt = nowMs;
+  const level = Math.min(1, Math.max(0, Number(volume || 0) / 100));
+  if (!level) return;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  chatAudioContext = chatAudioContext || new AudioContextClass();
+  const ctx = chatAudioContext;
+  if (ctx.state === "suspended") ctx.resume().catch(() => {{}});
+  const baseTime = ctx.currentTime + 0.015;
+
+  function tone(frequency, start, duration, type, endFrequency, gainScale) {{
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const begins = baseTime + start;
+    const ends = begins + duration;
+    oscillator.type = type || "sine";
+    oscillator.frequency.setValueAtTime(frequency, begins);
+    if (endFrequency) oscillator.frequency.exponentialRampToValueAtTime(endFrequency, ends);
+    gain.gain.setValueAtTime(0.0001, begins);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, level * 0.18 * (gainScale || 1)), begins + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ends);
+    oscillator.connect(gain).connect(ctx.destination);
+    oscillator.start(begins);
+    oscillator.stop(ends + 0.02);
+  }}
+
+  if (sound === "digital_blip") {{
+    tone(740, 0, 0.08, "square", 980, 0.55);
+    tone(980, 0.09, 0.09, "square", 1280, 0.4);
+  }} else if (sound === "gentle_pop") {{
+    tone(420, 0, 0.16, "sine", 220, 0.9);
+    tone(840, 0.015, 0.08, "sine", 520, 0.3);
+  }} else {{
+    tone(660, 0, 0.28, "sine", 880, 0.75);
+    tone(990, 0.1, 0.34, "sine", 1320, 0.55);
+  }}
+}}
 
 
 function formatTime(seconds) {{
@@ -3117,7 +3281,38 @@ function finishCurrent(delay = 500) {{
   rdm.style.display = "none";
   stopProgress();
   playing = false;
+  currentItem = null;
   setTimeout(processQueue, delay);
+}}
+
+function preemptCommandForReward() {{
+  if (!playing || !currentItem || currentItem.source === "reward") return;
+  let resumeAt = currentStart;
+  let resumeEnd = currentEnd;
+  try {{
+    if (player && typeof player.getCurrentTime === "function") {{
+      resumeAt = Math.max(currentStart, Number(player.getCurrentTime()) || currentStart);
+    }}
+    if (!resumeEnd && player && typeof player.getDuration === "function") {{
+      const duration = Number(player.getDuration()) || 0;
+      if (duration > 0) resumeEnd = duration;
+    }}
+  }} catch {{}}
+
+  // Resume the interrupted !play item after all pending rewards. If it was
+  // already effectively finished, do not bring it back from the end frame.
+  if (!resumeEnd || resumeAt < resumeEnd - 0.5) {{
+    queue.unshift({{ ...currentItem, start_seconds: resumeAt }});
+  }}
+  if (playbackRecoveryTimer) clearTimeout(playbackRecoveryTimer);
+  playbackRecoveryTimer = null;
+  playing = false;
+  currentItem = null;
+  if (player) player.stopVideo();
+  frameWrap.style.display = "none";
+  rdm.style.display = "none";
+  stopProgress();
+  setTimeout(processQueue, 100);
 }}
 
 const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -3148,22 +3343,42 @@ function handleSocketMessage(e) {{
     tvFrameEnabled = msg.tv_frame === true;
     applyAppearance();
   }}
-  if (msg.type === "play") {{ queue.push(msg); processQueue(); }}
+  if (msg.type === "chat_notification") {{
+    playChatNotification(msg.sound, msg.volume);
+    return;
+  }}
+  if (msg.type === "play") {{
+    const item = {{ ...msg, source: msg.source === "reward" ? "reward" : "command" }};
+    if (item.source === "reward") {{
+      priorityQueue.push(item);
+      if (playing && currentItem && currentItem.source !== "reward") {{
+        preemptCommandForReward();
+      }} else {{
+        processQueue();
+      }}
+    }} else {{
+      queue.push(item);
+      processQueue();
+    }}
+  }}
   if (msg.type === "skip") {{
     if (player) {{ player.stopVideo(); }}
     frameWrap.style.display = "none";
     rdm.style.display = "none";
     stopProgress();
     playing = false;
+    currentItem = null;
     setTimeout(processQueue, 100);
   }}
   if (msg.type === "stop") {{
     queue.length = 0;
+    priorityQueue.length = 0;
     if (player) {{ player.stopVideo(); }}
     frameWrap.style.display = "none";
     rdm.style.display = "none";
     stopProgress();
     playing = false;
+    currentItem = null;
   }}
 }}
 
@@ -3207,17 +3422,18 @@ function onPlayerError(e) {{
 }}
 
 function processQueue() {{
-  if (playing || queue.length === 0) return;
+  if (playing || (priorityQueue.length === 0 && queue.length === 0)) return;
   if (!ytReady) {{
     console.log("ytReady not set yet, retrying in 500ms");
     setTimeout(processQueue, 500);
     return;
   }}
-  const item = queue.shift();
+  const item = priorityQueue.length ? priorityQueue.shift() : queue.shift();
   const videoId = extractVideoId(item.video_url);
   console.log("Playing videoId:", videoId, "ytReady:", ytReady);
-  if (!videoId) {{ playing = false; setTimeout(processQueue, 500); return; }}
+  if (!videoId) {{ currentItem = null; playing = false; setTimeout(processQueue, 500); return; }}
   playing = true;
+  currentItem = item;
   if (playbackRecoveryTimer) clearTimeout(playbackRecoveryTimer);
   playbackRecoveryTimer = setTimeout(() => {{
     console.error("YouTube playback did not start; skipping queued video");
@@ -8109,6 +8325,8 @@ def create_dashboard_app(bot=None):
     app.router.add_post  ("/api/guild/{guild_id}/twitch/builtin-commands/{command_name}", set_builtin_command_enabled)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/overlay-volume",      set_overlay_volume)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/overlay-appearance",  set_overlay_appearance)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/chat-sound",          set_chat_sound_settings)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/chat-sound-test",     test_chat_sound)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/play-test",           play_test_overlay)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/hotkey-test",          hotkey_test)
     app.router.add_get   ("/api/guild/{guild_id}/members",                     get_guild_members)

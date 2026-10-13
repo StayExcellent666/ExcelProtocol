@@ -46,6 +46,17 @@ class TestSchema:
         assert cols["overlay_show_progress"] == "1"
         assert cols["overlay_tv_frame"] == "0"
 
+    def test_twitch_channels_has_chat_sound_defaults(self, db):
+        conn = db.get_connection()
+        cols = {
+            r[1]: r[4]
+            for r in conn.execute("PRAGMA table_info(twitch_channels)").fetchall()
+        }
+        conn.close()
+        assert cols["chat_sound_enabled"] == "0"
+        assert cols["chat_sound_name"] == "'soft_chime'"
+        assert cols["chat_sound_volume"] == "35"
+
     def test_twitch_command_user_usage_schema_and_counter(self, db):
         conn = db.get_connection()
         cols = {
@@ -164,6 +175,27 @@ class TestSchema:
             "show_progress": False,
             "tv_frame": True,
         }
+
+    def test_chat_sound_settings_and_enabled_targets(self, db):
+        db.set_twitch_channel(123, "Streamer")
+        assert db.get_chat_sound_settings(123) == {
+            "chat_sound_enabled": False,
+            "chat_sound_name": "soft_chime",
+            "chat_sound_volume": 35,
+        }
+        assert db.get_chat_sound_targets("streamer") == []
+
+        db.set_chat_sound_settings(123, True, "digital_blip", 62)
+        assert db.get_chat_sound_settings(123) == {
+            "chat_sound_enabled": True,
+            "chat_sound_name": "digital_blip",
+            "chat_sound_volume": 62,
+        }
+        assert db.get_chat_sound_targets("#STREAMER") == [{
+            "guild_id": 123,
+            "sound_name": "digital_blip",
+            "volume": 62,
+        }]
 
     def test_bot_status_rotation_round_trip(self, db):
         assert db.get_bot_statuses() == []

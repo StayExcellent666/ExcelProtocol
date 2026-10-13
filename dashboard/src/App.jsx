@@ -2626,6 +2626,43 @@ function customCommandPreview(template, commandName, args) {
   return Array.from(rendered.replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim()).slice(0,500).join("");
 }
 
+let chatSoundPreviewContext = null;
+function playChatSoundPreview(sound, volume) {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  chatSoundPreviewContext = chatSoundPreviewContext || new AudioContextClass();
+  const ctx = chatSoundPreviewContext;
+  if (ctx.state === "suspended") ctx.resume();
+  const level = Math.min(1, Math.max(0, Number(volume || 0) / 100));
+  if (!level) return;
+  const baseTime = ctx.currentTime + 0.015;
+  const tone = (frequency, start, duration, type="sine", endFrequency=null, gainScale=1) => {
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const begins = baseTime + start;
+    const ends = begins + duration;
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(frequency, begins);
+    if (endFrequency) oscillator.frequency.exponentialRampToValueAtTime(endFrequency, ends);
+    gain.gain.setValueAtTime(0.0001, begins);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, level * 0.18 * gainScale), begins + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ends);
+    oscillator.connect(gain).connect(ctx.destination);
+    oscillator.start(begins);
+    oscillator.stop(ends + 0.02);
+  };
+  if (sound === "digital_blip") {
+    tone(740, 0, 0.08, "square", 980, 0.55);
+    tone(980, 0.09, 0.09, "square", 1280, 0.4);
+  } else if (sound === "gentle_pop") {
+    tone(420, 0, 0.16, "sine", 220, 0.9);
+    tone(840, 0.015, 0.08, "sine", 520, 0.3);
+  } else {
+    tone(660, 0, 0.28, "sine", 880, 0.75);
+    tone(990, 0.1, 0.34, "sine", 1320, 0.55);
+  }
+}
+
 function TwitchTab({ guildId, isDev }) {
   const [info, setInfo]           = useState(null);
   const [loading, setLoading]     = useState(true);
@@ -2640,6 +2677,10 @@ function TwitchTab({ guildId, isDev }) {
   const [savingClip, setSavingClip] = useState(false);
   const [savingBuiltin, setSavingBuiltin] = useState(null);
   const [clipForm, setClipForm] = useState({ enabled:false, duration:45, cooldown:60 });
+  const [chatSound, setChatSound] = useState({ enabled:false, sound:"soft_chime", volume:35 });
+  const [savingChatSound, setSavingChatSound] = useState(false);
+  const [chatSoundSaved, setChatSoundSaved] = useState(false);
+  const [testingChatSound, setTestingChatSound] = useState(false);
   const [previewArgs, setPreviewArgs] = useState("@viewer");
   const responseRef = useRef(null);
   const [err, setErr]             = useState(null);
@@ -2664,6 +2705,11 @@ function TwitchTab({ guildId, isDev }) {
         enabled: !!data.clip_enabled,
         duration: data.clip_duration || 45,
         cooldown: data.clip_cooldown || 60,
+      });
+      setChatSound({
+        enabled: !!data.chat_sound_enabled,
+        sound: data.chat_sound_name || "soft_chime",
+        volume: data.chat_sound_volume ?? 35,
       });
     } catch(e) { console.error(e); }
     setLoading(false);
@@ -2726,6 +2772,33 @@ function TwitchTab({ guildId, isDev }) {
       setInfo(p => ({ ...p, ...saved }));
     } catch(e) { alert("Failed: " + e.message); }
     setSavingClip(false);
+  };
+
+  const saveChatSoundSettings = async () => {
+    setSavingChatSound(true);
+    setChatSoundSaved(false);
+    try {
+      const saved = await apiFetch(`/api/guild/${guildId}/twitch/chat-sound`, {
+        method:"POST",
+        body:JSON.stringify(chatSound),
+      });
+      setInfo(current => ({ ...current, ...saved }));
+      setChatSoundSaved(true);
+      setTimeout(()=>setChatSoundSaved(false), 2000);
+    } catch(e) { alert("Failed: " + e.message); }
+    setSavingChatSound(false);
+  };
+
+  const testChatSoundInObs = async () => {
+    setTestingChatSound(true);
+    try {
+      const result = await apiFetch(`/api/guild/${guildId}/twitch/chat-sound-test`, {
+        method:"POST",
+        body:JSON.stringify({ sound:chatSound.sound, volume:Number(chatSound.volume) }),
+      });
+      if (!result.connected) alert("No OBS browser source is connected right now.");
+    } catch(e) { alert("Test failed: " + e.message); }
+    setTestingChatSound(false);
   };
 
   const toggleBuiltin = async (commandName) => {
@@ -2930,6 +3003,55 @@ function TwitchTab({ guildId, isDev }) {
         </div>
         <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
           Default: the last 45 seconds · one clip per channel every 60 seconds
+        </div>
+      </div>
+
+      {/* Optional viewer chat activity sound */}
+      <div style={{ ...C.card, marginBottom:16 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:16, flexWrap:"wrap" }}>
+          <div style={{ flex:1, minWidth:240 }}>
+            <div style={{ fontWeight:800, fontSize:14, fontFamily:"'Orbitron',sans-serif", color:"var(--text2)", marginBottom:4 }}>
+              Chat Notification Sound
+            </div>
+            <div style={{ fontSize:12, color:"var(--text3)", fontFamily:"'Outfit',sans-serif" }}>
+              Plays a short sound through the OBS browser source when a viewer writes in Twitch chat. Off by default.
+            </div>
+          </div>
+          <button type="button" onClick={()=>setChatSound(current=>({...current, enabled:!current.enabled}))}
+            aria-label="Enable chat notification sound"
+            style={{ width:44, height:24, borderRadius:12, border:"none", cursor:"pointer",
+              background:chatSound.enabled?"var(--cyan)":"var(--border2)", position:"relative", transition:"background 0.2s", flexShrink:0,
+              boxShadow:chatSound.enabled?"0 0 10px rgba(0,245,212,0.4)":"none" }}>
+            <span style={{ position:"absolute", top:3, left:chatSound.enabled?22:3, width:18, height:18, borderRadius:"50%", background:"#fff", transition:"left .2s" }} />
+          </button>
+        </div>
+
+        <div style={{ display:"flex", alignItems:"flex-end", gap:12, flexWrap:"wrap", marginTop:14 }}>
+          <Field label="Sound">
+            <CyanSelect value={chatSound.sound} onChange={e=>setChatSound(current=>({...current, sound:e.target.value}))}>
+              <option value="soft_chime">Soft Chime</option>
+              <option value="digital_blip">Digital Blip</option>
+              <option value="gentle_pop">Gentle Pop</option>
+            </CyanSelect>
+          </Field>
+          <Field label={`Volume · ${chatSound.volume}%`}>
+            <input type="range" min="0" max="100" value={chatSound.volume}
+              onChange={e=>setChatSound(current=>({...current, volume:Number(e.target.value)}))}
+              style={{ width:190, accentColor:"var(--cyan)", marginBottom:7 }} />
+          </Field>
+          <button type="button" onClick={()=>playChatSoundPreview(chatSound.sound, chatSound.volume)}
+            style={{ ...C.btnSecondary, marginBottom:16 }}>Preview Here</button>
+          <button type="button" onClick={testChatSoundInObs} disabled={testingChatSound}
+            style={{ ...C.btnSecondary, marginBottom:16, opacity:testingChatSound?.6:1 }}>
+            {testingChatSound?"Testing...":"Test in OBS"}
+          </button>
+          <button type="button" onClick={saveChatSoundSettings} disabled={savingChatSound}
+            style={{ ...C.btnPrimary, marginBottom:16, opacity:savingChatSound?.6:1 }}>
+            {savingChatSound?"Saving...":chatSoundSaved?"Saved ✓":"Save Sound Settings"}
+          </button>
+        </div>
+        <div style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
+          Viewer messages are limited to one sound every 5 seconds. Bot and broadcaster messages stay silent. OBS audio monitoring controls whether only the stream or you also hear it.
         </div>
       </div>
 

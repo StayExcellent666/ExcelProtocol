@@ -180,13 +180,22 @@ class TwitchChatBot(commands.Bot):
     async def event_message(self, message):
         if message.echo:
             return
+
+        channel_name = str(getattr(message.channel, "name", "") or "").lower()
+        author_login = str(getattr(message.author, "name", "") or "").lower()
+        # Chat activity sounds are intentionally fire-and-forget: an OBS client
+        # or database hiccup must never delay normal chat-command handling.
+        # Broadcaster messages are excluded so the streamer does not trigger
+        # their own notification while replying to chat.
+        if channel_name and author_login != channel_name:
+            asyncio.create_task(self._notify_chat_activity(channel_name))
+
         if not message.content or not message.content.startswith("!"):
             return
 
         parts = message.content.strip().split(maxsplit=1)
         command_name = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
-        channel_name = message.channel.name.lower()
 
         # An active ExcelFortuna chat-command giveaway gets first refusal on
         # its configured command. Outside that narrow case, existing built-in
@@ -210,6 +219,13 @@ class TwitchChatBot(commands.Bot):
         if handled:
             return
         await self._handle_custom(message, command_name, args, channel_name)
+
+    async def _notify_chat_activity(self, channel_name: str):
+        try:
+            from dashboard_server import push_chat_notification_to_overlay
+            await push_chat_notification_to_overlay(channel_name)
+        except Exception as e:
+            logger.debug("Chat notification sound failed for %s: %s", channel_name, e)
 
     async def _handle_builtin(self, message, command_name: str, args: str, channel_name: str) -> bool:
         is_mod = message.author.is_mod or message.author.name.lower() == channel_name
