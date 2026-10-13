@@ -89,6 +89,9 @@ class TwitchNotifierBot(discord.Client):
         stored_twitch_credentials = self.db.get_twitch_bot_credentials() or {}
         self._twitch_bot_token = stored_twitch_credentials.get('access_token') or TWITCH_BOT_TOKEN
         self._twitch_refresh_token = stored_twitch_credentials.get('refresh_token') or TWITCH_REFRESH_TOKEN
+        self._twitch_bot_user_id = None
+        self._twitch_bot_login = str(TWITCH_BOT_USERNAME or "").strip().lower()
+        self._twitch_bot_scopes: set[str] = set()
         self._twitch_token_last_success_at = None
         self._twitch_token_last_error = None
         
@@ -196,46 +199,75 @@ class TwitchNotifierBot(discord.Client):
         self._twitch_token_last_error = None
         logger.info("Twitch bot token refreshed and persisted successfully")
 
+    async def _validate_twitch_chat_identity(self) -> dict:
+        """Resolve the bot account from its token so account renames are safe."""
+        import aiohttp
+
+        if not self._twitch_bot_token:
+            raise RuntimeError("Twitch bot access token is not configured")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://id.twitch.tv/oauth2/validate",
+                headers={"Authorization": f"OAuth {self._twitch_bot_token}"},
+            ) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status != 200:
+                    detail = data.get("message", f"HTTP {resp.status}") if isinstance(data, dict) else f"HTTP {resp.status}"
+                    raise RuntimeError(f"Twitch bot token validation failed: {detail}")
+
+        user_id = str(data.get("user_id") or "")
+        login = str(data.get("login") or "").lower()
+        if not user_id or not login:
+            raise RuntimeError("Twitch bot token validation returned no account identity")
+        configured_login = str(TWITCH_BOT_USERNAME or "").strip().lower()
+        if configured_login and configured_login != login:
+            logger.warning(
+                "Configured Twitch bot login @%s was renamed to @%s; continuing by stable user ID %s",
+                configured_login, login, user_id,
+            )
+        self._twitch_bot_user_id = user_id
+        self._twitch_bot_login = login
+        self._twitch_bot_scopes = set(data.get("scopes") or [])
+        return {"user_id": user_id, "login": login, "scopes": self._twitch_bot_scopes}
+
     async def setup_hook(self):
         """Called when bot is starting up"""
         # Load Twitch chat bot — wrapped in try/except so any failure here
         # never takes down the Discord bot
         self.twitch_chat_bot = None
-        if TWITCH_BOT_USERNAME and self._twitch_refresh_token:
+        if self._twitch_refresh_token:
             try:
                 await self._refresh_twitch_chat_credentials()
             except Exception as e:
                 self._twitch_token_last_error = f"{type(e).__name__}: {str(e)[:300]}"
                 logger.error(f"Twitch bot startup token refresh failed: {e}")
 
-        if TWITCH_BOT_USERNAME and self._twitch_bot_token:
+        if self._twitch_bot_token:
             try:
                 from twitch_bot import TwitchChatBot
                 import twitch_chat_cog
+
+                identity = await self._validate_twitch_chat_identity()
 
                 # Dedupe channels — same Twitch channel may appear in multiple guilds,
                 # passing it twice causes a KeyError in twitchio's join handler.
                 registered_channels = list({r['twitch_channel'] for r in self.db.get_all_twitch_channels()})
 
-                bot_user = await self.twitch.get_user(TWITCH_BOT_USERNAME)
-                if not bot_user:
-                    logger.error(f'Could not fetch Twitch user info for {TWITCH_BOT_USERNAME} - Twitch chat bot disabled')
-                else:
-                    bot_id = bot_user['id']
-                    self.twitch_chat_bot = TwitchChatBot(
-                        token=self._twitch_bot_token,
-                        initial_channels=registered_channels,
-                        db=self.db,
-                        twitch_api=self.twitch
-                    )
-                    await twitch_chat_cog.setup(self, self.twitch_chat_bot)
-                    asyncio.create_task(self.twitch_chat_bot.start())
-                    logger.info("Twitch chat bot started")
+                self.twitch_chat_bot = TwitchChatBot(
+                    token=self._twitch_bot_token,
+                    initial_channels=registered_channels,
+                    db=self.db,
+                    twitch_api=self.twitch,
+                    bot_id=identity["user_id"],
+                )
+                await twitch_chat_cog.setup(self, self.twitch_chat_bot)
+                asyncio.create_task(self.twitch_chat_bot.start())
+                logger.info("Twitch chat bot started as @%s", identity["login"])
             except Exception as e:
                 logger.error(f"Twitch chat bot failed to start: {e} - Discord bot continuing normally")
                 self.twitch_chat_bot = None
         else:
-            logger.info("Twitch chat bot not configured (TWITCH_BOT_USERNAME / TWITCH_BOT_TOKEN not set)")
+            logger.info("Twitch chat bot not configured (no access token available)")
 
         # Load reaction roles
         try:

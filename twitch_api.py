@@ -77,6 +77,126 @@ class TwitchAPI:
             "Authorization": f"Bearer {token}"
         }
 
+    async def send_chat_message(self, broadcaster_id: str, sender_id: str,
+                                message: str) -> tuple[bool, str | None]:
+        """Send a bot message through Helix so Twitch can apply its bot badge.
+
+        Returns ``(sent, reason)`` instead of raising so callers can safely
+        fall back to the existing IRC connection. A stale app token and a
+        transient Twitch server failure are retried once.
+        """
+        broadcaster_id = str(broadcaster_id or "").strip()
+        sender_id = str(sender_id or "").strip()
+        message = str(message or "")[:500]
+        if not broadcaster_id or not sender_id or not message:
+            return False, "missing broadcaster, sender, or message"
+
+        session = await self.get_session()
+        body = {
+            "broadcaster_id": broadcaster_id,
+            "sender_id": sender_id,
+            "message": message,
+            # Keep bot replies in the channel where the command was used,
+            # including when that channel participates in Shared Chat.
+            "for_source_only": True,
+        }
+        for attempt in range(2):
+            try:
+                headers = await self._headers()
+                async with session.post(
+                    f"{self.base_url}/chat/messages",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json=body,
+                    timeout=aiohttp.ClientTimeout(total=6),
+                ) as resp:
+                    payload = await resp.json(content_type=None)
+
+                if resp.status == 401 and attempt == 0:
+                    self.access_token = None
+                    self.token_expires_at = None
+                    continue
+                if resp.status >= 500 and attempt == 0:
+                    await asyncio.sleep(0.25)
+                    continue
+                if resp.status != 200:
+                    detail = payload.get("message") if isinstance(payload, dict) else None
+                    return False, detail or f"HTTP {resp.status}"
+
+                rows = payload.get("data", []) if isinstance(payload, dict) else []
+                result = rows[0] if rows else {}
+                if result.get("is_sent") is True:
+                    return True, None
+                drop = result.get("drop_reason") or {}
+                reason = drop.get("message") or drop.get("code") or "Twitch did not send the message"
+                return False, str(reason)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if attempt == 0:
+                    await asyncio.sleep(0.25)
+                    continue
+                return False, f"{type(exc).__name__}: {exc}"
+            except Exception as exc:
+                return False, f"{type(exc).__name__}: {exc}"
+
+        return False, "Twitch chat API retry exhausted"
+
+    async def send_chat_announcement(self, broadcaster_id: str,
+                                     moderator_id: str, user_access_token: str,
+                                     message: str, color: str = "purple") -> tuple[bool, str | None]:
+        """Send a highlighted Twitch chat announcement with the bot token.
+
+        Announcements require a user access token carrying
+        ``moderator:manage:announcements`` and the token owner must moderate the
+        destination channel. Returning a result instead of raising lets the
+        chat bot safely fall back to a normal message.
+        """
+        broadcaster_id = str(broadcaster_id or "").strip()
+        moderator_id = str(moderator_id or "").strip()
+        token = str(user_access_token or "").strip()
+        if token.lower().startswith("oauth:"):
+            token = token[6:]
+        message = str(message or "")[:500]
+        allowed_colors = {"blue", "green", "orange", "purple", "primary"}
+        if color not in allowed_colors:
+            color = "purple"
+        if not broadcaster_id or not moderator_id or not token or not message:
+            return False, "missing broadcaster, moderator, token, or message"
+
+        session = await self.get_session()
+        for attempt in range(2):
+            try:
+                async with session.post(
+                    f"{self.base_url}/chat/announcements",
+                    headers={
+                        "Client-ID": self.client_id,
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    params={
+                        "broadcaster_id": broadcaster_id,
+                        "moderator_id": moderator_id,
+                    },
+                    json={"message": message, "color": color},
+                    timeout=aiohttp.ClientTimeout(total=6),
+                ) as resp:
+                    if resp.status == 204:
+                        return True, None
+                    payload = await resp.json(content_type=None)
+
+                if resp.status >= 500 and attempt == 0:
+                    await asyncio.sleep(0.25)
+                    continue
+                detail = payload.get("message") if isinstance(payload, dict) else None
+                return False, detail or f"HTTP {resp.status}"
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if attempt == 0:
+                    await asyncio.sleep(0.25)
+                    continue
+                return False, f"{type(exc).__name__}: {exc}"
+            except Exception as exc:
+                return False, f"{type(exc).__name__}: {exc}"
+
+        return False, "Twitch announcement API retry exhausted"
+
     async def get_live_streams(self, usernames: list) -> list:
         """
         Check which streamers from the list are currently live.

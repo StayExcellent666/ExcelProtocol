@@ -480,6 +480,10 @@ class TestDevDashboardRoutes:
                 joined.extend(channels)
                 self.connected_channels.append(FakeChannel())
 
+            async def send_chat(self, _channel_name, message, channel):
+                await channel.send(message)
+                return "helix"
+
         class FakeBot:
             twitch_chat_bot = FakeChatBot()
 
@@ -507,6 +511,7 @@ class TestDevDashboardRoutes:
         assert sent == ["Happy birthday! 🎉"]
         assert payload["ok"] is True
         assert payload["joined_now"] is True
+        assert payload["delivery"] == "helix"
         audit_params = writes[0][1]
         assert audit_params[:5] == (
             "42", "Owner", "twitch:friendly_streamer", "POST",
@@ -558,12 +563,17 @@ class TestDevDashboardRoutes:
         async def fake_execute(_query, _params=()):
             return None
 
+        class FakeChatBot:
+            connected_channels = [FakeChannel()]
+
+            async def send_chat(self, _channel_name, message, channel):
+                await channel.send(message)
+                return "helix"
+
         monkeypatch.setattr(
             dashboard_server,
             "_bot_ref",
-            SimpleNamespace(
-                twitch_chat_bot=SimpleNamespace(connected_channels=[FakeChannel()]),
-            ),
+            SimpleNamespace(twitch_chat_bot=FakeChatBot()),
         )
         monkeypatch.setattr(dashboard_server, "db_execute", fake_execute)
         monkeypatch.setattr(dashboard_server, "_twitch_chat_console_last_sent_at", 0.0)
@@ -1460,6 +1470,10 @@ class TestDevDashboardRoutes:
 
         class FakeChatBot:
             connected_channels = [FakeChannel()]
+
+            async def send_chat(self, _channel_name, message, channel):
+                await channel.send(message)
+                return "helix"
 
         class FakeBot:
             twitch_chat_bot = FakeChatBot()

@@ -2164,7 +2164,10 @@ async def get_twitch_info(request):
 
     # Check if bot is modded in the channel
     bot_is_modded = False
-    BOT_TWITCH_LOGIN = "excelprotocol"
+    bot_twitch_login = str(
+        getattr(_bot_ref, "_twitch_bot_login", "")
+        or os.getenv("TWITCH_BOT_USERNAME", "")
+    ).strip().lower()
     try:
         broadcaster = await get_twitch_token()
         sess = get_http_session()
@@ -2187,7 +2190,7 @@ async def get_twitch_info(request):
                     if mresp.status == 200:
                         mdata = await mresp.json()
                         mod_logins = [m["user_login"].lower() for m in mdata.get("data", [])]
-                        bot_is_modded = BOT_TWITCH_LOGIN in mod_logins
+                        bot_is_modded = bool(bot_twitch_login and bot_twitch_login in mod_logins)
     except Exception as e:
         logger.warning(f"Could not check mod status for {channel}: {e}")
 
@@ -2539,7 +2542,9 @@ async def twitch_bot_login(request):
         "client_id": TWITCH_CLIENT_ID,
         "redirect_uri": TWITCH_REDIRECT_URI,
         "response_type": "code",
-        "scope": "chat:read chat:edit",
+        # Keep the IRC scopes while command intake remains on TwitchIO, and
+        # add the grants required for badged messages and shoutout banners.
+        "scope": "chat:read chat:edit user:write:chat user:bot moderator:manage:announcements",
         "state": state,
         "force_verify": "true",
     })
@@ -2675,8 +2680,15 @@ async def _complete_twitch_bot_oauth(code: str):
     scopes = set(token_data.get("scope") or [])
     if not access_token or not refresh_token:
         raise web.HTTPBadGateway(reason="Twitch did not return a renewable token pair")
-    if not {"chat:read", "chat:edit"}.issubset(scopes):
-        raise web.HTTPBadRequest(reason="Twitch authorization is missing chat:read or chat:edit")
+    required_scopes = {
+        "chat:read", "chat:edit", "user:write:chat", "user:bot",
+        "moderator:manage:announcements",
+    }
+    missing_scopes = sorted(required_scopes - scopes)
+    if missing_scopes:
+        raise web.HTTPBadRequest(
+            reason=f"Twitch authorization is missing: {', '.join(missing_scopes)}"
+        )
 
     async with sess.get(
         f"{TWITCH_API}/users",
@@ -2689,7 +2701,12 @@ async def _complete_twitch_bot_oauth(code: str):
 
     expected_login = os.getenv("TWITCH_BOT_USERNAME", "").strip().lower()
     actual_login = str(user.get("login", "")).lower()
-    if expected_login and actual_login != expected_login:
+    expected_user_id = str(getattr(_bot_ref, "_twitch_bot_user_id", "") or "")
+    if expected_user_id and str(user.get("id") or "") != expected_user_id:
+        raise web.HTTPBadRequest(
+            reason=f"Authorized @{actual_login}, but it is not the currently connected bot account"
+        )
+    if not expected_user_id and expected_login and actual_login != expected_login:
         raise web.HTTPBadRequest(
             reason=f"Authorized @{actual_login}, but the configured bot account is @{expected_login}"
         )
@@ -2702,10 +2719,14 @@ async def _complete_twitch_bot_oauth(code: str):
     )
     _bot_ref._twitch_bot_token = access_token
     _bot_ref._twitch_refresh_token = refresh_token
+    _bot_ref._twitch_bot_user_id = str(user["id"])
+    _bot_ref._twitch_bot_login = actual_login
+    _bot_ref._twitch_bot_scopes = scopes
     _bot_ref._twitch_token_last_success_at = datetime.now(timezone.utc)
     _bot_ref._twitch_token_last_error = None
     if getattr(_bot_ref, "twitch_chat_bot", None):
         _bot_ref.twitch_chat_bot._connection._token = access_token
+        _bot_ref.twitch_chat_bot.reset_helix_delivery(str(user["id"]))
     logger.info("Owner connected Twitch chat bot account @%s and persisted renewable credentials", actual_login)
     raise web.HTTPFound("/app/?twitch_bot_connected=1")
 
@@ -3975,7 +3996,13 @@ async def get_operations_health(request):
         "eventsub": eventsub,
         "twitch_chat_token": {
             "owner_can_connect": bool(request["session"].get("dev")),
-            "account": os.getenv("TWITCH_BOT_USERNAME", ""),
+            "account": getattr(bot, "_twitch_bot_login", "") or os.getenv("TWITCH_BOT_USERNAME", ""),
+            "chat_bot_badge_ready": {"user:write:chat", "user:bot"}.issubset(
+                set(getattr(bot, "_twitch_bot_scopes", set()) or set())
+            ),
+            "shoutout_announcements_ready": "moderator:manage:announcements" in set(
+                getattr(bot, "_twitch_bot_scopes", set()) or set()
+            ),
             "automatic_refresh_configured": bool(getattr(bot, "_twitch_refresh_token", None)),
             "last_success_at": _health_iso(getattr(bot, "_twitch_token_last_success_at", None)),
             "last_error": getattr(bot, "_twitch_token_last_error", None),
@@ -4127,7 +4154,7 @@ async def owner_twitch_chat_send(request):
             )
 
         try:
-            await channel.send(message)
+            delivery = await chat_bot.send_chat(channel_login, message, channel)
         except Exception as exc:
             logger.warning(
                 "Owner Twitch console could not send in @%s: %s",
@@ -4158,6 +4185,7 @@ async def owner_twitch_chat_send(request):
                         "channel": channel_login,
                         "message": message,
                         "joined_now": joined_now,
+                        "delivery": delivery,
                         "sent_at": sent_at,
                     },
                     ensure_ascii=False,
@@ -4184,8 +4212,9 @@ async def owner_twitch_chat_send(request):
             "ok": True,
             "channel": channel_login,
             "joined_now": joined_now,
+            "delivery": delivery,
             "sent_at": sent_at,
-            "bot_account": os.getenv("TWITCH_BOT_USERNAME", ""),
+            "bot_account": getattr(_bot_ref, "_twitch_bot_login", "") or os.getenv("TWITCH_BOT_USERNAME", ""),
         }
     )
 
@@ -4512,14 +4541,24 @@ def _fortuna_chat_channel(channel_login: str):
     return _find_twitch_chat_channel(_bot_ref.twitch_chat_bot, channel_login)
 
 
-async def _fortuna_send_chat(channel_login: str, message: str) -> bool:
-    channel = _fortuna_chat_channel(channel_login)
-    if not channel:
-        logger.warning("Fortuna could not post in @%s: chat bot is not joined",
+async def _fortuna_send_chat(channel_login: str, message: str,
+                             fallback_channel=None) -> bool:
+    chat_bot = getattr(_bot_ref, "twitch_chat_bot", None) if _bot_ref else None
+    if not chat_bot:
+        if fallback_channel is not None:
+            try:
+                await fallback_channel.send(str(message)[:500])
+                return True
+            except Exception as exc:
+                logger.warning("Fortuna IRC fallback failed in @%s: %s",
+                               str(channel_login).lower(), exc)
+                return False
+        logger.warning("Fortuna could not post in @%s: chat bot is unavailable",
                        str(channel_login).lower())
         return False
+    channel = fallback_channel or _fortuna_chat_channel(channel_login)
     try:
-        await channel.send(str(message)[:500])
+        await chat_bot.send_chat(str(channel_login).lower(), str(message)[:500], channel)
         return True
     except Exception as exc:
         logger.warning("Fortuna chat message failed in @%s: %s",
@@ -4977,12 +5016,16 @@ async def _fortuna_record_chat_entry(channel_login: str, command_name: str,
     if chat_channel:
         try:
             if eligible:
-                await chat_channel.send(
-                    f"@{user_login}, you're entered! Total entrants: {entry_count}."
+                await _fortuna_send_chat(
+                    channel_login,
+                    f"@{user_login}, you're entered! Total entrants: {entry_count}.",
+                    chat_channel,
                 )
             else:
-                await chat_channel.send(
-                    f"@{user_login}, you're already entered. Total entrants: {entry_count}."
+                await _fortuna_send_chat(
+                    channel_login,
+                    f"@{user_login}, you're already entered. Total entrants: {entry_count}.",
+                    chat_channel,
                 )
         except Exception as exc:
             # The entry is authoritative even if Twitch temporarily rejects a
@@ -5057,13 +5100,12 @@ async def _fortuna_announce_winner(giveaway: dict, winner: dict):
         logger.warning("Fortuna winner selected, but the Twitch chat bot is unavailable")
         return False
     channel_login = str(giveaway["twitch_broadcaster_login"]).lower()
-    channel = _fortuna_chat_channel(channel_login)
-    if not channel:
-        logger.warning("Fortuna could not announce winner: @%s is not joined", channel_login)
+    if not await _fortuna_send_chat(
+        channel_login,
+        f"🎉 {winner['twitch_display_name']} won {giveaway['title']}! Congratulations!",
+    ):
+        logger.warning("Fortuna could not announce winner in @%s", channel_login)
         return False
-    await channel.send(
-        f"🎉 {winner['twitch_display_name']} won {giveaway['title']}! Congratulations!"
-    )
     await db_execute(
         "UPDATE fortuna_giveaways SET winner_announced = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         (giveaway["id"],),
@@ -5130,15 +5172,12 @@ async def _fortuna_run_test_spin(broadcaster_id: str, broadcaster_login: str,
             "winner_display_name": winner["twitch_display_name"],
         })
 
-        channel = None
-        if _bot_ref and getattr(_bot_ref, "twitch_chat_bot", None):
-            channel = _fortuna_chat_channel(broadcaster_login)
-        if channel:
-            await channel.send(
-                f"[TEST] ExcelFortuna selected {winner['twitch_display_name']}. "
-                "This was only a test - no prize was awarded."
-            )
-        else:
+        sent_to_chat = await _fortuna_send_chat(
+            broadcaster_login,
+            f"[TEST] ExcelFortuna selected {winner['twitch_display_name']}. "
+            "This was only a test - no prize was awarded.",
+        )
+        if not sent_to_chat:
             logger.warning("Fortuna test could not post in @%s chat", broadcaster_login)
             await _fortuna_broadcast(broadcaster_id, {
                 "type": "error",

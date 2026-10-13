@@ -23,7 +23,105 @@ class TwitchChatBot(commands.Bot):
         )
         self.db = db
         self.twitch_api = twitch_api
+        self.bot_id = str(bot_id or "")
         self._cooldowns: dict[str, dict[str, datetime]] = {}
+        self._broadcaster_ids: dict[str, str] = {}
+        self._helix_send_failures = 0
+        self._helix_send_disabled_until = 0.0
+
+    def reset_helix_delivery(self, bot_id: str | None = None):
+        """Close the fallback circuit after a successful bot authorization."""
+        if bot_id:
+            self.bot_id = str(bot_id)
+        self._helix_send_failures = 0
+        self._helix_send_disabled_until = 0.0
+
+    async def _broadcaster_id_for(self, channel_name: str) -> str | None:
+        channel_name = str(channel_name or "").strip().lstrip("#").lower()
+        if not channel_name:
+            return None
+        cached = self._broadcaster_ids.get(channel_name)
+        if cached:
+            return cached
+        user = await self.twitch_api.get_user(channel_name)
+        broadcaster_id = str(user.get("id") or "") if user else ""
+        if broadcaster_id:
+            self._broadcaster_ids[channel_name] = broadcaster_id
+            return broadcaster_id
+        return None
+
+    async def send_chat(self, channel_name: str, text: str, fallback_channel=None) -> str:
+        """Prefer Twitch's badged Helix sender and transparently fall back to IRC.
+
+        The small circuit breaker prevents a Twitch API outage or missing grant
+        from adding a timeout to every command response. The next message after
+        one minute probes Helix again automatically.
+        """
+        channel_name = str(channel_name or "").strip().lstrip("#").lower()
+        text = str(text or "")[:500]
+        if not channel_name or not text:
+            raise ValueError("A Twitch channel and message are required")
+
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        if self.bot_id and now >= self._helix_send_disabled_until:
+            broadcaster_id = await self._broadcaster_id_for(channel_name)
+            if broadcaster_id:
+                sent, reason = await self.twitch_api.send_chat_message(
+                    broadcaster_id, self.bot_id, text,
+                )
+                if sent:
+                    self._helix_send_failures = 0
+                    self._helix_send_disabled_until = 0.0
+                    return "helix"
+
+                self._helix_send_failures += 1
+                logger.warning(
+                    "Twitch Helix chat send failed in @%s; using IRC fallback: %s",
+                    channel_name, reason,
+                )
+                if self._helix_send_failures >= 3:
+                    self._helix_send_disabled_until = now + 60
+                    logger.warning("Twitch Helix chat fallback circuit opened for 60 seconds")
+
+        channel = fallback_channel
+        if channel is None:
+            channel = next(
+                (
+                    item for item in (self.connected_channels or [])
+                    if str(getattr(item, "name", "") or "").lower() == channel_name
+                ),
+                None,
+            )
+        if channel is None:
+            raise RuntimeError(f"Twitch chat bot is not joined to @{channel_name}")
+        await channel.send(text)
+        return "irc"
+
+    async def _send_chat(self, channel, text: str) -> str:
+        return await self.send_chat(getattr(channel, "name", ""), text, channel)
+
+    async def _send_announcement(self, channel, text: str,
+                                 color: str = "purple") -> bool:
+        """Try a highlighted announcement, allowing callers to fall back."""
+        channel_name = str(getattr(channel, "name", "") or "").lower()
+        try:
+            broadcaster_id = await self._broadcaster_id_for(channel_name)
+            connection = getattr(self, "_connection", None)
+            token = str(getattr(connection, "_token", "") or "")
+            if not broadcaster_id or not self.bot_id or not token:
+                return False
+            sent, reason = await self.twitch_api.send_chat_announcement(
+                broadcaster_id, self.bot_id, token, text, color,
+            )
+        except Exception as exc:
+            sent, reason = False, f"{type(exc).__name__}: {exc}"
+        if not sent:
+            logger.warning(
+                "Twitch shoutout announcement failed in @%s; using normal chat: %s",
+                channel_name, reason,
+            )
+        return sent
 
     def _connected_channel_names(self) -> set[str]:
         """Return usable joined-channel names, ignoring TwitchIO reconnect gaps."""
@@ -126,7 +224,7 @@ class TwitchChatBot(commands.Bot):
                 return True
             target = args.lstrip("@").strip().lower()
             if not target:
-                await message.channel.send("Usage: !so @username")
+                await self._send_chat(message.channel, "Usage: !so @username")
                 return True
             await self._do_shoutout(message.channel, target)
             return True
@@ -143,7 +241,7 @@ class TwitchChatBot(commands.Bot):
             try:
                 from dashboard_server import push_stop_to_overlay
                 await push_stop_to_overlay(channel_name)
-                await message.channel.send("⏹ Stopped.")
+                await self._send_chat(message.channel, "⏹ 𝗦𝘁𝗼𝗽𝗽𝗲𝗱")
             except Exception as e:
                 logger.error(f"!stop overlay push failed for {channel_name}: {e}")
             return True
@@ -161,9 +259,9 @@ class TwitchChatBot(commands.Bot):
                 from dashboard_server import push_skip_to_overlay
                 pushed = await push_skip_to_overlay(channel_name)
                 if pushed:
-                    await message.channel.send("⏭ Skipped.")
+                    await self._send_chat(message.channel, "⏭ 𝗦𝗸𝗶𝗽𝗽𝗲𝗱")
                 else:
-                    await message.channel.send("❌ No OBS overlay connected.")
+                    await self._send_chat(message.channel, "❌ No OBS overlay connected.")
             except Exception as e:
                 logger.error(f"!skip overlay push failed for {channel_name}: {e}")
             return True
@@ -175,7 +273,7 @@ class TwitchChatBot(commands.Bot):
                 return True
             url = args.strip()
             if not url:
-                await message.channel.send("Usage: !play <youtube_url>")
+                await self._send_chat(message.channel, "Usage: !play <youtube_url>")
                 return True
             try:
                 await self._delete_msg(channel_name, message.id)
@@ -185,12 +283,12 @@ class TwitchChatBot(commands.Bot):
                 from dashboard_server import push_play_to_overlay
                 pushed = await push_play_to_overlay(channel_name, url, message.author.name)
                 if pushed:
-                    await message.channel.send("▶ Added to queue PogChamp")
+                    await self._send_chat(message.channel, "▶ 𝗤𝘂𝗲𝘂𝗲𝗱 • PogChamp")
                 else:
-                    await message.channel.send("❌ No OBS overlay connected — make sure the browser source is open.")
+                    await self._send_chat(message.channel, "❌ No OBS overlay connected — make sure the browser source is open.")
             except Exception as e:
                 logger.error(f"!play overlay push failed for {channel_name}: {e}")
-                await message.channel.send("❌ Could not push to overlay.")
+                await self._send_chat(message.channel, "❌ Could not push to overlay.")
             return True
 
         if command_name == "!uptime":
@@ -198,9 +296,9 @@ class TwitchChatBot(commands.Bot):
                 return True
             uptime = await self.twitch_api.get_stream_uptime(channel_name)
             if uptime:
-                await message.channel.send(f"We've been live for {uptime}!")
+                await self._send_chat(message.channel, f"⏱️ 𝗨𝗽𝘁𝗶𝗺𝗲 • {uptime}")
             else:
-                await message.channel.send(f"{channel_name} is not currently live.")
+                await self._send_chat(message.channel, f"⏱️ 𝗦𝘁𝗮𝘁𝘂𝘀 • {channel_name} is not currently live.")
             return True
 
         if command_name == "!game":
@@ -210,7 +308,7 @@ class TwitchChatBot(commands.Bot):
             if user:
                 info = await self.twitch_api.get_channel_info(user["id"])
                 game = info.get("game_name", "Unknown") if info else "Unknown"
-                await message.channel.send(f"Currently playing: {game}")
+                await self._send_chat(message.channel, f"🎮 𝗖𝗮𝘁𝗲𝗴𝗼𝗿𝘆 • {game}")
             return True
 
         if command_name == "!title":
@@ -220,7 +318,7 @@ class TwitchChatBot(commands.Bot):
             if user:
                 info = await self.twitch_api.get_channel_info(user["id"])
                 title = info.get("title", "No title set") if info else "No title set"
-                await message.channel.send(f"{title}")
+                await self._send_chat(message.channel, f"📺 𝗧𝗶𝘁𝗹𝗲 • {title}")
             return True
 
         if command_name == "!viewers":
@@ -228,9 +326,9 @@ class TwitchChatBot(commands.Bot):
                 return True
             count = await self.twitch_api.get_viewer_count(channel_name)
             if count is not None:
-                await message.channel.send(f"Current viewers: {count:,}")
+                await self._send_chat(message.channel, f"👀 𝗩𝗶𝗲𝘄𝗲𝗿𝘀 • {count:,}")
             else:
-                await message.channel.send(f"{channel_name} is not currently live.")
+                await self._send_chat(message.channel, f"👀 𝗦𝘁𝗮𝘁𝘂𝘀 • {channel_name} is not currently live.")
             return True
 
         if command_name == "!clip":
@@ -259,9 +357,9 @@ class TwitchChatBot(commands.Bot):
                 builtin = f"{builtin} !play !stop !skip".strip()
             if custom_cmds:
                 names = " ".join(c["command_name"] for c in custom_cmds)
-                await message.channel.send(f"Commands: {builtin} | Custom: {names}")
+                await self._send_chat(message.channel, f"⌨️ 𝗖𝗼𝗺𝗺𝗮𝗻𝗱𝘀 • {builtin} | 𝗖𝘂𝘀𝘁𝗼𝗺 • {names}")
             else:
-                await message.channel.send(f"Commands: {builtin}")
+                await self._send_chat(message.channel, f"⌨️ 𝗖𝗼𝗺𝗺𝗮𝗻𝗱𝘀 • {builtin}")
             return True
 
         return False
@@ -287,28 +385,29 @@ class TwitchChatBot(commands.Bot):
                     detail = payload.get("message", f"HTTP {resp.status}") if isinstance(payload, dict) else f"HTTP {resp.status}"
                     logger.warning("!clip failed for %s: %s", message.channel.name, detail)
                     if resp.status in (401, 403):
-                        await message.channel.send("❌ Clip permission is missing. A server manager needs to reconnect Twitch in the ExcelProtocol dashboard.")
+                        await self._send_chat(message.channel, "❌ Clip permission is missing. A server manager needs to reconnect Twitch in the ExcelProtocol dashboard.")
                     else:
-                        await message.channel.send("❌ Twitch could not create that clip right now.")
+                        await self._send_chat(message.channel, "❌ Twitch could not create that clip right now.")
                     return
 
             clips = payload.get("data", []) if isinstance(payload, dict) else []
             clip_id = clips[0].get("id") if clips else None
             if not clip_id:
                 raise RuntimeError("Twitch returned no clip ID")
-            await message.channel.send(
-                f"🎬 @{message.author.name} clipped the last {duration} seconds: "
+            await self._send_chat(
+                message.channel,
+                f"🎬 𝗖𝗹𝗶𝗽 • @{message.author.name} clipped the last {duration} seconds: "
                 f"https://clips.twitch.tv/{clip_id}"
             )
         except Exception as e:
             logger.error("!clip creation failed for %s: %s", message.channel.name, e, exc_info=True)
-            await message.channel.send("❌ Twitch could not create that clip right now.")
+            await self._send_chat(message.channel, "❌ Twitch could not create that clip right now.")
 
     async def _do_shoutout(self, channel, target_login: str):
         try:
             info = await self.twitch_api.get_last_stream_info(target_login)
             if not info:
-                await channel.send(f"Could not find Twitch user: {target_login}")
+                await self._send_chat(channel, f"Could not find Twitch user: {target_login}")
                 return
 
             display_name = info["user"].get("display_name", target_login)
@@ -326,22 +425,22 @@ class TwitchChatBot(commands.Bot):
 
             if date_str:
                 msg = (
-                    f"Show some love to {display_name}! "
-                    f"They were last seen streaming {game} on {date_str}. "
-                    f"Give them a follow -> twitch.tv/{target_login}"
+                    f"📣 𝗦𝗛𝗢𝗨𝗧𝗢𝗨𝗧 • Go show @{display_name} some love! "
+                    f"🎮 {game} • Last live {date_str} • twitch.tv/{target_login}"
                 )
             else:
                 msg = (
-                    f"Show some love to {display_name}! "
-                    f"They stream {game}. "
-                    f"Give them a follow -> twitch.tv/{target_login}"
+                    f"📣 𝗦𝗛𝗢𝗨𝗧𝗢𝗨𝗧 • Go show @{display_name} some love! "
+                    f"🎮 {game} • twitch.tv/{target_login}"
                 )
 
-            await channel.send(msg)
+            announced = await self._send_announcement(channel, msg, color="purple")
+            if not announced:
+                await self._send_chat(channel, msg)
 
         except Exception as e:
             logger.error(f"Error in shoutout for {target_login}: {e}", exc_info=True)
-            await channel.send(f"Failed to get shoutout info for {target_login}")
+            await self._send_chat(channel, f"Failed to get shoutout info for {target_login}")
 
     async def _handle_custom(self, message, command_name: str, args: str, channel_name: str):
         cmd = self.db.get_twitch_command(channel_name, command_name)
@@ -381,7 +480,7 @@ class TwitchChatBot(commands.Bot):
             command_name=command_name,
         )
         if response:
-            await message.channel.send(response)
+            await self._send_chat(message.channel, response)
 
     def _has_permission(self, author, channel_name: str, permission: str) -> bool:
         if permission == "everyone":
@@ -456,7 +555,7 @@ class TwitchChatBot(commands.Bot):
     async def _send_and_delete(self, channel, channel_name: str, text: str, delay: int = 3):
         """Send a response message — bot responses are not deleted (no API support)."""
         try:
-            await channel.send(text)
+            await self.send_chat(channel_name, text, channel)
         except Exception as e:
             logger.debug(f"send error: {e}")
 
