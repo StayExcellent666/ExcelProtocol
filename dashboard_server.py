@@ -84,6 +84,7 @@ CHAT_NOTIFICATION_SOUNDS = set(CHAT_NOTIFICATION_SOUND_FILES)
 CHAT_NOTIFICATION_SOUND_DIR = os.path.join(
     os.path.dirname(__file__), "assets", "chat_sounds"
 )
+CHAT_NOTIFICATION_KEEPALIVE_FILE = "keepalive.wav"
 CHAT_NOTIFICATION_THROTTLE_SECONDS = 5.0
 _chat_sound_last_attempt: dict[str, float] = {}
 
@@ -3036,7 +3037,11 @@ async def overlay_ws(request):
 async def chat_sound_asset(request):
     """Serve one allow-listed CC0 notification sound to dashboards and OBS."""
     sound_name = request.match_info["sound_name"]
-    filename = CHAT_NOTIFICATION_SOUND_FILES.get(sound_name)
+    filename = (
+        CHAT_NOTIFICATION_KEEPALIVE_FILE
+        if sound_name == "_keepalive"
+        else CHAT_NOTIFICATION_SOUND_FILES.get(sound_name)
+    )
     if not filename:
         raise web.HTTPNotFound(reason="Unknown chat notification sound")
     path = os.path.join(CHAT_NOTIFICATION_SOUND_DIR, filename)
@@ -3185,8 +3190,23 @@ let currentStart = 0;
 let currentEnd = null;
 let currentAudioOnly = false;
 const chatSoundPlayers = new Map();
+let chatAudioKeepAlive = null;
 let lastChatSoundAt = 0;
 const chatSoundNames = {json.dumps(list(CHAT_NOTIFICATION_SOUND_FILES))};
+
+async function startChatAudioKeepAlive() {{
+  if (chatAudioKeepAlive) return;
+  const audioElement = new Audio("/media/chat-sounds/_keepalive.wav");
+  audioElement.preload = "auto";
+  audioElement.loop = true;
+  audioElement.playsInline = true;
+  audioElement.volume = 1;
+  audioElement.load();
+  chatAudioKeepAlive = audioElement;
+  try {{ await audioElement.play(); }} catch (error) {{
+    console.warn("OBS audio keep-alive could not start", error);
+  }}
+}}
 
 function loadChatSound(sound) {{
   const selected = chatSoundNames.includes(sound) ? sound : "confirmation_chime";
@@ -3404,6 +3424,7 @@ function connectOverlaySocket() {{
   ws.onopen = () => {{
     console.log("Overlay connected");
     reconnectDelay = 1000;
+    startChatAudioKeepAlive();
     chatSoundNames.forEach(loadChatSound);
   }};
   ws.onmessage = handleSocketMessage;
@@ -3419,6 +3440,7 @@ function connectOverlaySocket() {{
   }};
 }}
 
+startChatAudioKeepAlive();
 connectOverlaySocket();
 
 function onPlayerStateChange(e) {{

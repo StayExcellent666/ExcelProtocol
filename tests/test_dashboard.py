@@ -1046,11 +1046,19 @@ class TestDevDashboardRoutes:
         assert set(dashboard_server.CHAT_NOTIFICATION_SOUND_FILES) == expected
         for filename in dashboard_server.CHAT_NOTIFICATION_SOUND_FILES.values():
             assert (Path(dashboard_server.CHAT_NOTIFICATION_SOUND_DIR) / filename).is_file()
+        keepalive = (
+            Path(dashboard_server.CHAT_NOTIFICATION_SOUND_DIR)
+            / dashboard_server.CHAT_NOTIFICATION_KEEPALIVE_FILE
+        )
+        assert keepalive.is_file()
         assert "/media/chat-sounds/" in source
         assert "new Audio(" in source
         assert 'audioElement.preload = "auto"' in source
         assert "await audioElement.play()" in source
         assert "AudioContext" not in source
+        assert 'new Audio("/media/chat-sounds/_keepalive.wav")' in source
+        assert "audioElement.loop = true" in source
+        assert "startChatAudioKeepAlive();" in source
         assert "chatSoundNames.forEach(loadChatSound)" in source
         chat_playback = source.split(
             "async function playChatNotification", 1
