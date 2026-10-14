@@ -2626,62 +2626,31 @@ function customCommandPreview(template, commandName, args) {
   return Array.from(rendered.replace(/[\r\n]+/g," ").replace(/\s+/g," ").trim()).slice(0,500).join("");
 }
 
-let chatSoundPreviewContext = null;
-const chatSoundPreviewBuffers = new Map();
+const chatSoundPreviewPlayers = new Map();
 const CHAT_SOUND_NAMES = [
   "soft_bong", "confirmation_chime", "glass_tap", "soft_pluck",
-  "water_drop", "ui_select", "soft_click", "digital_glitch",
+  "water_drop", "ui_select", "open_tone", "question_chime",
 ];
 
-async function loadChatSoundPreview(ctx, sound) {
+function loadChatSoundPreview(sound) {
   const selected = CHAT_SOUND_NAMES.includes(sound) ? sound : "confirmation_chime";
-  if (chatSoundPreviewBuffers.has(selected)) return chatSoundPreviewBuffers.get(selected);
-  const pending = (async () => {
-    const response = await fetch(`/media/chat-sounds/${encodeURIComponent(selected)}.wav`);
-    if (!response.ok) throw new Error(`Could not load chat sound: ${selected}`);
-    return ctx.decodeAudioData(await response.arrayBuffer());
-  })();
-  chatSoundPreviewBuffers.set(selected, pending);
-  try {
-    return await pending;
-  } catch (error) {
-    chatSoundPreviewBuffers.delete(selected);
-    throw error;
-  }
+  if (chatSoundPreviewPlayers.has(selected)) return chatSoundPreviewPlayers.get(selected);
+  const audioElement = new Audio(`/media/chat-sounds/${encodeURIComponent(selected)}.wav`);
+  audioElement.preload = "auto";
+  audioElement.playsInline = true;
+  audioElement.load();
+  chatSoundPreviewPlayers.set(selected, audioElement);
+  return audioElement;
 }
 
 async function playChatSoundPreview(sound, volume) {
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return;
-  if (!chatSoundPreviewContext) {
-    try {
-      chatSoundPreviewContext = new AudioContextClass({ sampleRate:48000, latencyHint:"playback" });
-    } catch {
-      chatSoundPreviewContext = new AudioContextClass();
-    }
-  }
-  const ctx = chatSoundPreviewContext;
-  if (ctx.state === "suspended") {
-    try { await ctx.resume(); } catch { return; }
-  }
   const level = Math.min(1, Math.max(0, Number(volume || 0) / 100));
   if (!level) return;
-  let buffer;
-  try { buffer = await loadChatSoundPreview(ctx, sound); } catch { return; }
-  const source = ctx.createBufferSource();
-  const gain = ctx.createGain();
-  source.buffer = buffer;
-  const when = ctx.currentTime + 0.005;
-  const end = when + buffer.duration;
-  const attackEnd = when + Math.min(0.008, buffer.duration * 0.25);
-  const releaseStart = Math.max(attackEnd, end - Math.min(0.012, buffer.duration * 0.3));
-  gain.gain.setValueAtTime(0, when);
-  gain.gain.linearRampToValueAtTime(level, attackEnd);
-  gain.gain.setValueAtTime(level, releaseStart);
-  gain.gain.linearRampToValueAtTime(0, end);
-  source.connect(gain).connect(ctx.destination);
-  source.onended = () => { try { source.disconnect(); gain.disconnect(); } catch {} };
-  source.start(when);
+  const audioElement = loadChatSoundPreview(sound);
+  audioElement.pause();
+  audioElement.currentTime = 0;
+  audioElement.volume = level;
+  try { await audioElement.play(); } catch {}
 }
 
 function TwitchTab({ guildId, isDev }) {
@@ -3056,8 +3025,8 @@ function TwitchTab({ guildId, isDev }) {
               <option value="soft_pluck">Soft Pluck</option>
               <option value="water_drop">Water Drop</option>
               <option value="ui_select">UI Select</option>
-              <option value="soft_click">Soft Click</option>
-              <option value="digital_glitch">Digital Glitch</option>
+              <option value="open_tone">Open Tone</option>
+              <option value="question_chime">Question Chime</option>
             </CyanSelect>
           </Field>
           <Field label={`Volume · ${chatSound.volume}%`}>

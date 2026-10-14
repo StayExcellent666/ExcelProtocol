@@ -504,6 +504,14 @@ class Database:
         # Move every removed choice to the real-audio default so an existing
         # setup keeps working after a redeploy.
         cursor.execute(
+            '''UPDATE twitch_channels SET chat_sound_name = 'open_tone'
+               WHERE chat_sound_name = 'soft_click' '''
+        )
+        cursor.execute(
+            '''UPDATE twitch_channels SET chat_sound_name = 'question_chime'
+               WHERE chat_sound_name = 'digital_glitch' '''
+        )
+        cursor.execute(
             '''UPDATE twitch_channels SET chat_sound_name = 'confirmation_chime'
                WHERE chat_sound_name IN (
                    'soft_chime', 'digital_blip', 'gentle_pop',
@@ -3282,7 +3290,7 @@ class Database:
 
     CHAT_SOUND_NAMES = (
         "soft_bong", "confirmation_chime", "glass_tap", "soft_pluck",
-        "water_drop", "ui_select", "soft_click", "digital_glitch",
+        "water_drop", "ui_select", "open_tone", "question_chime",
     )
 
     def get_chat_sound_settings(self, guild_id: int) -> Dict:

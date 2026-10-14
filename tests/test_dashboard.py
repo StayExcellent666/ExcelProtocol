@@ -1041,19 +1041,25 @@ class TestDevDashboardRoutes:
         assert "playChatNotification(msg.sound, msg.volume);" in source
         expected = {
             "soft_bong", "confirmation_chime", "glass_tap", "soft_pluck",
-            "water_drop", "ui_select", "soft_click", "digital_glitch",
+            "water_drop", "ui_select", "open_tone", "question_chime",
         }
         assert set(dashboard_server.CHAT_NOTIFICATION_SOUND_FILES) == expected
         for filename in dashboard_server.CHAT_NOTIFICATION_SOUND_FILES.values():
             assert (Path(dashboard_server.CHAT_NOTIFICATION_SOUND_DIR) / filename).is_file()
         assert "/media/chat-sounds/" in source
-        assert "ctx.decodeAudioData(" in source
-        assert "ctx.createBufferSource()" in source
-        assert 'sampleRate:48000, latencyHint:"playback"' in source
-        assert "chatAudioContext.createOscillator()" not in source
-        assert "chatAudioKeepAlive.loop = true" in source
-        assert "chatAudioKeepAlive.start()" in source
-        assert "Promise.allSettled(chatSoundNames.map" in source
+        assert "new Audio(" in source
+        assert 'audioElement.preload = "auto"' in source
+        assert "await audioElement.play()" in source
+        assert "AudioContext" not in source
+        assert "chatSoundNames.forEach(loadChatSound)" in source
+        chat_playback = source.split(
+            "async function playChatNotification", 1
+        )[1].split("function formatTime", 1)[0]
+        assert "priorityQueue" not in chat_playback
+        assert "queue." not in chat_playback
+        assert "playing =" not in chat_playback
+        assert "player.stopVideo" not in chat_playback
+        assert "player.setVolume" not in chat_playback
 
     def test_custom_command_editor_has_variable_buttons_and_live_preview(self):
         from pathlib import Path

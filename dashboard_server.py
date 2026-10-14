@@ -77,8 +77,8 @@ CHAT_NOTIFICATION_SOUND_FILES = {
     "soft_pluck": "pluck_001.wav",
     "water_drop": "drop_003.wav",
     "ui_select": "select_003.wav",
-    "soft_click": "click_001.wav",
-    "digital_glitch": "glitch_002.wav",
+    "open_tone": "open_002.wav",
+    "question_chime": "question_001.wav",
 }
 CHAT_NOTIFICATION_SOUNDS = set(CHAT_NOTIFICATION_SOUND_FILES)
 CHAT_NOTIFICATION_SOUND_DIR = os.path.join(
@@ -3184,58 +3184,19 @@ let playbackRecoveryTimer = null;
 let currentStart = 0;
 let currentEnd = null;
 let currentAudioOnly = false;
-let chatAudioContext = null;
-let chatAudioMaster = null;
-let chatAudioKeepAlive = null;
-const chatSoundBuffers = new Map();
+const chatSoundPlayers = new Map();
 let lastChatSoundAt = 0;
 const chatSoundNames = {json.dumps(list(CHAT_NOTIFICATION_SOUND_FILES))};
 
-async function ensureChatAudio() {{
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return null;
-  if (!chatAudioContext) {{
-    try {{
-      chatAudioContext = new AudioContextClass({{ sampleRate:48000, latencyHint:"playback" }});
-    }} catch {{
-      chatAudioContext = new AudioContextClass();
-    }}
-    chatAudioMaster = chatAudioContext.createGain();
-    chatAudioMaster.gain.value = 1;
-    chatAudioMaster.connect(chatAudioContext.destination);
-
-    // Keep the graph scheduled with exact digital silence. The previous
-    // near-silent oscillator could still interact with OBS resampling.
-    const silentBuffer = chatAudioContext.createBuffer(
-      1, chatAudioContext.sampleRate, chatAudioContext.sampleRate
-    );
-    chatAudioKeepAlive = chatAudioContext.createBufferSource();
-    chatAudioKeepAlive.buffer = silentBuffer;
-    chatAudioKeepAlive.loop = true;
-    chatAudioKeepAlive.connect(chatAudioMaster);
-    chatAudioKeepAlive.start();
-  }}
-  if (chatAudioContext.state === "suspended") {{
-    try {{ await chatAudioContext.resume(); }} catch {{ return null; }}
-  }}
-  return chatAudioContext;
-}}
-
-async function loadChatSound(ctx, sound) {{
+function loadChatSound(sound) {{
   const selected = chatSoundNames.includes(sound) ? sound : "confirmation_chime";
-  if (chatSoundBuffers.has(selected)) return chatSoundBuffers.get(selected);
-  const pending = (async () => {{
-    const response = await fetch(`/media/chat-sounds/${{encodeURIComponent(selected)}}.wav`);
-    if (!response.ok) throw new Error(`Could not load chat sound: ${{selected}}`);
-    return ctx.decodeAudioData(await response.arrayBuffer());
-  }})();
-  chatSoundBuffers.set(selected, pending);
-  try {{
-    return await pending;
-  }} catch (error) {{
-    chatSoundBuffers.delete(selected);
-    throw error;
-  }}
+  if (chatSoundPlayers.has(selected)) return chatSoundPlayers.get(selected);
+  const audioElement = new Audio(`/media/chat-sounds/${{encodeURIComponent(selected)}}.wav`);
+  audioElement.preload = "auto";
+  audioElement.playsInline = true;
+  audioElement.load();
+  chatSoundPlayers.set(selected, audioElement);
+  return audioElement;
 }}
 
 async function playChatNotification(sound, volume) {{
@@ -3244,29 +3205,13 @@ async function playChatNotification(sound, volume) {{
   lastChatSoundAt = nowMs;
   const level = Math.min(1, Math.max(0, Number(volume || 0) / 100));
   if (!level) return;
-  const ctx = await ensureChatAudio();
-  if (!ctx || !chatAudioMaster) return;
-  let buffer;
-  try {{ buffer = await loadChatSound(ctx, sound); }} catch (error) {{
-    console.warn("Chat notification sound failed to load", error);
-    return;
+  const audioElement = loadChatSound(sound);
+  audioElement.pause();
+  audioElement.currentTime = 0;
+  audioElement.volume = level;
+  try {{ await audioElement.play(); }} catch (error) {{
+    console.warn("Chat notification sound failed to play", error);
   }}
-  const source = ctx.createBufferSource();
-  const playbackGain = ctx.createGain();
-  source.buffer = buffer;
-  const when = ctx.currentTime + 0.005;
-  const end = when + buffer.duration;
-  const attackEnd = when + Math.min(0.008, buffer.duration * 0.25);
-  const releaseStart = Math.max(attackEnd, end - Math.min(0.012, buffer.duration * 0.3));
-  playbackGain.gain.setValueAtTime(0, when);
-  playbackGain.gain.linearRampToValueAtTime(level, attackEnd);
-  playbackGain.gain.setValueAtTime(level, releaseStart);
-  playbackGain.gain.linearRampToValueAtTime(0, end);
-  source.connect(playbackGain).connect(chatAudioMaster);
-  source.onended = () => {{
-    try {{ source.disconnect(); playbackGain.disconnect(); }} catch {{}}
-  }};
-  source.start(when);
 }}
 
 
@@ -3459,9 +3404,7 @@ function connectOverlaySocket() {{
   ws.onopen = () => {{
     console.log("Overlay connected");
     reconnectDelay = 1000;
-    ensureChatAudio()
-      .then(ctx => ctx && Promise.allSettled(chatSoundNames.map(sound => loadChatSound(ctx, sound))))
-      .catch(() => {{}});
+    chatSoundNames.forEach(loadChatSound);
   }};
   ws.onmessage = handleSocketMessage;
   ws.onerror = () => {{ try {{ ws.close(); }} catch {{}} }};

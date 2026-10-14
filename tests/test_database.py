@@ -209,11 +209,31 @@ class TestSchema:
         db.init_database()
         assert db.get_chat_sound_settings(123)["chat_sound_name"] == "confirmation_chime"
 
+    def test_short_chat_sounds_migrate_to_longer_replacements(self, db):
+        db.set_twitch_channel(123, "streamer")
+        conn = db.get_connection()
+        conn.execute(
+            "UPDATE twitch_channels SET chat_sound_name = 'soft_click' WHERE guild_id = 123"
+        )
+        conn.commit()
+        conn.close()
+        db.init_database()
+        assert db.get_chat_sound_settings(123)["chat_sound_name"] == "open_tone"
+
+        conn = db.get_connection()
+        conn.execute(
+            "UPDATE twitch_channels SET chat_sound_name = 'digital_glitch' WHERE guild_id = 123"
+        )
+        conn.commit()
+        conn.close()
+        db.init_database()
+        assert db.get_chat_sound_settings(123)["chat_sound_name"] == "question_chime"
+
     def test_real_audio_chat_sound_choices_are_valid(self, db):
         db.set_twitch_channel(123, "streamer")
         for sound_name in (
             "soft_bong", "confirmation_chime", "glass_tap", "soft_pluck",
-            "water_drop", "ui_select", "soft_click", "digital_glitch",
+            "water_drop", "ui_select", "open_tone", "question_chime",
         ):
             db.set_chat_sound_settings(123, True, sound_name, 35)
             assert db.get_chat_sound_settings(123)["chat_sound_name"] == sound_name
