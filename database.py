@@ -491,7 +491,7 @@ class Database:
         # remain silent until a server enables it from the dashboard.
         for column_sql, column_name in (
             ('ALTER TABLE twitch_channels ADD COLUMN chat_sound_enabled INTEGER NOT NULL DEFAULT 0', 'chat_sound_enabled'),
-            ("ALTER TABLE twitch_channels ADD COLUMN chat_sound_name TEXT NOT NULL DEFAULT 'bubble_pop'", 'chat_sound_name'),
+            ("ALTER TABLE twitch_channels ADD COLUMN chat_sound_name TEXT NOT NULL DEFAULT 'confirmation_chime'", 'chat_sound_name'),
             ('ALTER TABLE twitch_channels ADD COLUMN chat_sound_volume INTEGER NOT NULL DEFAULT 35', 'chat_sound_volume'),
         ):
             try:
@@ -500,12 +500,16 @@ class Database:
                 logger.info("Migration: added %s to twitch_channels", column_name)
             except Exception:
                 pass  # Column already exists
-        # The original synthesized alerts were replaced with a softer set.
-        # Move any saved legacy choice to the new default so nobody keeps a
-        # removed/harsh sound after a redeploy.
+        # The synthesized alerts were replaced with licensed audio files.
+        # Move every removed choice to the real-audio default so an existing
+        # setup keeps working after a redeploy.
         cursor.execute(
-            '''UPDATE twitch_channels SET chat_sound_name = 'bubble_pop'
-               WHERE chat_sound_name IN ('soft_chime', 'digital_blip', 'gentle_pop')'''
+            '''UPDATE twitch_channels SET chat_sound_name = 'confirmation_chime'
+               WHERE chat_sound_name IN (
+                   'soft_chime', 'digital_blip', 'gentle_pop',
+                   'bubble_pop', 'glass_drop', 'calm_pulse', 'pixel_spark',
+                   'classic_ping', 'soft_bell', 'double_chime', 'soft_tick'
+               )'''
         )
         conn.commit()
 
@@ -3277,8 +3281,8 @@ class Database:
         conn.close()
 
     CHAT_SOUND_NAMES = (
-        "bubble_pop", "glass_drop", "calm_pulse", "pixel_spark",
-        "classic_ping", "soft_bell", "double_chime", "soft_tick",
+        "soft_bong", "confirmation_chime", "glass_tap", "soft_pluck",
+        "water_drop", "ui_select", "soft_click", "digital_glitch",
     )
 
     def get_chat_sound_settings(self, guild_id: int) -> Dict:
@@ -3293,7 +3297,7 @@ class Database:
         return {
             'chat_sound_enabled': bool(row[0]) if row else False,
             'chat_sound_name': (
-                row[1] if row and row[1] in self.CHAT_SOUND_NAMES else 'bubble_pop'
+                row[1] if row and row[1] in self.CHAT_SOUND_NAMES else 'confirmation_chime'
             ),
             'chat_sound_volume': max(0, min(100, int(row[2]))) if row else 35,
         }
@@ -3326,7 +3330,7 @@ class Database:
         return [
             {
                 'guild_id': row[0],
-                'sound_name': row[1] if row[1] in self.CHAT_SOUND_NAMES else 'bubble_pop',
+                'sound_name': row[1] if row[1] in self.CHAT_SOUND_NAMES else 'confirmation_chime',
                 'volume': max(0, min(100, int(row[2]))),
             }
             for row in rows

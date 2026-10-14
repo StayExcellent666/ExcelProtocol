@@ -54,7 +54,7 @@ class TestSchema:
         }
         conn.close()
         assert cols["chat_sound_enabled"] == "0"
-        assert cols["chat_sound_name"] == "'bubble_pop'"
+        assert cols["chat_sound_name"] == "'confirmation_chime'"
         assert cols["chat_sound_volume"] == "35"
 
     def test_twitch_command_user_usage_schema_and_counter(self, db):
@@ -180,38 +180,41 @@ class TestSchema:
         db.set_twitch_channel(123, "Streamer")
         assert db.get_chat_sound_settings(123) == {
             "chat_sound_enabled": False,
-            "chat_sound_name": "bubble_pop",
+            "chat_sound_name": "confirmation_chime",
             "chat_sound_volume": 35,
         }
         assert db.get_chat_sound_targets("streamer") == []
 
-        db.set_chat_sound_settings(123, True, "glass_drop", 62)
+        db.set_chat_sound_settings(123, True, "glass_tap", 62)
         assert db.get_chat_sound_settings(123) == {
             "chat_sound_enabled": True,
-            "chat_sound_name": "glass_drop",
+            "chat_sound_name": "glass_tap",
             "chat_sound_volume": 62,
         }
         assert db.get_chat_sound_targets("#STREAMER") == [{
             "guild_id": 123,
-            "sound_name": "glass_drop",
+            "sound_name": "glass_tap",
             "volume": 62,
         }]
 
-    def test_legacy_chat_sounds_migrate_to_bubble_pop(self, db):
+    def test_legacy_chat_sounds_migrate_to_real_audio_default(self, db):
         db.set_twitch_channel(123, "streamer")
         conn = db.get_connection()
         conn.execute(
-            "UPDATE twitch_channels SET chat_sound_name = 'soft_chime' WHERE guild_id = 123"
+            "UPDATE twitch_channels SET chat_sound_name = 'double_chime' WHERE guild_id = 123"
         )
         conn.commit()
         conn.close()
 
         db.init_database()
-        assert db.get_chat_sound_settings(123)["chat_sound_name"] == "bubble_pop"
+        assert db.get_chat_sound_settings(123)["chat_sound_name"] == "confirmation_chime"
 
-    def test_common_chat_sound_choices_are_valid(self, db):
+    def test_real_audio_chat_sound_choices_are_valid(self, db):
         db.set_twitch_channel(123, "streamer")
-        for sound_name in ("classic_ping", "soft_bell", "double_chime", "soft_tick"):
+        for sound_name in (
+            "soft_bong", "confirmation_chime", "glass_tap", "soft_pluck",
+            "water_drop", "ui_select", "soft_click", "digital_glitch",
+        ):
             db.set_chat_sound_settings(123, True, sound_name, 35)
             assert db.get_chat_sound_settings(123)["chat_sound_name"] == sound_name
 

@@ -1,0 +1,10 @@
+Interface Sounds 1.0
+Created by Kenney (https://kenney.nl)
+
+These selected audio files are redistributed under Creative Commons CC0 1.0:
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Source pack:
+https://kenney.nl/assets/interface-sounds
+
+Attribution is not required, but is appreciated by the original creator.

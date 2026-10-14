@@ -2628,52 +2628,26 @@ function customCommandPreview(template, commandName, args) {
 
 let chatSoundPreviewContext = null;
 const chatSoundPreviewBuffers = new Map();
-const CHAT_SOUND_VOICES = {
-  bubble_pop: [[620,180,0,0.24,"sine",0.82,0.012],[980,330,0.012,0.14,"sine",0.2,0.01]],
-  classic_ping: [[659.25,698.46,0,0.24,"sine",0.55,0.018],[987.77,1046.5,0.08,0.3,"sine",0.28,0.02]],
-  soft_bell: [[783.99,760,0,0.65,"sine",0.45,0.025],[1567.98,1500,0.015,0.45,"sine",0.14,0.02],[2351.97,2200,0.02,0.3,"sine",0.06,0.018]],
-  double_chime: [[523.25,587.33,0,0.3,"sine",0.45,0.022],[783.99,880,0.22,0.42,"sine",0.42,0.022]],
-  soft_tick: [[1100,760,0,0.08,"sine",0.28,0.008],[440,300,0.015,0.11,"sine",0.18,0.008]],
-  glass_drop: [[880,740,0,0.42,"sine",0.55,0.02],[1320,1100,0.035,0.52,"sine",0.22,0.025]],
-  calm_pulse: [[392,440,0,0.28,"sine",0.5,0.025],[523.25,587.33,0.18,0.36,"sine",0.38,0.025]],
-  pixel_spark: [[520,740,0,0.12,"triangle",0.32,0.018],[740,1040,0.1,0.14,"triangle",0.28,0.018],[1040,1320,0.21,0.2,"sine",0.22,0.02]],
-};
+const CHAT_SOUND_NAMES = [
+  "soft_bong", "confirmation_chime", "glass_tap", "soft_pluck",
+  "water_drop", "ui_select", "soft_click", "digital_glitch",
+];
 
-function renderChatSoundPreviewBuffer(ctx, sound) {
-  if (chatSoundPreviewBuffers.has(sound)) return chatSoundPreviewBuffers.get(sound);
-  const voices = CHAT_SOUND_VOICES[sound] || CHAT_SOUND_VOICES.bubble_pop;
-  const sampleRate = ctx.sampleRate;
-  const padding = 0.045;
-  const voiceEnd = Math.max(...voices.map(voice => voice[2] + voice[3]));
-  const buffer = ctx.createBuffer(1, Math.ceil((padding + voiceEnd + 0.08) * sampleRate), sampleRate);
-  const samples = buffer.getChannelData(0);
-  const smoothstep = value => value * value * (3 - 2 * value);
-  for (const voice of voices) {
-    const [startFrequency,endFrequency,start,duration,type,gainScale,attack] = voice;
-    const startIndex = Math.floor((padding + start) * sampleRate);
-    const frameCount = Math.max(2, Math.floor(duration * sampleRate));
-    const release = Math.min(0.065, duration * 0.38);
-    let phase = 0;
-    for (let frame = 0; frame < frameCount; frame += 1) {
-      const localTime = frame / sampleRate;
-      const progress = frame / (frameCount - 1);
-      const frequency = startFrequency * Math.pow(endFrequency / startFrequency, progress);
-      phase += 2 * Math.PI * frequency / sampleRate;
-      const attackEnvelope = smoothstep(Math.min(1, localTime / attack));
-      const releaseEnvelope = smoothstep(Math.min(1, (duration - localTime) / release));
-      const waveform = type === "triangle" ? (2 / Math.PI) * Math.asin(Math.sin(phase)) : Math.sin(phase);
-      const target = startIndex + frame;
-      if (target < samples.length) samples[target] += waveform * 0.18 * gainScale * attackEnvelope * releaseEnvelope;
-    }
+async function loadChatSoundPreview(ctx, sound) {
+  const selected = CHAT_SOUND_NAMES.includes(sound) ? sound : "confirmation_chime";
+  if (chatSoundPreviewBuffers.has(selected)) return chatSoundPreviewBuffers.get(selected);
+  const pending = (async () => {
+    const response = await fetch(`/media/chat-sounds/${encodeURIComponent(selected)}.wav`);
+    if (!response.ok) throw new Error(`Could not load chat sound: ${selected}`);
+    return ctx.decodeAudioData(await response.arrayBuffer());
+  })();
+  chatSoundPreviewBuffers.set(selected, pending);
+  try {
+    return await pending;
+  } catch (error) {
+    chatSoundPreviewBuffers.delete(selected);
+    throw error;
   }
-  const alpha = 1 - Math.exp(-2 * Math.PI * 3600 / sampleRate);
-  let filtered = 0;
-  for (let index = 0; index < samples.length; index += 1) {
-    filtered += alpha * (samples[index] - filtered);
-    samples[index] = Math.tanh(filtered * 1.1) * 0.9;
-  }
-  chatSoundPreviewBuffers.set(sound, buffer);
-  return buffer;
 }
 
 async function playChatSoundPreview(sound, volume) {
@@ -2692,13 +2666,22 @@ async function playChatSoundPreview(sound, volume) {
   }
   const level = Math.min(1, Math.max(0, Number(volume || 0) / 100));
   if (!level) return;
+  let buffer;
+  try { buffer = await loadChatSoundPreview(ctx, sound); } catch { return; }
   const source = ctx.createBufferSource();
   const gain = ctx.createGain();
-  source.buffer = renderChatSoundPreviewBuffer(ctx, sound);
-  gain.gain.value = level;
+  source.buffer = buffer;
+  const when = ctx.currentTime + 0.005;
+  const end = when + buffer.duration;
+  const attackEnd = when + Math.min(0.008, buffer.duration * 0.25);
+  const releaseStart = Math.max(attackEnd, end - Math.min(0.012, buffer.duration * 0.3));
+  gain.gain.setValueAtTime(0, when);
+  gain.gain.linearRampToValueAtTime(level, attackEnd);
+  gain.gain.setValueAtTime(level, releaseStart);
+  gain.gain.linearRampToValueAtTime(0, end);
   source.connect(gain).connect(ctx.destination);
   source.onended = () => { try { source.disconnect(); gain.disconnect(); } catch {} };
-  source.start(ctx.currentTime + 0.03);
+  source.start(when);
 }
 
 function TwitchTab({ guildId, isDev }) {
@@ -2715,7 +2698,7 @@ function TwitchTab({ guildId, isDev }) {
   const [savingClip, setSavingClip] = useState(false);
   const [savingBuiltin, setSavingBuiltin] = useState(null);
   const [clipForm, setClipForm] = useState({ enabled:false, duration:45, cooldown:60 });
-  const [chatSound, setChatSound] = useState({ enabled:false, sound:"bubble_pop", volume:35 });
+  const [chatSound, setChatSound] = useState({ enabled:false, sound:"confirmation_chime", volume:35 });
   const [savingChatSound, setSavingChatSound] = useState(false);
   const [chatSoundSaved, setChatSoundSaved] = useState(false);
   const [testingChatSound, setTestingChatSound] = useState(false);
@@ -2746,7 +2729,7 @@ function TwitchTab({ guildId, isDev }) {
       });
       setChatSound({
         enabled: !!data.chat_sound_enabled,
-        sound: data.chat_sound_name || "bubble_pop",
+        sound: data.chat_sound_name || "confirmation_chime",
         volume: data.chat_sound_volume ?? 35,
       });
     } catch(e) { console.error(e); }
@@ -3067,14 +3050,14 @@ function TwitchTab({ guildId, isDev }) {
         <div style={{ display:"flex", alignItems:"flex-end", gap:12, flexWrap:"wrap", marginTop:14 }}>
           <Field label="Sound">
             <CyanSelect value={chatSound.sound} onChange={e=>setChatSound(current=>({...current, sound:e.target.value}))}>
-              <option value="bubble_pop">Soft Bubble Pop</option>
-              <option value="classic_ping">Classic Ping</option>
-              <option value="soft_bell">Soft Bell</option>
-              <option value="double_chime">Double Chime</option>
-              <option value="soft_tick">Soft Tick</option>
-              <option value="glass_drop">Glass Drop</option>
-              <option value="calm_pulse">Calm Pulse</option>
-              <option value="pixel_spark">Pixel Spark</option>
+              <option value="soft_bong">Soft Bong</option>
+              <option value="confirmation_chime">Confirmation Chime</option>
+              <option value="glass_tap">Glass Tap</option>
+              <option value="soft_pluck">Soft Pluck</option>
+              <option value="water_drop">Water Drop</option>
+              <option value="ui_select">UI Select</option>
+              <option value="soft_click">Soft Click</option>
+              <option value="digital_glitch">Digital Glitch</option>
             </CyanSelect>
           </Field>
           <Field label={`Volume · ${chatSound.volume}%`}>

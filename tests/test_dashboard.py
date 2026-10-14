@@ -409,6 +409,7 @@ class TestDevDashboardRoutes:
         assert ("POST", "/api/guild/{guild_id}/twitch/overlay-appearance") in routes
         assert ("POST", "/api/guild/{guild_id}/twitch/chat-sound") in routes
         assert ("POST", "/api/guild/{guild_id}/twitch/chat-sound-test") in routes
+        assert ("GET", "/media/chat-sounds/{sound_name}.wav") in routes
         assert ("GET", "/api/dev/admins") in routes
         assert ("POST", "/api/dev/admins") in routes
         assert ("DELETE", "/api/dev/admins/{user_id}") in routes
@@ -1033,18 +1034,26 @@ class TestDevDashboardRoutes:
 
     def test_overlay_chat_sound_is_independent_of_video_queue(self):
         import inspect
+        from pathlib import Path
+
         source = inspect.getsource(dashboard_server.overlay_page)
         assert 'msg.type === "chat_notification"' in source
         assert "playChatNotification(msg.sound, msg.volume);" in source
-        for sound_name in (
-            "glass_drop", "calm_pulse", "pixel_spark", "classic_ping",
-            "soft_bell", "double_chime", "soft_tick",
-        ):
-            assert sound_name in source
-        assert "ctx.createBuffer(" in source
+        expected = {
+            "soft_bong", "confirmation_chime", "glass_tap", "soft_pluck",
+            "water_drop", "ui_select", "soft_click", "digital_glitch",
+        }
+        assert set(dashboard_server.CHAT_NOTIFICATION_SOUND_FILES) == expected
+        for filename in dashboard_server.CHAT_NOTIFICATION_SOUND_FILES.values():
+            assert (Path(dashboard_server.CHAT_NOTIFICATION_SOUND_DIR) / filename).is_file()
+        assert "/media/chat-sounds/" in source
+        assert "ctx.decodeAudioData(" in source
         assert "ctx.createBufferSource()" in source
         assert 'sampleRate:48000, latencyHint:"playback"' in source
+        assert "chatAudioContext.createOscillator()" not in source
+        assert "chatAudioKeepAlive.loop = true" in source
         assert "chatAudioKeepAlive.start()" in source
+        assert "Promise.allSettled(chatSoundNames.map" in source
 
     def test_custom_command_editor_has_variable_buttons_and_live_preview(self):
         from pathlib import Path

@@ -70,10 +70,20 @@ TWITCH_API            = "https://api.twitch.tv/helix"
 
 # WebSocket connections for overlays: {guild_id: set of ws}
 _overlay_connections: dict = {}
-CHAT_NOTIFICATION_SOUNDS = {
-    "bubble_pop", "glass_drop", "calm_pulse", "pixel_spark",
-    "classic_ping", "soft_bell", "double_chime", "soft_tick",
+CHAT_NOTIFICATION_SOUND_FILES = {
+    "soft_bong": "bong_001.wav",
+    "confirmation_chime": "confirmation_002.wav",
+    "glass_tap": "glass_006.wav",
+    "soft_pluck": "pluck_001.wav",
+    "water_drop": "drop_003.wav",
+    "ui_select": "select_003.wav",
+    "soft_click": "click_001.wav",
+    "digital_glitch": "glitch_002.wav",
 }
+CHAT_NOTIFICATION_SOUNDS = set(CHAT_NOTIFICATION_SOUND_FILES)
+CHAT_NOTIFICATION_SOUND_DIR = os.path.join(
+    os.path.dirname(__file__), "assets", "chat_sounds"
+)
 CHAT_NOTIFICATION_THROTTLE_SECONDS = 5.0
 _chat_sound_last_attempt: dict[str, float] = {}
 
@@ -561,7 +571,7 @@ def _session_can_manage_guild(session: dict, guild_id: str) -> bool:
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/twitch/callback", "/api/eventsub/callback")
-    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/fortuna-overlay/") or request.path.startswith("/auth/twitch/login") or request.path.startswith("/companion") or request.path.startswith("/api/fortuna/plugin"):
+    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/fortuna-overlay/") or request.path.startswith("/media/chat-sounds/") or request.path.startswith("/auth/twitch/login") or request.path.startswith("/companion") or request.path.startswith("/api/fortuna/plugin"):
         return await handler(request)
 
     session = get_session(request)
@@ -3023,6 +3033,24 @@ async def overlay_ws(request):
     return ws
 
 # ── Overlay HTML Page ─────────────────────────────────────────────────────────
+async def chat_sound_asset(request):
+    """Serve one allow-listed CC0 notification sound to dashboards and OBS."""
+    sound_name = request.match_info["sound_name"]
+    filename = CHAT_NOTIFICATION_SOUND_FILES.get(sound_name)
+    if not filename:
+        raise web.HTTPNotFound(reason="Unknown chat notification sound")
+    path = os.path.join(CHAT_NOTIFICATION_SOUND_DIR, filename)
+    if not os.path.isfile(path):
+        logger.error("Chat notification sound asset is missing: %s", path)
+        raise web.HTTPNotFound(reason="Chat notification sound unavailable")
+    response = web.FileResponse(path)
+    response.content_type = "audio/wav"
+    # Keep repeat OBS loads cheap without pinning a replaceable sound forever.
+    response.headers["Cache-Control"] = "public, max-age=86400"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 async def overlay_page(request):
     """Serve the OBS browser source overlay page."""
     guild_id = request.match_info["guild_id"]
@@ -3161,17 +3189,7 @@ let chatAudioMaster = null;
 let chatAudioKeepAlive = null;
 const chatSoundBuffers = new Map();
 let lastChatSoundAt = 0;
-
-const chatSoundVoices = {{
-  bubble_pop: [[620,180,0,0.24,"sine",0.82,0.012],[980,330,0.012,0.14,"sine",0.2,0.01]],
-  classic_ping: [[659.25,698.46,0,0.24,"sine",0.55,0.018],[987.77,1046.5,0.08,0.3,"sine",0.28,0.02]],
-  soft_bell: [[783.99,760,0,0.65,"sine",0.45,0.025],[1567.98,1500,0.015,0.45,"sine",0.14,0.02],[2351.97,2200,0.02,0.3,"sine",0.06,0.018]],
-  double_chime: [[523.25,587.33,0,0.3,"sine",0.45,0.022],[783.99,880,0.22,0.42,"sine",0.42,0.022]],
-  soft_tick: [[1100,760,0,0.08,"sine",0.28,0.008],[440,300,0.015,0.11,"sine",0.18,0.008]],
-  glass_drop: [[880,740,0,0.42,"sine",0.55,0.02],[1320,1100,0.035,0.52,"sine",0.22,0.025]],
-  calm_pulse: [[392,440,0,0.28,"sine",0.5,0.025],[523.25,587.33,0.18,0.36,"sine",0.38,0.025]],
-  pixel_spark: [[520,740,0,0.12,"triangle",0.32,0.018],[740,1040,0.1,0.14,"triangle",0.28,0.018],[1040,1320,0.21,0.2,"sine",0.22,0.02]],
-}};
+const chatSoundNames = {json.dumps(list(CHAT_NOTIFICATION_SOUND_FILES))};
 
 async function ensureChatAudio() {{
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -3186,14 +3204,15 @@ async function ensureChatAudio() {{
     chatAudioMaster.gain.value = 1;
     chatAudioMaster.connect(chatAudioContext.destination);
 
-    // Keep the OBS/Chromium audio graph alive between sparse chat messages.
-    // The 18 Hz carrier is more than 120 dB down and effectively silent, but
-    // prevents the browser source's audio path from cold-starting on each ping.
-    const keepGain = chatAudioContext.createGain();
-    keepGain.gain.value = 0.000001;
-    chatAudioKeepAlive = chatAudioContext.createOscillator();
-    chatAudioKeepAlive.frequency.value = 18;
-    chatAudioKeepAlive.connect(keepGain).connect(chatAudioMaster);
+    // Keep the graph scheduled with exact digital silence. The previous
+    // near-silent oscillator could still interact with OBS resampling.
+    const silentBuffer = chatAudioContext.createBuffer(
+      1, chatAudioContext.sampleRate, chatAudioContext.sampleRate
+    );
+    chatAudioKeepAlive = chatAudioContext.createBufferSource();
+    chatAudioKeepAlive.buffer = silentBuffer;
+    chatAudioKeepAlive.loop = true;
+    chatAudioKeepAlive.connect(chatAudioMaster);
     chatAudioKeepAlive.start();
   }}
   if (chatAudioContext.state === "suspended") {{
@@ -3202,50 +3221,21 @@ async function ensureChatAudio() {{
   return chatAudioContext;
 }}
 
-function renderChatSoundBuffer(ctx, sound) {{
-  if (chatSoundBuffers.has(sound)) return chatSoundBuffers.get(sound);
-  const voices = chatSoundVoices[sound] || chatSoundVoices.bubble_pop;
-  const sampleRate = ctx.sampleRate;
-  const padding = 0.045;
-  const voiceEnd = Math.max(...voices.map(voice => voice[2] + voice[3]));
-  const totalDuration = padding + voiceEnd + 0.08;
-  const buffer = ctx.createBuffer(1, Math.ceil(totalDuration * sampleRate), sampleRate);
-  const samples = buffer.getChannelData(0);
-  const smoothstep = value => value * value * (3 - 2 * value);
-
-  for (const voice of voices) {{
-    const [startFrequency,endFrequency,start,duration,type,gainScale,attack] = voice;
-    const startIndex = Math.floor((padding + start) * sampleRate);
-    const frameCount = Math.max(2, Math.floor(duration * sampleRate));
-    const release = Math.min(0.065, duration * 0.38);
-    let phase = 0;
-    for (let frame = 0; frame < frameCount; frame += 1) {{
-      const localTime = frame / sampleRate;
-      const progress = frame / (frameCount - 1);
-      const frequency = startFrequency * Math.pow(endFrequency / startFrequency, progress);
-      phase += 2 * Math.PI * frequency / sampleRate;
-      const attackEnvelope = smoothstep(Math.min(1, localTime / attack));
-      const releaseEnvelope = smoothstep(Math.min(1, (duration - localTime) / release));
-      const waveform = type === "triangle"
-        ? (2 / Math.PI) * Math.asin(Math.sin(phase))
-        : Math.sin(phase);
-      const target = startIndex + frame;
-      if (target < samples.length) {{
-        samples[target] += waveform * 0.18 * gainScale * attackEnvelope * releaseEnvelope;
-      }}
-    }}
+async function loadChatSound(ctx, sound) {{
+  const selected = chatSoundNames.includes(sound) ? sound : "confirmation_chime";
+  if (chatSoundBuffers.has(selected)) return chatSoundBuffers.get(selected);
+  const pending = (async () => {{
+    const response = await fetch(`/media/chat-sounds/${{encodeURIComponent(selected)}}.wav`);
+    if (!response.ok) throw new Error(`Could not load chat sound: ${{selected}}`);
+    return ctx.decodeAudioData(await response.arrayBuffer());
+  }})();
+  chatSoundBuffers.set(selected, pending);
+  try {{
+    return await pending;
+  }} catch (error) {{
+    chatSoundBuffers.delete(selected);
+    throw error;
   }}
-
-  // One-pole low-pass plus soft saturation removes any residual sample edge
-  // while retaining the character of each notification.
-  const alpha = 1 - Math.exp(-2 * Math.PI * 3600 / sampleRate);
-  let filtered = 0;
-  for (let index = 0; index < samples.length; index += 1) {{
-    filtered += alpha * (samples[index] - filtered);
-    samples[index] = Math.tanh(filtered * 1.1) * 0.9;
-  }}
-  chatSoundBuffers.set(sound, buffer);
-  return buffer;
 }}
 
 async function playChatNotification(sound, volume) {{
@@ -3256,15 +3246,27 @@ async function playChatNotification(sound, volume) {{
   if (!level) return;
   const ctx = await ensureChatAudio();
   if (!ctx || !chatAudioMaster) return;
+  let buffer;
+  try {{ buffer = await loadChatSound(ctx, sound); }} catch (error) {{
+    console.warn("Chat notification sound failed to load", error);
+    return;
+  }}
   const source = ctx.createBufferSource();
   const playbackGain = ctx.createGain();
-  source.buffer = renderChatSoundBuffer(ctx, sound);
-  playbackGain.gain.value = level;
+  source.buffer = buffer;
+  const when = ctx.currentTime + 0.005;
+  const end = when + buffer.duration;
+  const attackEnd = when + Math.min(0.008, buffer.duration * 0.25);
+  const releaseStart = Math.max(attackEnd, end - Math.min(0.012, buffer.duration * 0.3));
+  playbackGain.gain.setValueAtTime(0, when);
+  playbackGain.gain.linearRampToValueAtTime(level, attackEnd);
+  playbackGain.gain.setValueAtTime(level, releaseStart);
+  playbackGain.gain.linearRampToValueAtTime(0, end);
   source.connect(playbackGain).connect(chatAudioMaster);
   source.onended = () => {{
     try {{ source.disconnect(); playbackGain.disconnect(); }} catch {{}}
   }};
-  source.start(ctx.currentTime + 0.03);
+  source.start(when);
 }}
 
 
@@ -3457,7 +3459,9 @@ function connectOverlaySocket() {{
   ws.onopen = () => {{
     console.log("Overlay connected");
     reconnectDelay = 1000;
-    ensureChatAudio().catch(() => {{}});
+    ensureChatAudio()
+      .then(ctx => ctx && Promise.allSettled(chatSoundNames.map(sound => loadChatSound(ctx, sound))))
+      .catch(() => {{}});
   }};
   ws.onmessage = handleSocketMessage;
   ws.onerror = () => {{ try {{ ws.close(); }} catch {{}} }};
@@ -8387,6 +8391,7 @@ def create_dashboard_app(bot=None):
     app.router.add_patch ("/api/guild/{guild_id}/broadcaster/rewards/{reward_id}", edit_reward)
     app.router.add_delete("/api/guild/{guild_id}/broadcaster/rewards/{reward_id}", delete_reward)
     app.router.add_post  ("/api/eventsub/callback",                         eventsub_callback)
+    app.router.add_get   ("/media/chat-sounds/{sound_name}.wav",           chat_sound_asset)
     app.router.add_get   ("/overlay/{guild_id}",                            overlay_page)
     app.router.add_get   ("/overlay/{guild_id}/ws",                         overlay_ws)
     app.router.add_get   ("/api/guild/{guild_id}/twitch",                    get_twitch_info)
