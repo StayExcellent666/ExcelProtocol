@@ -186,7 +186,9 @@ class TwitchAPI:
                     await asyncio.sleep(0.25)
                     continue
                 detail = payload.get("message") if isinstance(payload, dict) else None
-                return False, detail or f"HTTP {resp.status}"
+                if detail:
+                    return False, f"HTTP {resp.status}: {detail}"
+                return False, f"HTTP {resp.status}"
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 if attempt == 0:
                     await asyncio.sleep(0.25)

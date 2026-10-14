@@ -2853,10 +2853,15 @@ async def _complete_twitch_bot_oauth(code: str):
     _bot_ref._twitch_bot_user_id = str(user["id"])
     _bot_ref._twitch_bot_login = actual_login
     _bot_ref._twitch_bot_scopes = scopes
-    _bot_ref._twitch_token_last_success_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    _bot_ref._twitch_token_last_success_at = now
+    _bot_ref._twitch_token_last_validated_at = now
+    _bot_ref._twitch_token_valid = True
+    expires_in = int(token_data.get("expires_in") or 0)
+    _bot_ref._twitch_token_expires_at = now + timedelta(seconds=expires_in) if expires_in else None
     _bot_ref._twitch_token_last_error = None
     if getattr(_bot_ref, "twitch_chat_bot", None):
-        _bot_ref.twitch_chat_bot._connection._token = access_token
+        _bot_ref.twitch_chat_bot.update_user_token(access_token)
         _bot_ref.twitch_chat_bot.reset_helix_delivery(str(user["id"]))
     logger.info("Owner connected Twitch chat bot account @%s and persisted renewable credentials", actual_login)
     raise web.HTTPFound("/app/?twitch_bot_connected=1")
@@ -4259,6 +4264,9 @@ async def get_operations_health(request):
                 getattr(bot, "_twitch_bot_scopes", set()) or set()
             ),
             "automatic_refresh_configured": bool(getattr(bot, "_twitch_refresh_token", None)),
+            "token_valid": getattr(bot, "_twitch_token_valid", None),
+            "last_validated_at": _health_iso(getattr(bot, "_twitch_token_last_validated_at", None)),
+            "expires_at": _health_iso(getattr(bot, "_twitch_token_expires_at", None)),
             "last_success_at": _health_iso(getattr(bot, "_twitch_token_last_success_at", None)),
             "last_error": getattr(bot, "_twitch_token_last_error", None),
         },

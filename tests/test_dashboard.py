@@ -1607,7 +1607,10 @@ class TestOperationalSafetyRegressions:
     def test_token_refresh_never_invokes_fly_cli(self):
         import inspect
         import bot
-        source = inspect.getsource(bot.TwitchNotifierBot._refresh_twitch_chat_credentials)
+        source = (
+            inspect.getsource(bot.TwitchNotifierBot._refresh_twitch_chat_credentials)
+            + inspect.getsource(bot.TwitchNotifierBot._refresh_twitch_chat_credentials_locked)
+        )
         assert "set_twitch_bot_credentials" in source
         assert "create_subprocess_exec" not in source
         assert "secrets set" not in source.lower()
@@ -1644,11 +1647,19 @@ class TestOperationalSafetyRegressions:
         class FakeChatBot:
             _connection = FakeConnection()
 
+            def update_user_token(self, token):
+                self._connection._token = token
+
+            def reset_helix_delivery(self, _bot_id=None):
+                pass
+
         class FakeSelf:
             _twitch_refresh_token = "old-refresh"
             _twitch_bot_token = "old-access"
             _twitch_token_last_success_at = None
             _twitch_token_last_error = "previous error"
+            _twitch_bot_user_id = "bot-42"
+            _twitch_bot_scopes = set()
             twitch_chat_bot = FakeChatBot()
             db = FakeDb()
 

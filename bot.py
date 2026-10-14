@@ -94,6 +94,10 @@ class TwitchNotifierBot(discord.Client):
         self._twitch_bot_scopes: set[str] = set()
         self._twitch_token_last_success_at = None
         self._twitch_token_last_error = None
+        self._twitch_token_valid = None
+        self._twitch_token_last_validated_at = None
+        self._twitch_token_expires_at = None
+        self._twitch_token_refresh_lock = asyncio.Lock()
         
         # Track which streamers are currently live to avoid duplicate notifications
         self.live_streamers = set()
@@ -154,6 +158,18 @@ class TwitchNotifierBot(discord.Client):
         from config import TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
         import aiohttp
 
+        lock = getattr(self, "_twitch_token_refresh_lock", None)
+        if lock is None:
+            lock = self._twitch_token_refresh_lock = asyncio.Lock()
+        async with lock:
+            return await TwitchNotifierBot._refresh_twitch_chat_credentials_locked(
+                self,
+                TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, aiohttp,
+            )
+
+    async def _refresh_twitch_chat_credentials_locked(self, client_id, client_secret, aiohttp_module):
+        """Rotate one credential pair while the caller holds the refresh lock."""
+
         # The database value is normally newest. The environment value remains
         # a recovery path if an owner manually replaces a broken token.
         candidates = []
@@ -165,15 +181,15 @@ class TwitchNotifierBot(discord.Client):
 
         failures = []
         data = None
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp_module.ClientSession() as session:
             for refresh_token in candidates:
                 async with session.post(
                     "https://id.twitch.tv/oauth2/token",
                     data={
                         "grant_type": "refresh_token",
                         "refresh_token": refresh_token,
-                        "client_id": TWITCH_CLIENT_ID,
-                        "client_secret": TWITCH_CLIENT_SECRET,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
                     },
                 ) as resp:
                     if resp.status == 200:
@@ -193,11 +209,21 @@ class TwitchNotifierBot(discord.Client):
         self.db.set_twitch_bot_credentials(new_token, new_refresh)
         self._twitch_bot_token = new_token
         self._twitch_refresh_token = new_refresh
+        now = utcnow()
+        expires_in = int(data.get("expires_in") or 0)
+        self._twitch_token_expires_at = now + timedelta(seconds=expires_in) if expires_in else None
+        refreshed_scopes = data.get("scope") or data.get("scopes")
+        if refreshed_scopes is not None:
+            self._twitch_bot_scopes = set(refreshed_scopes)
         if self.twitch_chat_bot:
-            self.twitch_chat_bot._connection._token = new_token
-        self._twitch_token_last_success_at = utcnow()
+            self.twitch_chat_bot.update_user_token(new_token)
+            self.twitch_chat_bot.reset_helix_delivery(self._twitch_bot_user_id)
+        self._twitch_token_last_success_at = now
+        self._twitch_token_last_validated_at = now
+        self._twitch_token_valid = True
         self._twitch_token_last_error = None
         logger.info("Twitch bot token refreshed and persisted successfully")
+        return new_token
 
     async def _validate_twitch_chat_identity(self) -> dict:
         """Resolve the bot account from its token so account renames are safe."""
@@ -205,15 +231,21 @@ class TwitchNotifierBot(discord.Client):
 
         if not self._twitch_bot_token:
             raise RuntimeError("Twitch bot access token is not configured")
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://id.twitch.tv/oauth2/validate",
-                headers={"Authorization": f"OAuth {self._twitch_bot_token}"},
-            ) as resp:
-                data = await resp.json(content_type=None)
-                if resp.status != 200:
-                    detail = data.get("message", f"HTTP {resp.status}") if isinstance(data, dict) else f"HTTP {resp.status}"
-                    raise RuntimeError(f"Twitch bot token validation failed: {detail}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://id.twitch.tv/oauth2/validate",
+                    headers={"Authorization": f"OAuth {self._twitch_bot_token}"},
+                ) as resp:
+                    data = await resp.json(content_type=None)
+                    if resp.status != 200:
+                        detail = data.get("message", f"HTTP {resp.status}") if isinstance(data, dict) else f"HTTP {resp.status}"
+                        raise RuntimeError(f"Twitch bot token validation failed: {detail}")
+        except Exception as exc:
+            self._twitch_token_valid = False
+            self._twitch_token_last_validated_at = utcnow()
+            self._twitch_token_last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+            raise
 
         user_id = str(data.get("user_id") or "")
         login = str(data.get("login") or "").lower()
@@ -228,6 +260,9 @@ class TwitchNotifierBot(discord.Client):
         self._twitch_bot_user_id = user_id
         self._twitch_bot_login = login
         self._twitch_bot_scopes = set(data.get("scopes") or [])
+        self._twitch_token_valid = True
+        self._twitch_token_last_validated_at = utcnow()
+        self._twitch_token_last_error = None
         return {"user_id": user_id, "login": login, "scopes": self._twitch_bot_scopes}
 
     async def setup_hook(self):
@@ -259,6 +294,7 @@ class TwitchNotifierBot(discord.Client):
                     db=self.db,
                     twitch_api=self.twitch,
                     bot_id=identity["user_id"],
+                    token_refresher=self._refresh_twitch_chat_credentials,
                 )
                 await twitch_chat_cog.setup(self, self.twitch_chat_bot)
                 asyncio.create_task(self.twitch_chat_bot.start())
@@ -2213,13 +2249,23 @@ class TwitchNotifierBot(discord.Client):
     async def before_cleanup_kicked_guilds(self):
         await self.wait_until_ready()
 
-    @tasks.loop(hours=24)
+    @tasks.loop(hours=1)
     @health_tracked("refresh_twitch_bot_token")
     async def refresh_twitch_bot_token(self):
-        """Refresh the Twitch chat bot OAuth token daily using the refresh token."""
+        """Validate hourly and rotate before expiry or immediately when invalid."""
         try:
-            await self._refresh_twitch_chat_credentials()
+            expires_at = getattr(self, "_twitch_token_expires_at", None)
+            refresh_soon = expires_at is not None and expires_at <= utcnow() + timedelta(minutes=75)
+            if refresh_soon:
+                await self._refresh_twitch_chat_credentials()
+            else:
+                try:
+                    await self._validate_twitch_chat_identity()
+                except Exception:
+                    await self._refresh_twitch_chat_credentials()
+                    await self._validate_twitch_chat_identity()
         except Exception as e:
+            self._twitch_token_valid = False
             self._twitch_token_last_error = f"{type(e).__name__}: {str(e)[:300]}"
             logger.error(f"Twitch token refresh error: {e}", exc_info=True)
 
@@ -2227,9 +2273,9 @@ class TwitchNotifierBot(discord.Client):
     async def before_refresh_twitch_bot_token(self):
         await self.wait_until_ready()
         # setup_hook already refreshes before Twitch chat connects. Schedule
-        # the recurring refresh for a day later instead of rotating twice at
+        # the first validation for an hour later instead of rotating twice at
         # every startup.
-        await asyncio.sleep(24 * 60 * 60)
+        await asyncio.sleep(60 * 60)
 
     async def alert_permission_issue(self, guild: discord.Guild, channel_id: int, issue: str):
         """DM the guild owner and bot owner when a permission issue is detected."""

@@ -15,7 +15,9 @@ COMMAND_LIMIT = 75
 
 
 class TwitchChatBot(commands.Bot):
-    def __init__(self, token: str, initial_channels: list, db: Database, twitch_api: TwitchAPI, bot_id: str = None):
+    def __init__(self, token: str, initial_channels: list, db: Database,
+                 twitch_api: TwitchAPI, bot_id: str = None,
+                 token_refresher=None):
         super().__init__(
             token=token,
             prefix="!",
@@ -24,10 +26,35 @@ class TwitchChatBot(commands.Bot):
         self.db = db
         self.twitch_api = twitch_api
         self.bot_id = str(bot_id or "")
+        self._user_access_token = self._normalise_user_token(token)
+        self._token_refresher = token_refresher
         self._cooldowns: dict[str, dict[str, datetime]] = {}
         self._broadcaster_ids: dict[str, str] = {}
         self._helix_send_failures = 0
         self._helix_send_disabled_until = 0.0
+
+    @staticmethod
+    def _normalise_user_token(token: str) -> str:
+        token = str(token or "").strip()
+        return token[6:] if token.lower().startswith("oauth:") else token
+
+    def update_user_token(self, token: str):
+        """Publish a rotated user token to every TwitchIO token consumer."""
+        token = self._normalise_user_token(token)
+        if not token:
+            raise ValueError("Twitch user access token cannot be empty")
+        self._user_access_token = token
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            connection._token = token
+        http = getattr(self, "_http", None)
+        if http is not None:
+            http.token = token
+
+    @staticmethod
+    def _is_oauth_failure(reason: str | None) -> bool:
+        reason = str(reason or "").lower()
+        return "http 401" in reason or "oauth token" in reason or "unauthorized" in reason
 
     def reset_helix_delivery(self, bot_id: str | None = None):
         """Close the fallback circuit after a successful bot authorization."""
@@ -107,13 +134,23 @@ class TwitchChatBot(commands.Bot):
         channel_name = str(getattr(channel, "name", "") or "").lower()
         try:
             broadcaster_id = await self._broadcaster_id_for(channel_name)
-            connection = getattr(self, "_connection", None)
-            token = str(getattr(connection, "_token", "") or "")
+            token = self._user_access_token
             if not broadcaster_id or not self.bot_id or not token:
                 return False
             sent, reason = await self.twitch_api.send_chat_announcement(
                 broadcaster_id, self.bot_id, token, text, color,
             )
+            if not sent and self._is_oauth_failure(reason) and self._token_refresher:
+                logger.info(
+                    "Twitch rejected the announcement token in @%s; refreshing and retrying once",
+                    channel_name,
+                )
+                refreshed_token = await self._token_refresher()
+                self.update_user_token(refreshed_token)
+                sent, reason = await self.twitch_api.send_chat_announcement(
+                    broadcaster_id, self.bot_id, self._user_access_token,
+                    text, color,
+                )
         except Exception as exc:
             sent, reason = False, f"{type(exc).__name__}: {exc}"
         if not sent:

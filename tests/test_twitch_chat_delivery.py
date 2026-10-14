@@ -19,6 +19,8 @@ def make_chat_bot(api, channel):
     bot = object.__new__(TwitchChatBot)
     bot.bot_id = "bot-42"
     bot.twitch_api = api
+    bot._user_access_token = "bot-user-token"
+    bot._token_refresher = None
     bot._broadcaster_ids = {"streamer": "broadcaster-7"}
     bot._helix_send_failures = 0
     bot._helix_send_disabled_until = 0.0
@@ -86,7 +88,6 @@ async def test_announcement_uses_bot_user_token_and_purple_banner():
     channel = FakeChannel()
     api = Api()
     bot = make_chat_bot(api, channel)
-    bot._connection = SimpleNamespace(_token="oauth:bot-user-token")
 
     sent = await TwitchChatBot._send_announcement(
         bot, channel, "Shoutout message", "purple",
@@ -94,9 +95,46 @@ async def test_announcement_uses_bot_user_token_and_purple_banner():
 
     assert sent is True
     assert api.calls == [(
-        "broadcaster-7", "bot-42", "oauth:bot-user-token",
+        "broadcaster-7", "bot-42", "bot-user-token",
         "Shoutout message", "purple",
     )]
+
+
+@pytest.mark.asyncio
+async def test_announcement_refreshes_rejected_token_and_retries_once():
+    class Api:
+        def __init__(self):
+            self.tokens = []
+
+        async def send_chat_announcement(self, _broadcaster, _moderator,
+                                         token, _message, _color):
+            self.tokens.append(token)
+            if len(self.tokens) == 1:
+                return False, "HTTP 401: Invalid OAuth token"
+            return True, None
+
+    refreshed = []
+
+    async def refresh_token():
+        refreshed.append(True)
+        return "fresh-user-token"
+
+    channel = FakeChannel()
+    api = Api()
+    bot = make_chat_bot(api, channel)
+    bot._token_refresher = refresh_token
+    bot._connection = SimpleNamespace(_token="old-user-token")
+    bot._http = SimpleNamespace(token="old-user-token")
+
+    sent = await TwitchChatBot._send_announcement(
+        bot, channel, "Shoutout message", "purple",
+    )
+
+    assert sent is True
+    assert refreshed == [True]
+    assert api.tokens == ["bot-user-token", "fresh-user-token"]
+    assert bot._connection._token == "fresh-user-token"
+    assert bot._http.token == "fresh-user-token"
 
 
 @pytest.mark.asyncio
