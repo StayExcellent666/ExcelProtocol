@@ -70,7 +70,10 @@ TWITCH_API            = "https://api.twitch.tv/helix"
 
 # WebSocket connections for overlays: {guild_id: set of ws}
 _overlay_connections: dict = {}
-CHAT_NOTIFICATION_SOUNDS = {"bubble_pop", "glass_drop", "calm_pulse", "pixel_spark"}
+CHAT_NOTIFICATION_SOUNDS = {
+    "bubble_pop", "glass_drop", "calm_pulse", "pixel_spark",
+    "classic_ping", "soft_bell", "double_chime", "soft_tick",
+}
 CHAT_NOTIFICATION_THROTTLE_SECONDS = 5.0
 _chat_sound_last_attempt: dict[str, float] = {}
 
@@ -3154,8 +3157,96 @@ let currentStart = 0;
 let currentEnd = null;
 let currentAudioOnly = false;
 let chatAudioContext = null;
+let chatAudioMaster = null;
+let chatAudioKeepAlive = null;
+const chatSoundBuffers = new Map();
 let lastChatSoundAt = 0;
 
+const chatSoundVoices = {{
+  bubble_pop: [[620,180,0,0.24,"sine",0.82,0.012],[980,330,0.012,0.14,"sine",0.2,0.01]],
+  classic_ping: [[659.25,698.46,0,0.24,"sine",0.55,0.018],[987.77,1046.5,0.08,0.3,"sine",0.28,0.02]],
+  soft_bell: [[783.99,760,0,0.65,"sine",0.45,0.025],[1567.98,1500,0.015,0.45,"sine",0.14,0.02],[2351.97,2200,0.02,0.3,"sine",0.06,0.018]],
+  double_chime: [[523.25,587.33,0,0.3,"sine",0.45,0.022],[783.99,880,0.22,0.42,"sine",0.42,0.022]],
+  soft_tick: [[1100,760,0,0.08,"sine",0.28,0.008],[440,300,0.015,0.11,"sine",0.18,0.008]],
+  glass_drop: [[880,740,0,0.42,"sine",0.55,0.02],[1320,1100,0.035,0.52,"sine",0.22,0.025]],
+  calm_pulse: [[392,440,0,0.28,"sine",0.5,0.025],[523.25,587.33,0.18,0.36,"sine",0.38,0.025]],
+  pixel_spark: [[520,740,0,0.12,"triangle",0.32,0.018],[740,1040,0.1,0.14,"triangle",0.28,0.018],[1040,1320,0.21,0.2,"sine",0.22,0.02]],
+}};
+
+async function ensureChatAudio() {{
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  if (!chatAudioContext) {{
+    try {{
+      chatAudioContext = new AudioContextClass({{ sampleRate:48000, latencyHint:"playback" }});
+    }} catch {{
+      chatAudioContext = new AudioContextClass();
+    }}
+    chatAudioMaster = chatAudioContext.createGain();
+    chatAudioMaster.gain.value = 1;
+    chatAudioMaster.connect(chatAudioContext.destination);
+
+    // Keep the OBS/Chromium audio graph alive between sparse chat messages.
+    // The 18 Hz carrier is more than 120 dB down and effectively silent, but
+    // prevents the browser source's audio path from cold-starting on each ping.
+    const keepGain = chatAudioContext.createGain();
+    keepGain.gain.value = 0.000001;
+    chatAudioKeepAlive = chatAudioContext.createOscillator();
+    chatAudioKeepAlive.frequency.value = 18;
+    chatAudioKeepAlive.connect(keepGain).connect(chatAudioMaster);
+    chatAudioKeepAlive.start();
+  }}
+  if (chatAudioContext.state === "suspended") {{
+    try {{ await chatAudioContext.resume(); }} catch {{ return null; }}
+  }}
+  return chatAudioContext;
+}}
+
+function renderChatSoundBuffer(ctx, sound) {{
+  if (chatSoundBuffers.has(sound)) return chatSoundBuffers.get(sound);
+  const voices = chatSoundVoices[sound] || chatSoundVoices.bubble_pop;
+  const sampleRate = ctx.sampleRate;
+  const padding = 0.045;
+  const voiceEnd = Math.max(...voices.map(voice => voice[2] + voice[3]));
+  const totalDuration = padding + voiceEnd + 0.08;
+  const buffer = ctx.createBuffer(1, Math.ceil(totalDuration * sampleRate), sampleRate);
+  const samples = buffer.getChannelData(0);
+  const smoothstep = value => value * value * (3 - 2 * value);
+
+  for (const voice of voices) {{
+    const [startFrequency,endFrequency,start,duration,type,gainScale,attack] = voice;
+    const startIndex = Math.floor((padding + start) * sampleRate);
+    const frameCount = Math.max(2, Math.floor(duration * sampleRate));
+    const release = Math.min(0.065, duration * 0.38);
+    let phase = 0;
+    for (let frame = 0; frame < frameCount; frame += 1) {{
+      const localTime = frame / sampleRate;
+      const progress = frame / (frameCount - 1);
+      const frequency = startFrequency * Math.pow(endFrequency / startFrequency, progress);
+      phase += 2 * Math.PI * frequency / sampleRate;
+      const attackEnvelope = smoothstep(Math.min(1, localTime / attack));
+      const releaseEnvelope = smoothstep(Math.min(1, (duration - localTime) / release));
+      const waveform = type === "triangle"
+        ? (2 / Math.PI) * Math.asin(Math.sin(phase))
+        : Math.sin(phase);
+      const target = startIndex + frame;
+      if (target < samples.length) {{
+        samples[target] += waveform * 0.18 * gainScale * attackEnvelope * releaseEnvelope;
+      }}
+    }}
+  }}
+
+  // One-pole low-pass plus soft saturation removes any residual sample edge
+  // while retaining the character of each notification.
+  const alpha = 1 - Math.exp(-2 * Math.PI * 3600 / sampleRate);
+  let filtered = 0;
+  for (let index = 0; index < samples.length; index += 1) {{
+    filtered += alpha * (samples[index] - filtered);
+    samples[index] = Math.tanh(filtered * 1.1) * 0.9;
+  }}
+  chatSoundBuffers.set(sound, buffer);
+  return buffer;
+}}
 
 async function playChatNotification(sound, volume) {{
   const nowMs = Date.now();
@@ -3163,56 +3254,17 @@ async function playChatNotification(sound, volume) {{
   lastChatSoundAt = nowMs;
   const level = Math.min(1, Math.max(0, Number(volume || 0) / 100));
   if (!level) return;
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return;
-  chatAudioContext = chatAudioContext || new AudioContextClass();
-  const ctx = chatAudioContext;
-  if (ctx.state === "suspended") {{
-    try {{ await ctx.resume(); }} catch {{ return; }}
-  }}
-  // Scheduling slightly ahead plus a true zero-volume attack/release keeps
-  // OBS/Chromium from entering an oscillator mid-waveform with an audible click.
-  const baseTime = ctx.currentTime + 0.04;
-
-  function tone(frequency, start, duration, type, endFrequency, gainScale, attack = 0.018) {{
-    const oscillator = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const filter = ctx.createBiquadFilter();
-    const begins = baseTime + start;
-    const ends = begins + duration;
-    oscillator.type = type || "sine";
-    oscillator.frequency.setValueAtTime(frequency, begins);
-    if (endFrequency) oscillator.frequency.exponentialRampToValueAtTime(endFrequency, ends);
-    const peak = level * 0.14 * (gainScale || 1);
-    const release = Math.min(0.055, duration * 0.35);
-    gain.gain.setValueAtTime(0, begins);
-    gain.gain.linearRampToValueAtTime(peak, begins + Math.min(attack, duration * 0.3));
-    gain.gain.setValueAtTime(peak, Math.max(begins + attack, ends - release));
-    gain.gain.linearRampToValueAtTime(0, ends);
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(2800, begins);
-    filter.Q.setValueAtTime(0.35, begins);
-    oscillator.connect(filter).connect(gain).connect(ctx.destination);
-    oscillator.start(begins);
-    oscillator.stop(ends + 0.04);
-  }}
-
-  if (sound === "glass_drop") {{
-    tone(880, 0, 0.42, "sine", 740, 0.55, 0.02);
-    tone(1320, 0.035, 0.52, "sine", 1100, 0.22, 0.025);
-  }} else if (sound === "calm_pulse") {{
-    tone(392, 0, 0.28, "sine", 440, 0.5, 0.025);
-    tone(523.25, 0.18, 0.36, "sine", 587.33, 0.38, 0.025);
-  }} else if (sound === "pixel_spark") {{
-    tone(520, 0, 0.12, "triangle", 740, 0.32, 0.018);
-    tone(740, 0.1, 0.14, "triangle", 1040, 0.28, 0.018);
-    tone(1040, 0.21, 0.2, "sine", 1320, 0.22, 0.02);
-  }} else {{
-    // Soft Bubble Pop (default): a rounded downward pitch sweep with a quiet
-    // upper harmonic. Sine waves and the tapered envelope avoid sharp edges.
-    tone(620, 0, 0.24, "sine", 180, 0.82, 0.012);
-    tone(980, 0.012, 0.14, "sine", 330, 0.2, 0.01);
-  }}
+  const ctx = await ensureChatAudio();
+  if (!ctx || !chatAudioMaster) return;
+  const source = ctx.createBufferSource();
+  const playbackGain = ctx.createGain();
+  source.buffer = renderChatSoundBuffer(ctx, sound);
+  playbackGain.gain.value = level;
+  source.connect(playbackGain).connect(chatAudioMaster);
+  source.onended = () => {{
+    try {{ source.disconnect(); playbackGain.disconnect(); }} catch {{}}
+  }};
+  source.start(ctx.currentTime + 0.03);
 }}
 
 
@@ -3405,6 +3457,7 @@ function connectOverlaySocket() {{
   ws.onopen = () => {{
     console.log("Overlay connected");
     reconnectDelay = 1000;
+    ensureChatAudio().catch(() => {{}});
   }};
   ws.onmessage = handleSocketMessage;
   ws.onerror = () => {{ try {{ ws.close(); }} catch {{}} }};

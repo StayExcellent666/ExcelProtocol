@@ -1036,10 +1036,15 @@ class TestDevDashboardRoutes:
         source = inspect.getsource(dashboard_server.overlay_page)
         assert 'msg.type === "chat_notification"' in source
         assert "playChatNotification(msg.sound, msg.volume);" in source
-        assert 'sound === "glass_drop"' in source
-        assert 'sound === "calm_pulse"' in source
-        assert 'sound === "pixel_spark"' in source
-        assert "linearRampToValueAtTime(0, ends)" in source
+        for sound_name in (
+            "glass_drop", "calm_pulse", "pixel_spark", "classic_ping",
+            "soft_bell", "double_chime", "soft_tick",
+        ):
+            assert sound_name in source
+        assert "ctx.createBuffer(" in source
+        assert "ctx.createBufferSource()" in source
+        assert 'sampleRate:48000, latencyHint:"playback"' in source
+        assert "chatAudioKeepAlive.start()" in source
 
     def test_custom_command_editor_has_variable_buttons_and_live_preview(self):
         from pathlib import Path

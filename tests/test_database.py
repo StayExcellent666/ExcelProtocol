@@ -209,6 +209,12 @@ class TestSchema:
         db.init_database()
         assert db.get_chat_sound_settings(123)["chat_sound_name"] == "bubble_pop"
 
+    def test_common_chat_sound_choices_are_valid(self, db):
+        db.set_twitch_channel(123, "streamer")
+        for sound_name in ("classic_ping", "soft_bell", "double_chime", "soft_tick"):
+            db.set_chat_sound_settings(123, True, sound_name, 35)
+            assert db.get_chat_sound_settings(123)["chat_sound_name"] == sound_name
+
     def test_bot_status_rotation_round_trip(self, db):
         assert db.get_bot_statuses() == []
         statuses = [

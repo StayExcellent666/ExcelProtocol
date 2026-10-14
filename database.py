@@ -3276,7 +3276,10 @@ class Database:
         conn.commit()
         conn.close()
 
-    CHAT_SOUND_NAMES = ("bubble_pop", "glass_drop", "calm_pulse", "pixel_spark")
+    CHAT_SOUND_NAMES = (
+        "bubble_pop", "glass_drop", "calm_pulse", "pixel_spark",
+        "classic_ping", "soft_bell", "double_chime", "soft_tick",
+    )
 
     def get_chat_sound_settings(self, guild_id: int) -> Dict:
         """Return the OBS chat notification settings for one guild."""
