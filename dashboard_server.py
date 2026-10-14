@@ -4510,7 +4510,7 @@ async def get_owner_server_info(request):
         channel = guild.get_channel(int(channel_id))
         return {"id": str(channel_id), "name": f"#{channel.name}" if channel and getattr(channel, "name", None) else "Unavailable", "available": bool(channel)}
 
-    settings = await db_fetch("SELECT notification_channel_id FROM server_settings WHERE guild_id = ?", (guild_id,))
+    settings = await db_fetch("SELECT notification_channel_id, notifications_paused FROM server_settings WHERE guild_id = ?", (guild_id,))
     welcome = await db_fetch("SELECT welcome_channel_id, goodbye_channel_id, welcome_enabled, goodbye_enabled FROM welcome_settings WHERE guild_id = ?", (guild_id,))
     birthday = await db_fetch("SELECT channel_id FROM birthday_channels WHERE guild_id = ?", (guild_id,))
     stat_channels = await db_fetch("SELECT channel_id, format FROM stat_channels WHERE guild_id = ? ORDER BY channel_id", (guild_id,))
@@ -4586,7 +4586,7 @@ async def get_owner_server_info(request):
         "permissions": permission_map,
         "channel_permission_issues": [{**dict(row), "channel": channel_info(row["channel_id"])} for row in permission_rows],
         "channels": channel_groups,
-        "notifications": {"last_24h": {"total": int(count_row.get("total") or 0), "sent": int(count_row.get("sent") or 0), "failed": int(count_row.get("failed") or 0)}, "recent": [{**dict(row), "channel": channel_info(row["channel_id"])} for row in notification_rows]},
+        "notifications": {"paused": bool(settings and settings[0].get("notifications_paused")), "last_24h": {"total": int(count_row.get("total") or 0), "sent": int(count_row.get("sent") or 0), "failed": int(count_row.get("failed") or 0)}, "recent": [{**dict(row), "channel": channel_info(row["channel_id"])} for row in notification_rows]},
         "dashboard_users": dashboard_users,
         "features": features,
         "alerts": {
@@ -4639,6 +4639,32 @@ async def set_bot_owner_permission_dm_mute(request):
     await asyncio.to_thread(_bot_ref.db.set_bot_owner_permission_dm_muted, guild_id_int, muted)
     logger.info("Owner %s their permission DMs for guild %s", "muted" if muted else "restored", guild_id)
     return web.json_response({"ok": True, "bot_owner_dm_muted": muted})
+
+
+async def set_server_notifications_paused(request):
+    """Owner-only: pause live notification work without deleting configuration."""
+    _require_owner(request)
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    guild_id = str(request.match_info["guild_id"])
+    try:
+        guild_id_int = int(guild_id)
+    except ValueError:
+        raise web.HTTPBadRequest(reason="Invalid server ID")
+    if not _bot_ref.get_guild(guild_id_int):
+        raise web.HTTPNotFound(reason="Server is not available in the bot cache")
+    body = await request.json()
+    if not isinstance(body.get("paused"), bool):
+        raise web.HTTPBadRequest(reason="paused must be true or false")
+    paused = body["paused"]
+    await asyncio.to_thread(_bot_ref.db.set_notifications_paused, guild_id_int, paused)
+    if paused:
+        await db_execute("DELETE FROM permission_issues WHERE guild_id = ?", (guild_id_int,))
+    else:
+        getattr(_bot_ref, "error_alerts_sent", {}).pop(f"perm_issue:{guild_id_int}", None)
+    asyncio.create_task(_bot_ref._sync_eventsub_subscriptions(alert_on_mismatch=False))
+    logger.info("Owner %s live notifications for guild %s", "paused" if paused else "resumed", guild_id)
+    return web.json_response({"ok": True, "notifications_paused": paused})
 
 
 _FORTUNA_HISTORY_DAYS = 30
@@ -8396,6 +8422,7 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/api/dev/server-info/{guild_id}", get_owner_server_info)
     app.router.add_patch("/api/dev/server-info/{guild_id}/permission-dm", set_owner_permission_dm_mute)
     app.router.add_patch("/api/dev/server-info/{guild_id}/bot-owner-permission-dm", set_bot_owner_permission_dm_mute)
+    app.router.add_patch("/api/dev/server-info/{guild_id}/notifications-paused", set_server_notifications_paused)
     app.router.add_get("/api/admin/fortuna-control", get_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/start", start_fortuna_control)
     app.router.add_post("/api/admin/fortuna-control/spin", spin_fortuna_control)

@@ -1619,6 +1619,23 @@ class TestDashboardAdministrationSchema:
         assert db.get_permission_dm_muted(100) is True
         db.set_permission_dm_muted(100, False)
         assert db.get_permission_dm_muted(100) is False
+
+    def test_server_notification_pause_preserves_setup_and_filters_targets(self, db):
+        assert db.get_notifications_paused(100) is False
+        assert db.add_streamer(100, "alice", 10, twitch_user_id="1") is True
+        assert db.add_streamer(200, "alice", 20, twitch_user_id="1") is True
+
+        db.set_notifications_paused(100, True)
+
+        assert db.get_notifications_paused(100) is True
+        assert db.get_server_streamers(100)[0]["notifications_paused"] is True
+        assert [row["guild_id"] for row in db.get_active_streamer_targets("ALICE")] == [200]
+        assert len(db.get_server_streamers(100)) == 1
+
+        db.set_notifications_paused(100, False)
+        assert db.get_notifications_paused(100) is False
+        assert [row["guild_id"] for row in db.get_active_streamer_targets("alice")] == [100, 200]
+
 class TestTwitchClipSettings:
     def test_enabled_clip_config_round_trip(self, db):
         db.set_twitch_channel(123, "Streamer")

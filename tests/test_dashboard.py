@@ -729,6 +729,67 @@ class TestDevDashboardRoutes:
         assert fake_bot.db.saved == (100, True)
 
     @pytest.mark.asyncio
+    async def test_notification_pause_is_owner_only_preserves_config_and_resyncs(self, monkeypatch):
+        import asyncio
+        from aiohttp import web
+
+        calls = []
+
+        class FakeDatabase:
+            def set_notifications_paused(self, guild_id, paused):
+                calls.append(("save", guild_id, paused))
+
+        class FakeBot:
+            db = FakeDatabase()
+            error_alerts_sent = {"perm_issue:100": object()}
+
+            def get_guild(self, guild_id):
+                return object() if guild_id == 100 else None
+
+            async def _sync_eventsub_subscriptions(self, alert_on_mismatch=True):
+                calls.append(("sync", alert_on_mismatch))
+
+        class Request(dict):
+            match_info = {"guild_id": "100"}
+            async def json(self):
+                return {"paused": True}
+
+        async def fake_execute(query, params=()):
+            calls.append(("db", query, params))
+
+        fake_bot = FakeBot()
+        monkeypatch.setattr(dashboard_server, "_bot_ref", fake_bot)
+        monkeypatch.setattr(dashboard_server, "db_execute", fake_execute)
+
+        with pytest.raises(web.HTTPForbidden):
+            await dashboard_server.set_server_notifications_paused(Request(session={"admin": True}))
+
+        response = await dashboard_server.set_server_notifications_paused(Request(session={"dev": True}))
+        await asyncio.sleep(0)
+
+        assert response.status == 200
+        assert ("save", 100, True) in calls
+        assert any(call[0] == "db" and "DELETE FROM permission_issues" in call[1] for call in calls)
+        assert ("sync", False) in calls
+
+    @pytest.mark.asyncio
+    async def test_paused_notification_delivery_returns_before_discord_work(self):
+        import bot
+
+        class FakeDatabase:
+            @staticmethod
+            def get_notifications_paused(guild_id):
+                assert guild_id == 100
+                return True
+
+        fake = type("Fake", (), {"db": FakeDatabase()})()
+        await bot.TwitchNotifierBot.send_notification(
+            fake,
+            {"guild_id": 100, "channel_id": 200},
+            {"user_login": "alice"},
+        )
+
+    @pytest.mark.asyncio
     async def test_twitch_bot_login_is_owner_only(self, monkeypatch):
         from aiohttp import web
         monkeypatch.setattr(dashboard_server, "get_session", lambda request: {"admin": True})
@@ -1676,7 +1737,7 @@ class TestOperationalSafetyRegressions:
         assert "params" not in FakeSession.last_kwargs
 
     @pytest.mark.asyncio
-    async def test_eventsub_sync_prunes_only_unmonitored_stream_subscriptions(self):
+    async def test_eventsub_sync_prunes_unmonitored_or_paused_stream_subscriptions(self):
         import bot
 
         subscriptions = [
@@ -1692,6 +1753,7 @@ class TestOperationalSafetyRegressions:
                 return [
                     {"streamer_name": "alice", "guild_id": 10, "twitch_user_id": "1"},
                     {"streamer_name": "old_alice_login", "guild_id": 11, "twitch_user_id": "1"},
+                    {"streamer_name": "paused_creator", "guild_id": 12, "twitch_user_id": "2", "notifications_paused": True},
                 ]
             def clear_unresolvable_streamers(self): pass
 

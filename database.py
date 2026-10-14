@@ -92,6 +92,18 @@ class Database:
                 ADD COLUMN auto_delete_notifications INTEGER DEFAULT 0
             ''')
             logger.info("Added auto_delete_notifications column to server_settings")
+
+        # Owner-controlled pause for all live notification work in a guild.
+        cursor.execute('''
+            SELECT COUNT(*) FROM pragma_table_info('server_settings')
+            WHERE name='notifications_paused'
+        ''')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('''
+                ALTER TABLE server_settings
+                ADD COLUMN notifications_paused INTEGER NOT NULL DEFAULT 0
+            ''')
+            logger.info("Migration: added notifications_paused to server_settings")
         
         # Create table for storing notification message IDs
         cursor.execute('''
@@ -1517,10 +1529,13 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT streamer_name, channel_id, added_at, custom_channel_id, twitch_user_id, discord_user_id
-            FROM monitored_streamers
-            WHERE guild_id = ?
-            ORDER BY streamer_name
+            SELECT ms.streamer_name, ms.channel_id, ms.added_at,
+                   ms.custom_channel_id, ms.twitch_user_id, ms.discord_user_id,
+                   COALESCE(ss.notifications_paused, 0)
+            FROM monitored_streamers AS ms
+            LEFT JOIN server_settings AS ss ON ss.guild_id = ms.guild_id
+            WHERE ms.guild_id = ?
+            ORDER BY ms.streamer_name
         ''', (guild_id,))
         
         rows = cursor.fetchall()
@@ -1534,6 +1549,7 @@ class Database:
                 'custom_channel_id': row[3],
                 'twitch_user_id': row[4],
                 'discord_user_id': row[5],
+                'notifications_paused': bool(row[6]),
             }
             for row in rows
         ]
@@ -1544,9 +1560,12 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT guild_id, streamer_name, channel_id, custom_channel_id, twitch_user_id, discord_user_id
-            FROM monitored_streamers
-            ORDER BY streamer_name
+            SELECT ms.guild_id, ms.streamer_name, ms.channel_id,
+                   ms.custom_channel_id, ms.twitch_user_id, ms.discord_user_id,
+                   COALESCE(ss.notifications_paused, 0)
+            FROM monitored_streamers AS ms
+            LEFT JOIN server_settings AS ss ON ss.guild_id = ms.guild_id
+            ORDER BY ms.streamer_name
         ''')
         
         rows = cursor.fetchall()
@@ -1560,9 +1579,58 @@ class Database:
                 'custom_channel_id': row[3],
                 'twitch_user_id': row[4],
                 'discord_user_id': row[5],
+                'notifications_paused': bool(row[6]),
             }
             for row in rows
         ]
+
+    def get_active_streamer_targets(self, streamer_name: str) -> List[Dict]:
+        """Return only unpaused guild targets for one Twitch login."""
+        conn = self.get_connection()
+        rows = conn.execute('''
+            SELECT ms.guild_id, ms.streamer_name, ms.channel_id,
+                   ms.custom_channel_id, ms.twitch_user_id, ms.discord_user_id
+            FROM monitored_streamers AS ms
+            LEFT JOIN server_settings AS ss ON ss.guild_id = ms.guild_id
+            WHERE lower(ms.streamer_name) = lower(?)
+              AND COALESCE(ss.notifications_paused, 0) = 0
+            ORDER BY ms.id
+        ''', (streamer_name,)).fetchall()
+        conn.close()
+        return [
+            {
+                'guild_id': row[0],
+                'streamer_name': row[1],
+                'channel_id': row[2],
+                'custom_channel_id': row[3],
+                'twitch_user_id': row[4],
+                'discord_user_id': row[5],
+                'notifications_paused': False,
+            }
+            for row in rows
+        ]
+
+    def get_notifications_paused(self, guild_id: int) -> bool:
+        """Return whether all live notification work is paused for a guild."""
+        conn = self.get_connection()
+        row = conn.execute(
+            'SELECT notifications_paused FROM server_settings WHERE guild_id = ?',
+            (guild_id,),
+        ).fetchone()
+        conn.close()
+        return bool(row and row[0])
+
+    def set_notifications_paused(self, guild_id: int, paused: bool):
+        """Pause or resume live notification work without deleting its setup."""
+        conn = self.get_connection()
+        conn.execute('''
+            INSERT INTO server_settings (guild_id, notification_channel_id, notifications_paused)
+            VALUES (?, 0, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                notifications_paused = excluded.notifications_paused
+        ''', (guild_id, 1 if paused else 0))
+        conn.commit()
+        conn.close()
 
     def set_streamer_discord_user(self, guild_id: int, streamer_name: str, discord_user_id: str | None):
         """Link a Discord user ID to a monitored streamer."""

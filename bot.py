@@ -652,7 +652,10 @@ class TwitchNotifierBot(discord.Client):
         just a startup self-heal.
         """
         self._last_reconcile_error = None
-        streamers = self.db.get_all_streamers()
+        streamers = [
+            s for s in self.db.get_all_streamers()
+            if not s.get('notifications_paused', False)
+        ]
         if not streamers:
             self._last_reconcile_counts = {'notify': 0, 'absorb': 0, 'cleanup': 0, 'no_action': 0}
             self._last_reconcile_at = utcnow()
@@ -1653,10 +1656,10 @@ class TwitchNotifierBot(discord.Client):
         callback_url, secret = await self._eventsub_config()
 
         # Get all unique streamers from DB with guild info
-        streamers = self.db.get_all_streamers()
-        if not streamers:
-            return
-
+        streamers = [
+            s for s in self.db.get_all_streamers()
+            if not s.get('notifications_paused', False)
+        ]
         # Build lookup structures
         login_guilds: dict[str, list[str]] = {}
         login_guild_ids: dict[str, list[int]] = {}
@@ -1934,6 +1937,13 @@ class TwitchNotifierBot(discord.Client):
         try:
             logger.info(f"EventSub stream.online: {user_login}")
             name_lower = user_login.lower()
+            monitoring_servers = self.db.get_active_streamer_targets(name_lower)
+            if not monitoring_servers:
+                logger.info(
+                    "Skipping stream.online work for %s — every configured server is paused",
+                    user_login,
+                )
+                return
             self.live_streamers.add(name_lower)
 
             # Fetch full stream data
@@ -1971,13 +1981,6 @@ class TwitchNotifierBot(discord.Client):
 
             # Re-fetch after wait to get fresh thumbnail URL
             stream = await self.twitch.get_stream_info_by_user_id(user_id) or stream
-
-            # Find all servers monitoring this streamer
-            streamers = self.db.get_all_streamers()
-            monitoring_servers = [
-                s for s in streamers
-                if s['streamer_name'].lower() == name_lower
-            ]
 
             for server_data in monitoring_servers:
                 await self.send_notification(server_data, stream)
@@ -2081,6 +2084,8 @@ class TwitchNotifierBot(discord.Client):
                     pending_servers = []
                     for s in streamers:
                         if s['streamer_name'].lower() != name_lower:
+                            continue
+                        if s.get('notifications_paused', False):
                             continue
                         gid = s['guild_id']
                         if not self.db.get_milestone_notifications(gid):
@@ -2352,6 +2357,15 @@ class TwitchNotifierBot(discord.Client):
 
     async def send_notification(self, server_data, stream):
         """Send a notification embed to the configured channel"""
+        paused = server_data.get('notifications_paused', False) or getattr(
+            self.db, 'get_notifications_paused', lambda _guild_id: False
+        )(server_data['guild_id'])
+        if paused:
+            logger.debug(
+                "Skipping notification for guild %s — live notifications are paused",
+                server_data['guild_id'],
+            )
+            return
         try:
             guild = self.get_guild(server_data['guild_id'])
             # Bug 3 fix: honour custom_channel_id so the stored channel_id matches
@@ -2911,6 +2925,9 @@ class TwitchNotifierBot(discord.Client):
     async def _check_guild_permissions(self, guild):
         """Check permissions for every notification channel in a guild and update the DB."""
         try:
+            if getattr(self.db, 'get_notifications_paused', lambda _guild_id: False)(guild.id):
+                self.db.clear_all_permission_issues(guild.id)
+                return
             streamers = self.db.get_server_streamers(guild.id)
             if not streamers:
                 return
