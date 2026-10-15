@@ -1669,6 +1669,7 @@ class TestTwitchBuiltinCommandSettings:
             "!title": True,
             "!viewers": True,
             "!so": True,
+            "!mso": True,
             "!commands": True,
         }
 

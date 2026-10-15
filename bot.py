@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 import asyncio
+import contextlib
 import logging
 import psutil
 import os
@@ -98,6 +99,19 @@ class TwitchNotifierBot(discord.Client):
         self._twitch_token_last_validated_at = None
         self._twitch_token_expires_at = None
         self._twitch_token_refresh_lock = asyncio.Lock()
+        self.twitch_chat_bot = None
+        self._twitch_chat_task = None
+        self._twitch_chat_supervisor_task = None
+        self._twitch_chat_shutdown = False
+        self._twitch_chat_state = "stopped"
+        self._twitch_chat_last_ready_at = None
+        self._twitch_chat_last_activity_at = None
+        self._twitch_chat_last_exit_at = None
+        self._twitch_chat_last_error = None
+        self._twitch_chat_restart_count = 0
+        self._twitch_chat_next_retry_at = None
+        self._twitch_chat_watch_interval_seconds = 60
+        self._twitch_chat_stale_after_seconds = 10 * 60
         
         # Track which streamers are currently live to avoid duplicate notifications
         self.live_streamers = set()
@@ -265,11 +279,187 @@ class TwitchNotifierBot(discord.Client):
         self._twitch_token_last_error = None
         return {"user_id": user_id, "login": login, "scopes": self._twitch_bot_scopes}
 
+    def _on_twitch_chat_lifecycle(self, event: str, detail: str | None = None):
+        """Record IRC lifecycle independently from OAuth/EventSub health."""
+        now = utcnow()
+        if event == "ready":
+            self._twitch_chat_state = "connected"
+            self._twitch_chat_last_ready_at = now
+            self._twitch_chat_last_activity_at = now
+            self._twitch_chat_next_retry_at = None
+        elif event == "activity":
+            self._twitch_chat_last_activity_at = now
+        elif event == "reconnect":
+            self._twitch_chat_state = "reconnecting"
+        elif event in {"error", "join_failure"}:
+            if detail:
+                self._twitch_chat_last_error = str(detail)[:500]
+
+    def _registered_twitch_chat_channels(self) -> list[str]:
+        """Return normalized unique channels for a fresh IRC client."""
+        channels = set()
+        for row in self.db.get_all_twitch_channels():
+            try:
+                channel = str(row["twitch_channel"] or "").strip().lstrip("#").lower()
+            except (KeyError, TypeError):
+                continue
+            if channel:
+                channels.add(channel)
+        return sorted(channels)
+
+    def _build_twitch_chat_client(self):
+        """Build a clean TwitchIO client; failed clients are never reused."""
+        from twitch_bot import TwitchChatBot
+
+        return TwitchChatBot(
+            token=self._twitch_bot_token,
+            initial_channels=self._registered_twitch_chat_channels(),
+            db=self.db,
+            twitch_api=self.twitch,
+            bot_id=self._twitch_bot_user_id,
+            token_refresher=self._refresh_twitch_chat_credentials,
+            lifecycle_callback=self._on_twitch_chat_lifecycle,
+        )
+
+    @staticmethod
+    def _twitch_chat_backoff_seconds(failure_count: int) -> int:
+        """Progressive reconnect delay, capped to avoid a tight failure loop."""
+        schedule = (5, 15, 30, 60, 120, 300)
+        index = max(0, min(int(failure_count) - 1, len(schedule) - 1))
+        return schedule[index]
+
+    def _twitch_chat_joined_count(self, chat_bot=None) -> int:
+        chat_bot = chat_bot or self.twitch_chat_bot
+        if chat_bot is None:
+            return 0
+        try:
+            return len(chat_bot._connected_channel_names())
+        except Exception:
+            return 0
+
+    def _twitch_chat_is_stalled(self, chat_bot, now=None) -> bool:
+        """Detect the TwitchIO 2.x reconnect wedge while its task is still alive."""
+        if self._twitch_chat_state not in {"connected", "reconnecting"}:
+            return False
+        last_activity = self._twitch_chat_last_activity_at
+        if last_activity is None:
+            return False
+        now = now or utcnow()
+        silent_for = (now - last_activity).total_seconds()
+        return silent_for >= self._twitch_chat_stale_after_seconds
+
+    async def _watch_twitch_chat_task(self, chat_bot, task):
+        """Wait for a task exit while periodically detecting a wedged socket."""
+        while not self._twitch_chat_shutdown:
+            done, _ = await asyncio.wait(
+                {task}, timeout=self._twitch_chat_watch_interval_seconds,
+            )
+            if done:
+                return await task
+            if self._twitch_chat_is_stalled(chat_bot):
+                raise RuntimeError(
+                    "Twitch chat received no IRC activity for "
+                    f"{self._twitch_chat_stale_after_seconds // 60} minutes"
+                )
+
+    async def _close_twitch_chat_client(self, chat_bot):
+        if chat_bot is None:
+            return
+        try:
+            await asyncio.wait_for(chat_bot.close(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out while closing stale Twitch chat client")
+        except Exception as exc:
+            logger.debug("Could not close Twitch chat client cleanly: %s", exc)
+
+    async def _cancel_twitch_chat_task(self, task):
+        """Cancel a wedged TwitchIO task without letting shutdown hang forever."""
+        if task is None or task.done():
+            return
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=10)
+        if not done:
+            logger.warning("Timed out while cancelling stale Twitch chat task")
+            return
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.result()
+
+    async def _supervise_twitch_chat(self):
+        """Rebuild TwitchIO after unexpected exits or reconnect wedges."""
+        failures = 0
+        while not self._twitch_chat_shutdown:
+            chat_bot = None
+            task = None
+            client_started_at = None
+            try:
+                if failures:
+                    self._twitch_chat_state = "backoff"
+                    delay = self._twitch_chat_backoff_seconds(failures)
+                    self._twitch_chat_next_retry_at = utcnow() + timedelta(seconds=delay)
+                    logger.warning(
+                        "Restarting Twitch chat in %ss after failure %s", delay, failures,
+                    )
+                    await asyncio.sleep(delay)
+                    if self._twitch_chat_shutdown:
+                        break
+
+                # A stale/invalid token should not poison every subsequent
+                # client. Validate first, then rotate once if Twitch rejects it.
+                try:
+                    await self._validate_twitch_chat_identity()
+                except Exception:
+                    await self._refresh_twitch_chat_credentials()
+                    await self._validate_twitch_chat_identity()
+
+                chat_bot = self.twitch_chat_bot or self._build_twitch_chat_client()
+                self.twitch_chat_bot = chat_bot
+                self._twitch_chat_state = "starting"
+                self._twitch_chat_next_retry_at = None
+                client_started_at = utcnow()
+                task = asyncio.create_task(
+                    chat_bot.start(), name="twitch-chat-client",
+                )
+                self._twitch_chat_task = task
+                logger.info("Starting supervised Twitch chat client as @%s", self._twitch_bot_login)
+                await self._watch_twitch_chat_task(chat_bot, task)
+                if not self._twitch_chat_shutdown:
+                    raise RuntimeError("Twitch chat client exited unexpectedly")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                now = utcnow()
+                last_ready = self._twitch_chat_last_ready_at
+                if (
+                    client_started_at is not None
+                    and last_ready is not None
+                    and last_ready >= client_started_at
+                    and (now - last_ready).total_seconds() >= 5 * 60
+                ):
+                    failures = 0
+                failures += 1
+                self._twitch_chat_restart_count += 1
+                self._twitch_chat_last_exit_at = now
+                self._twitch_chat_last_error = f"{type(exc).__name__}: {str(exc)[:400]}"
+                self._twitch_chat_state = "restarting"
+                logger.error(
+                    "Twitch chat client stopped; supervisor will rebuild it: %s",
+                    exc, exc_info=True,
+                )
+            finally:
+                await self._cancel_twitch_chat_task(task)
+                await self._close_twitch_chat_client(chat_bot)
+                if self.twitch_chat_bot is chat_bot:
+                    self.twitch_chat_bot = None
+                if self._twitch_chat_task is task:
+                    self._twitch_chat_task = None
+
+        self._twitch_chat_state = "stopped"
+        self._twitch_chat_next_retry_at = None
+
     async def setup_hook(self):
         """Called when bot is starting up"""
         # Load Twitch chat bot — wrapped in try/except so any failure here
         # never takes down the Discord bot
-        self.twitch_chat_bot = None
         if self._twitch_refresh_token:
             try:
                 await self._refresh_twitch_chat_credentials()
@@ -279,26 +469,17 @@ class TwitchNotifierBot(discord.Client):
 
         if self._twitch_bot_token:
             try:
-                from twitch_bot import TwitchChatBot
                 import twitch_chat_cog
 
                 identity = await self._validate_twitch_chat_identity()
-
-                # Dedupe channels — same Twitch channel may appear in multiple guilds,
-                # passing it twice causes a KeyError in twitchio's join handler.
-                registered_channels = list({r['twitch_channel'] for r in self.db.get_all_twitch_channels()})
-
-                self.twitch_chat_bot = TwitchChatBot(
-                    token=self._twitch_bot_token,
-                    initial_channels=registered_channels,
-                    db=self.db,
-                    twitch_api=self.twitch,
-                    bot_id=identity["user_id"],
-                    token_refresher=self._refresh_twitch_chat_credentials,
-                )
+                self._twitch_bot_user_id = identity["user_id"]
+                self.twitch_chat_bot = self._build_twitch_chat_client()
                 await twitch_chat_cog.setup(self, self.twitch_chat_bot)
-                asyncio.create_task(self.twitch_chat_bot.start())
-                logger.info("Twitch chat bot started as @%s", identity["login"])
+                self._twitch_chat_shutdown = False
+                self._twitch_chat_supervisor_task = asyncio.create_task(
+                    self._supervise_twitch_chat(), name="twitch-chat-supervisor",
+                )
+                logger.info("Twitch chat supervisor started for @%s", identity["login"])
             except Exception as e:
                 logger.error(f"Twitch chat bot failed to start: {e} - Discord bot continuing normally")
                 self.twitch_chat_bot = None
@@ -1250,6 +1431,13 @@ class TwitchNotifierBot(discord.Client):
 
     async def close(self):
         """Called when bot is shutting down cleanly."""
+        self._twitch_chat_shutdown = True
+        supervisor = getattr(self, "_twitch_chat_supervisor_task", None)
+        if supervisor and not supervisor.done():
+            supervisor.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await supervisor
+        self._twitch_chat_supervisor_task = None
         try:
             await self.log_to_channel(
                 "🔴", "Bot Shutting Down",

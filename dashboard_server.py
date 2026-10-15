@@ -2675,7 +2675,7 @@ async def twitch_bot_login(request):
         "response_type": "code",
         # Keep the IRC scopes while command intake remains on TwitchIO, and
         # add the grants required for badged messages and shoutout banners.
-        "scope": "chat:read chat:edit user:write:chat user:bot moderator:manage:announcements",
+        "scope": "chat:read chat:edit user:write:chat user:bot moderator:manage:announcements moderator:read:chatters",
         "state": state,
         "force_verify": "true",
     })
@@ -2813,7 +2813,7 @@ async def _complete_twitch_bot_oauth(code: str):
         raise web.HTTPBadGateway(reason="Twitch did not return a renewable token pair")
     required_scopes = {
         "chat:read", "chat:edit", "user:write:chat", "user:bot",
-        "moderator:manage:announcements",
+        "moderator:manage:announcements", "moderator:read:chatters",
     }
     missing_scopes = sorted(required_scopes - scopes)
     if missing_scopes:
@@ -4198,6 +4198,25 @@ async def get_operations_health(request):
     tracked_live_count = tracked_live_rows[0]["c"] if tracked_live_rows else 0
     live_memory_count = len(getattr(bot, "live_streamers", set()))
     eventsub_stats = dict(getattr(bot, "_eventsub_sync_stats", {}) or {})
+    chat_bot = getattr(bot, "twitch_chat_bot", None)
+    chat_task = getattr(bot, "_twitch_chat_task", None)
+    chat_supervisor = getattr(bot, "_twitch_chat_supervisor_task", None)
+    chat_state = str(getattr(bot, "_twitch_chat_state", "stopped") or "stopped")
+    try:
+        expected_chat_channels = len(bot._registered_twitch_chat_channels())
+    except Exception:
+        expected_chat_channels = 0
+    try:
+        joined_chat_channels = bot._twitch_chat_joined_count(chat_bot)
+    except Exception:
+        joined_chat_channels = 0
+    chat_task_running = bool(chat_task and not chat_task.done())
+    chat_supervisor_running = bool(chat_supervisor and not chat_supervisor.done())
+    chat_connected = bool(
+        chat_state == "connected"
+        and chat_task_running
+        and (expected_chat_channels == 0 or joined_chat_channels > 0)
+    )
     if permission_count:
         signals.append(f"{permission_count} Discord channel permission issue(s) detected.")
     if notification_failure_count:
@@ -4208,6 +4227,12 @@ async def get_operations_health(request):
         signals.append("The most recent startup reconciliation failed.")
     if getattr(bot, "_twitch_token_last_error", None):
         signals.append("The most recent Twitch chat token refresh failed.")
+    if getattr(bot, "_twitch_bot_token", None) and not chat_connected:
+        signals.append(
+            "Twitch chat is not connected; automatic recovery is active."
+            if chat_supervisor_running
+            else "Twitch chat is not connected and its recovery supervisor is stopped."
+        )
     if tracked_live_count != live_memory_count:
         signals.append(
             f"Live-state mismatch: {live_memory_count} in memory, "
@@ -4222,7 +4247,7 @@ async def get_operations_health(request):
 
     if not bot.is_ready() or failed:
         status = "critical"
-    elif stopped or permission_count or notification_failure_count or getattr(bot, "_eventsub_last_error", None) or getattr(bot, "_last_reconcile_error", None) or getattr(bot, "_twitch_token_last_error", None) or tracked_live_count != live_memory_count or eventsub_missing or eventsub_excess:
+    elif stopped or permission_count or notification_failure_count or getattr(bot, "_eventsub_last_error", None) or getattr(bot, "_last_reconcile_error", None) or getattr(bot, "_twitch_token_last_error", None) or (getattr(bot, "_twitch_bot_token", None) and not chat_connected) or tracked_live_count != live_memory_count or eventsub_missing or eventsub_excess:
         status = "warning"
     else:
         status = "healthy"
@@ -4263,12 +4288,29 @@ async def get_operations_health(request):
             "shoutout_announcements_ready": "moderator:manage:announcements" in set(
                 getattr(bot, "_twitch_bot_scopes", set()) or set()
             ),
+            "mass_shoutout_chatters_ready": "moderator:read:chatters" in set(
+                getattr(bot, "_twitch_bot_scopes", set()) or set()
+            ),
             "automatic_refresh_configured": bool(getattr(bot, "_twitch_refresh_token", None)),
             "token_valid": getattr(bot, "_twitch_token_valid", None),
             "last_validated_at": _health_iso(getattr(bot, "_twitch_token_last_validated_at", None)),
             "expires_at": _health_iso(getattr(bot, "_twitch_token_expires_at", None)),
             "last_success_at": _health_iso(getattr(bot, "_twitch_token_last_success_at", None)),
             "last_error": getattr(bot, "_twitch_token_last_error", None),
+        },
+        "twitch_chat": {
+            "state": chat_state,
+            "connected": chat_connected,
+            "task_running": chat_task_running,
+            "supervisor_running": chat_supervisor_running,
+            "joined_channels": joined_chat_channels,
+            "expected_channels": expected_chat_channels,
+            "restart_count": int(getattr(bot, "_twitch_chat_restart_count", 0) or 0),
+            "last_ready_at": _health_iso(getattr(bot, "_twitch_chat_last_ready_at", None)),
+            "last_activity_at": _health_iso(getattr(bot, "_twitch_chat_last_activity_at", None)),
+            "last_exit_at": _health_iso(getattr(bot, "_twitch_chat_last_exit_at", None)),
+            "next_retry_at": _health_iso(getattr(bot, "_twitch_chat_next_retry_at", None)),
+            "last_error": getattr(bot, "_twitch_chat_last_error", None),
         },
         "reconciliation": {
             "last_completed_at": _health_iso(getattr(bot, "_last_reconcile_at", None)),

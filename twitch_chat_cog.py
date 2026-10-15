@@ -193,8 +193,9 @@ async def setup(discord_bot, twitch_chat_bot):
         discord_bot.db.remove_twitch_channel(interaction.guild_id)
 
         others = discord_bot.db.get_guilds_for_twitch_channel(channel_name)
-        if not others and twitch_chat_bot:
-            await twitch_chat_bot.leave_channel(channel_name)
+        active_chat_bot = getattr(discord_bot, "twitch_chat_bot", None)
+        if not others and active_chat_bot:
+            await active_chat_bot.leave_channel(channel_name)
 
         await interaction.response.send_message(f"✅ Unlinked from **{channel_name}**.", ephemeral=True)
 

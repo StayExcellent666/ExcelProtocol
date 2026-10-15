@@ -199,6 +199,65 @@ class TwitchAPI:
 
         return False, "Twitch announcement API retry exhausted"
 
+    async def get_chatters(self, broadcaster_id: str, moderator_id: str,
+                           user_access_token: str, max_results: int = 1000) -> list[dict]:
+        """Return users currently connected to a broadcaster's chat.
+
+        Twitch's chatter list is intentionally separate from viewer count and
+        requires a moderator user token carrying ``moderator:read:chatters``.
+        Keep this helper token-explicit so the app access token is never used
+        accidentally for an endpoint whose moderator identity must match the
+        token owner.
+        """
+        broadcaster_id = str(broadcaster_id or "").strip()
+        moderator_id = str(moderator_id or "").strip()
+        token = str(user_access_token or "").strip()
+        if token.lower().startswith("oauth:"):
+            token = token[6:]
+        max_results = max(1, min(1000, int(max_results or 1000)))
+        if not broadcaster_id or not moderator_id or not token:
+            raise RuntimeError("Get Chatters requires broadcaster, moderator, and user token")
+
+        session = await self.get_session()
+        rows: list[dict] = []
+        cursor = None
+        while len(rows) < max_results:
+            params = {
+                "broadcaster_id": broadcaster_id,
+                "moderator_id": moderator_id,
+                "first": min(1000, max_results - len(rows)),
+            }
+            if cursor:
+                params["after"] = cursor
+            try:
+                async with session.get(
+                    f"{self.base_url}/chat/chatters",
+                    headers={
+                        "Client-ID": self.client_id,
+                        "Authorization": f"Bearer {token}",
+                    },
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    payload = await resp.json(content_type=None)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                raise RuntimeError(f"Get Chatters failed: {type(exc).__name__}: {exc}") from exc
+
+            if resp.status != 200:
+                detail = payload.get("message") if isinstance(payload, dict) else None
+                raise RuntimeError(f"Get Chatters failed: HTTP {resp.status}: {detail or 'unknown error'}")
+
+            page = payload.get("data", []) if isinstance(payload, dict) else []
+            rows.extend(page)
+            cursor = (
+                payload.get("pagination", {}).get("cursor")
+                if isinstance(payload, dict) else None
+            )
+            if not cursor or not page:
+                break
+
+        return rows[:max_results]
+
     async def get_live_streams(self, usernames: list) -> list:
         """
         Check which streamers from the list are currently live.

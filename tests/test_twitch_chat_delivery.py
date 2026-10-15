@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import twitch_bot as twitch_bot_module
 from twitch_bot import TwitchChatBot
 
 
@@ -263,4 +264,72 @@ async def test_shoutout_falls_back_to_normal_chat_when_announcement_fails():
         "📣 𝗦𝗛𝗢𝗨𝗧𝗢𝗨𝗧 • Go show @Creator some love! "
         "🎮 Just Chatting • twitch.tv/creator"
     ]
+
+
+def test_mass_shoutout_target_parser_accepts_mentions_commas_and_deduplicates():
+    assert TwitchChatBot._parse_mass_shoutout_targets(
+        "@Alpha, beta @ALPHA invalid-name @third_user"
+    ) == ["alpha", "beta", "third_user"]
+
+
+@pytest.mark.asyncio
+async def test_mass_shoutout_named_targets_are_queued_and_paced(monkeypatch):
+    monkeypatch.setattr(twitch_bot_module, "MASS_SHOUTOUT_DELAY_SECONDS", 0)
+    channel = FakeChannel()
+    processed = []
+
+    bot = object.__new__(TwitchChatBot)
+    bot._mass_shoutout_tasks = {}
+
+    async def send_chat(_channel, text):
+        channel.messages.append(text)
+
+    async def shoutout(_channel, target, report_errors=True):
+        processed.append((target, report_errors))
+        return target != "missing"
+
+    bot._send_chat = send_chat
+    bot._do_shoutout = shoutout
+
+    await TwitchChatBot._start_mass_shoutout(
+        bot, channel, "@Alpha, @missing beta", "streamer",
+    )
+    await bot._mass_shoutout_tasks["streamer"]
+
+    assert processed == [
+        ("alpha", False), ("missing", False), ("beta", False),
+    ]
+    assert channel.messages == [
+        "📣 𝗠𝗔𝗦𝗦 𝗦𝗛𝗢𝗨𝗧𝗢𝗨𝗧 • Queued 3 creator(s)",
+        "✅ 𝗠𝗔𝗦𝗦 𝗦𝗛𝗢𝗨𝗧𝗢𝗨𝗧 • 2 sent • 1 skipped",
+    ]
+    assert bot._mass_shoutout_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_mass_shoutout_all_excludes_broadcaster_bot_and_common_bots():
+    class Api:
+        @staticmethod
+        async def get_chatters(*_args, **_kwargs):
+            return [
+                {"user_login": "streamer"},
+                {"user_id": "bot-42", "user_login": "exceltwitch"},
+                {"user_login": "nightbot"},
+                {"user_login": "CreatorOne"},
+                {"user_login": "creatorone"},
+                {"user_login": "CreatorTwo"},
+            ]
+
+    bot = object.__new__(TwitchChatBot)
+    bot.bot_id = "bot-42"
+    bot._http = SimpleNamespace(nick="exceltwitch")
+    bot._connection = SimpleNamespace(nick="exceltwitch")
+    bot.twitch_api = Api()
+    bot._user_access_token = "token"
+    bot._token_refresher = None
+    bot._broadcaster_ids = {"streamer": "broadcaster-7"}
+
+    assert await TwitchChatBot._get_mass_shoutout_chatters(
+        bot, "streamer",
+    ) == ["creatorone", "creatortwo"]
 

@@ -3,6 +3,7 @@ import aiohttp
 from datetime import datetime
 from twitchio.ext import commands 
 import logging
+import re
 from database import Database
 from twitch_api import TwitchAPI
 from utils import utcnow, parse_twitch_iso
@@ -12,12 +13,19 @@ from twitch_command_variables import render_custom_command
 logger = logging.getLogger(__name__)
 
 COMMAND_LIMIT = 75
+MASS_SHOUTOUT_EXPLICIT_LIMIT = 10
+MASS_SHOUTOUT_ALL_LIMIT = 25
+MASS_SHOUTOUT_DELAY_SECONDS = 2.25
+MASS_SHOUTOUT_EXCLUDED_LOGINS = {
+    "nightbot", "streamelements", "streamlabs", "moobot", "fossabot",
+    "sery_bot", "wizebot", "soundalerts", "botrixoficial", "own3d",
+}
 
 
 class TwitchChatBot(commands.Bot):
     def __init__(self, token: str, initial_channels: list, db: Database,
                  twitch_api: TwitchAPI, bot_id: str = None,
-                 token_refresher=None):
+                 token_refresher=None, lifecycle_callback=None):
         super().__init__(
             token=token,
             prefix="!",
@@ -28,10 +36,21 @@ class TwitchChatBot(commands.Bot):
         self.bot_id = str(bot_id or "")
         self._user_access_token = self._normalise_user_token(token)
         self._token_refresher = token_refresher
+        self._lifecycle_callback = lifecycle_callback
         self._cooldowns: dict[str, dict[str, datetime]] = {}
         self._broadcaster_ids: dict[str, str] = {}
         self._helix_send_failures = 0
         self._helix_send_disabled_until = 0.0
+        self._mass_shoutout_tasks: dict[str, asyncio.Task] = {}
+
+    def _report_lifecycle(self, event: str, detail: str | None = None):
+        callback = self._lifecycle_callback
+        if callback is None:
+            return
+        try:
+            callback(event, detail)
+        except Exception:
+            logger.exception("Twitch chat lifecycle callback failed for %s", event)
 
     @staticmethod
     def _normalise_user_token(token: str) -> str:
@@ -184,6 +203,7 @@ class TwitchChatBot(commands.Bot):
 
     async def event_ready(self):
         logger.info(f"Twitch chat bot ready | Nick: {self.nick}")
+        self._report_lifecycle("ready")
         await asyncio.sleep(3)
         connected_names = self._connected_channel_names()
         registered_names = self._registered_channel_names(self.db.get_all_twitch_channels())
@@ -214,7 +234,32 @@ class TwitchChatBot(commands.Bot):
                             logger.error(f"Failed to join {channel_name} after 3 attempts: {e}")
                 await asyncio.sleep(0.5)
 
+    async def event_raw_data(self, data: str):
+        # Twitch sends periodic PING frames even in quiet channels. Recording
+        # all inbound IRC traffic gives the supervisor a reliable liveness
+        # signal without generating any additional Twitch requests.
+        self._report_lifecycle("activity")
+
+    async def event_reconnect(self):
+        self._report_lifecycle("reconnect")
+        logger.warning("Twitch requested an IRC reconnect")
+
+    async def event_channel_join_failure(self, channel: str):
+        self._report_lifecycle("join_failure", f"Unable to join @{channel}")
+        logger.warning("Twitch chat could not join @%s", channel)
+
+    async def event_error(self, error: Exception, data=None):
+        detail = f"{type(error).__name__}: {error}"
+        self._report_lifecycle("error", detail)
+        logger.error(
+            "Twitch chat event error: %s", detail,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
     async def event_message(self, message):
+        report_lifecycle = getattr(self, "_report_lifecycle", None)
+        if report_lifecycle:
+            report_lifecycle("activity")
         if message.echo:
             return
 
@@ -267,7 +312,7 @@ class TwitchChatBot(commands.Bot):
     async def _handle_builtin(self, message, command_name: str, args: str, channel_name: str) -> bool:
         is_mod = message.author.is_mod or message.author.name.lower() == channel_name
 
-        configurable = {"!uptime", "!game", "!title", "!viewers", "!so", "!commands"}
+        configurable = {"!uptime", "!game", "!title", "!viewers", "!so", "!mso", "!commands"}
         enabled_check = getattr(self.db, "is_builtin_command_enabled", None)
         if command_name in configurable and enabled_check and not enabled_check(channel_name, command_name):
             return True
@@ -280,6 +325,14 @@ class TwitchChatBot(commands.Bot):
                 await self._send_chat(message.channel, "Usage: !so @username")
                 return True
             await self._do_shoutout(message.channel, target)
+            return True
+
+        if command_name == "!mso":
+            if not is_mod:
+                return True
+            if not await self._check_cooldown(channel_name, "!mso", 30):
+                return True
+            await self._start_mass_shoutout(message.channel, args, channel_name)
             return True
 
         if command_name == "!stop":
@@ -401,7 +454,7 @@ class TwitchChatBot(commands.Bot):
             custom_cmds = self.db.get_twitch_commands(channel_name)
             settings_getter = getattr(self.db, "get_builtin_command_settings", None)
             settings = settings_getter(channel_name) if settings_getter else {
-                name: True for name in ("!uptime", "!game", "!title", "!viewers", "!so", "!commands")
+                name: True for name in ("!uptime", "!game", "!title", "!viewers", "!so", "!mso", "!commands")
             }
             builtin = " ".join(name for name, enabled in settings.items() if enabled)
             if self.db.get_clip_config(channel_name):
@@ -456,12 +509,155 @@ class TwitchChatBot(commands.Bot):
             logger.error("!clip creation failed for %s: %s", message.channel.name, e, exc_info=True)
             await self._send_chat(message.channel, "❌ Twitch could not create that clip right now.")
 
-    async def _do_shoutout(self, channel, target_login: str):
+    @staticmethod
+    def _parse_mass_shoutout_targets(args: str) -> list[str]:
+        """Normalize a comma/space-separated list of Twitch logins."""
+        targets = []
+        seen = set()
+        for raw in re.split(r"[\s,]+", str(args or "").strip()):
+            login = raw.strip().lstrip("@").lower()
+            if not login or not re.fullmatch(r"[a-z0-9_]{1,25}", login):
+                continue
+            if login not in seen:
+                seen.add(login)
+                targets.append(login)
+        return targets
+
+    async def _get_mass_shoutout_chatters(self, channel_name: str) -> list[str]:
+        broadcaster_id = await self._broadcaster_id_for(channel_name)
+        if not broadcaster_id or not self.bot_id:
+            raise RuntimeError("Could not resolve broadcaster or bot identity")
+
+        async def fetch():
+            return await self.twitch_api.get_chatters(
+                broadcaster_id,
+                self.bot_id,
+                self._user_access_token,
+                max_results=1000,
+            )
+
+        try:
+            chatters = await fetch()
+        except RuntimeError as exc:
+            if self._is_oauth_failure(str(exc)) and self._token_refresher:
+                refreshed_token = await self._token_refresher()
+                self.update_user_token(refreshed_token)
+                chatters = await fetch()
+            else:
+                raise
+
+        try:
+            bot_login = str(self.nick or "").lower()
+        except (AttributeError, RuntimeError):
+            bot_login = ""
+        excluded = set(MASS_SHOUTOUT_EXCLUDED_LOGINS)
+        excluded.update({channel_name.lower(), bot_login})
+        targets = []
+        seen = set()
+        for chatter in chatters:
+            if str(chatter.get("user_id") or "") == str(self.bot_id):
+                continue
+            login = str(chatter.get("user_login") or "").strip().lower()
+            if not login or login in excluded or login in seen:
+                continue
+            seen.add(login)
+            targets.append(login)
+        return targets
+
+    async def _start_mass_shoutout(self, channel, args: str, channel_name: str):
+        tasks = getattr(self, "_mass_shoutout_tasks", None)
+        if tasks is None:
+            tasks = self._mass_shoutout_tasks = {}
+        active = tasks.get(channel_name)
+        if active and not active.done():
+            await self._send_chat(channel, "📣 A mass shoutout is already running in this channel.")
+            return
+
+        requested = str(args or "").strip()
+        if not requested:
+            await self._send_chat(channel, "Usage: !mso @name1 @name2, or !mso all")
+            return
+
+        all_chatters = requested.lower() == "all"
+        if all_chatters:
+            try:
+                targets = await self._get_mass_shoutout_chatters(channel_name)
+            except Exception as exc:
+                logger.warning("!mso all could not read chatters in @%s: %s", channel_name, exc)
+                await self._send_chat(
+                    channel,
+                    "❌ !mso all needs Chatters access. Make sure the bot is modded, then reconnect the Twitch Bot from Health Check once.",
+                )
+                return
+            if not targets:
+                await self._send_chat(channel, "📣 No eligible chatters found to shout out.")
+                return
+            total = len(targets)
+            targets = targets[:MASS_SHOUTOUT_ALL_LIMIT]
+            limit_note = (
+                f" • first {len(targets)} of {total} (safety limit)"
+                if total > len(targets) else ""
+            )
+        else:
+            targets = self._parse_mass_shoutout_targets(requested)
+            if not targets:
+                await self._send_chat(channel, "Usage: !mso @name1 @name2, or !mso all")
+                return
+            if len(targets) > MASS_SHOUTOUT_EXPLICIT_LIMIT:
+                await self._send_chat(
+                    channel,
+                    f"❌ Add at most {MASS_SHOUTOUT_EXPLICIT_LIMIT} names per !mso command.",
+                )
+                return
+            limit_note = ""
+
+        await self._send_chat(
+            channel,
+            f"📣 𝗠𝗔𝗦𝗦 𝗦𝗛𝗢𝗨𝗧𝗢𝗨𝗧 • Queued {len(targets)} creator(s){limit_note}",
+        )
+        task = asyncio.create_task(
+            self._run_mass_shoutout(channel, channel_name, targets),
+            name=f"mass-shoutout-{channel_name}",
+        )
+        tasks[channel_name] = task
+
+    async def _run_mass_shoutout(self, channel, channel_name: str,
+                                 targets: list[str]):
+        sent = 0
+        failed = 0
+        try:
+            for index, target in enumerate(targets):
+                if await self._do_shoutout(channel, target, report_errors=False):
+                    sent += 1
+                else:
+                    failed += 1
+                if index < len(targets) - 1:
+                    await asyncio.sleep(MASS_SHOUTOUT_DELAY_SECONDS)
+            result = f"✅ 𝗠𝗔𝗦𝗦 𝗦𝗛𝗢𝗨𝗧𝗢𝗨𝗧 • {sent} sent"
+            if failed:
+                result += f" • {failed} skipped"
+            await self._send_chat(channel, result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Mass shoutout failed in @%s: %s", channel_name, exc, exc_info=True)
+            try:
+                await self._send_chat(channel, "❌ Mass shoutout stopped because Twitch returned an error.")
+            except Exception:
+                pass
+        finally:
+            tasks = getattr(self, "_mass_shoutout_tasks", {})
+            if tasks.get(channel_name) is asyncio.current_task():
+                tasks.pop(channel_name, None)
+
+    async def _do_shoutout(self, channel, target_login: str,
+                           report_errors: bool = True) -> bool:
         try:
             info = await self.twitch_api.get_last_stream_info(target_login)
             if not info:
-                await self._send_chat(channel, f"Could not find Twitch user: {target_login}")
-                return
+                if report_errors:
+                    await self._send_chat(channel, f"Could not find Twitch user: {target_login}")
+                return False
 
             display_name = info["user"].get("display_name", target_login)
             game = info.get("game_name") or "something awesome"
@@ -490,10 +686,13 @@ class TwitchChatBot(commands.Bot):
             announced = await self._send_announcement(channel, msg, color="purple")
             if not announced:
                 await self._send_chat(channel, msg)
+            return True
 
         except Exception as e:
             logger.error(f"Error in shoutout for {target_login}: {e}", exc_info=True)
-            await self._send_chat(channel, f"Failed to get shoutout info for {target_login}")
+            if report_errors:
+                await self._send_chat(channel, f"Failed to get shoutout info for {target_login}")
+            return False
 
     async def _handle_custom(self, message, command_name: str, args: str, channel_name: str):
         cmd = self.db.get_twitch_command(channel_name, command_name)

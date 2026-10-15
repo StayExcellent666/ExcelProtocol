@@ -2682,6 +2682,7 @@ function TwitchTab({ guildId, isDev }) {
     { command_name:"!title",    description:"Current stream title",               permission:"everyone", cooldown_seconds:30 },
     { command_name:"!viewers",  description:"Current viewer count",               permission:"everyone", cooldown_seconds:60 },
     { command_name:"!so",       description:"Shoutout another streamer",          permission:"mod",      cooldown_seconds:0  },
+    { command_name:"!mso",      description:"Shoutout several names or chatters",  permission:"mod",      cooldown_seconds:30 },
     { command_name:"!commands", description:"Lists all available commands",       permission:"everyone", cooldown_seconds:60 },
   ];
 
@@ -5499,15 +5500,21 @@ function HealthCheckTab({ ownerView = false }) {
               <span style={{ color:"var(--text3)" }}>Unresolvable accounts</span><span style={{ color:data.eventsub?.unresolvable ? "var(--yellow)" : "var(--green)", textAlign:"right" }}>{data.eventsub?.unresolvable ?? 0}</span>
               <span style={{ color:"var(--text3)" }}>Chat token auto-refresh</span><span style={{ color:data.twitch_chat_token?.automatic_refresh_configured ? "var(--green)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat_token?.automatic_refresh_configured ? "Configured" : "Not configured"}</span>
               <span style={{ color:"var(--text3)" }}>Bot account</span><span style={{ color:"var(--text2)", textAlign:"right" }}>@{data.twitch_chat_token?.account || "not configured"}</span>
+              <span style={{ color:"var(--text3)" }}>Live chat connection</span><span style={{ color:data.twitch_chat?.connected ? "var(--green)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat?.connected ? "Connected" : (data.twitch_chat?.state || "Stopped").replace(/^./, c => c.toUpperCase())}</span>
+              <span style={{ color:"var(--text3)" }}>Joined chat channels</span><span style={{ color:data.twitch_chat?.joined_channels === data.twitch_chat?.expected_channels ? "var(--green)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat?.joined_channels ?? 0} / {data.twitch_chat?.expected_channels ?? 0}</span>
+              <span style={{ color:"var(--text3)" }}>Automatic recoveries</span><span style={{ color:data.twitch_chat?.restart_count ? "var(--yellow)" : "var(--text2)", textAlign:"right" }}>{data.twitch_chat?.restart_count ?? 0}</span>
+              <span style={{ color:"var(--text3)" }}>Last chat activity</span><span style={{ color:"var(--text2)", textAlign:"right" }}>{when(data.twitch_chat?.last_activity_at)}</span>
               <span style={{ color:"var(--text3)" }}>Current chat token</span><span style={{ color:data.twitch_chat_token?.token_valid === true ? "var(--green)" : data.twitch_chat_token?.token_valid === false ? "var(--red)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat_token?.token_valid === true ? "Valid" : data.twitch_chat_token?.token_valid === false ? "Invalid" : "Checking"}</span>
               <span style={{ color:"var(--text3)" }}>Official bot badge scopes</span><span style={{ color:data.twitch_chat_token?.chat_bot_badge_ready ? "var(--green)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat_token?.chat_bot_badge_ready ? "Granted" : "Reconnect required"}</span>
               <span style={{ color:"var(--text3)" }}>Highlighted shoutout scope</span><span style={{ color:data.twitch_chat_token?.shoutout_announcements_ready ? "var(--green)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat_token?.shoutout_announcements_ready ? "Granted" : "Reconnect required"}</span>
+              <span style={{ color:"var(--text3)" }}>Mass shoutout chatters scope</span><span style={{ color:data.twitch_chat_token?.mass_shoutout_chatters_ready ? "var(--green)" : "var(--yellow)", textAlign:"right" }}>{data.twitch_chat_token?.mass_shoutout_chatters_ready ? "Granted" : "Reconnect required"}</span>
               <span style={{ color:"var(--text3)" }}>Last token validation</span><span style={{ color:"var(--text2)", textAlign:"right" }}>{when(data.twitch_chat_token?.last_validated_at)}</span>
               <span style={{ color:"var(--text3)" }}>Last token refresh</span><span style={{ color:"var(--text2)", textAlign:"right" }}>{when(data.twitch_chat_token?.last_success_at)}</span>
             </div>
             <div style={{ color:"var(--text3)", fontSize:10, marginTop:9, fontFamily:"'JetBrains Mono',monospace" }}>Expected = two per unique Twitch broadcaster: one online and one offline subscription.</div>
             {data.eventsub?.last_error && <div style={{ color:"var(--red)", fontSize:11, marginTop:10, fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-word" }}>{data.eventsub.last_error}</div>}
             {data.twitch_chat_token?.last_error && <div style={{ color:"var(--red)", fontSize:11, marginTop:10, fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-word" }}>{data.twitch_chat_token.last_error}</div>}
+            {data.twitch_chat?.last_error && <div style={{ color:"var(--yellow)", fontSize:11, marginTop:10, fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-word" }}>Chat recovery: {data.twitch_chat.last_error}</div>}
           </div>
           <div style={{ ...C.card, padding:16 }}>
             <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14, marginBottom:10 }}>Startup Reconciliation</div>

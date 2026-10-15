@@ -896,6 +896,9 @@ class TestDevDashboardRoutes:
             def is_running(self): return True
             def failed(self): return False
 
+        class FakeTask:
+            def done(self): return False
+
         class FakeBot:
             def __init__(self):
                 self.start_time = datetime.now(timezone.utc) - timedelta(hours=2)
@@ -907,6 +910,14 @@ class TestDevDashboardRoutes:
                 self._eventsub_last_success_at = datetime.now(timezone.utc)
                 self._last_reconcile_at = datetime.now(timezone.utc)
                 self._last_reconcile_counts = {"cleanup": 1, "no_action": 1}
+                self._twitch_bot_token = "token"
+                self._twitch_chat_state = "connected"
+                self._twitch_chat_task = FakeTask()
+                self._twitch_chat_supervisor_task = FakeTask()
+                self._twitch_chat_restart_count = 1
+                self._twitch_chat_last_ready_at = datetime.now(timezone.utc)
+                self._twitch_chat_last_activity_at = datetime.now(timezone.utc)
+                self.twitch_chat_bot = object()
                 for name in (
                     "check_streams", "check_milestones", "cleanup_channels",
                     "monthly_leaderboard_cleanup", "poll_live_streamers_health",
@@ -916,6 +927,8 @@ class TestDevDashboardRoutes:
                     setattr(self, name, FakeLoop())
             def is_ready(self): return True
             def is_closed(self): return False
+            def _registered_twitch_chat_channels(self): return ["one", "two"]
+            def _twitch_chat_joined_count(self, _chat_bot=None): return 2
 
         async def fake_db_fetch(query, params=()):
             if "permission_issues" in query or "status != 'sent'" in query:
@@ -935,6 +948,9 @@ class TestDevDashboardRoutes:
         assert payload["status"] == "healthy"
         assert payload["bot"]["ready"] is True
         assert payload["eventsub"]["actual"] == 4
+        assert payload["twitch_chat"]["connected"] is True
+        assert payload["twitch_chat"]["joined_channels"] == 2
+        assert payload["twitch_chat"]["restart_count"] == 1
         assert payload["streaming"]["unique_streamers"] == 2
         assert len(payload["tasks"]) == 11
 

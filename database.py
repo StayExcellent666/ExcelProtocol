@@ -2960,7 +2960,7 @@ class Database:
     # Twitch custom commands
     # ------------------------------------------------------------------
 
-    TWITCH_BUILTIN_COMMANDS = ("!uptime", "!game", "!title", "!viewers", "!so", "!commands")
+    TWITCH_BUILTIN_COMMANDS = ("!uptime", "!game", "!title", "!viewers", "!so", "!mso", "!commands")
 
     def get_builtin_command_settings(self, twitch_channel: str) -> Dict[str, bool]:
         """Return all configurable built-ins; commands default to enabled."""
