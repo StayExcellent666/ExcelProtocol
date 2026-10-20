@@ -15,6 +15,7 @@ import json
 import re
 import secrets
 import time
+import uuid
 import aiosqlite
 import aiohttp as http_client
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,26 @@ from datetime import datetime, timedelta, timezone
 from aiohttp import web
 from aiohttp_cors import setup as cors_setup, ResourceOptions
 from dotenv import load_dotenv
+from excelprotocol_fx import (
+    FX_REGISTRY,
+    MAX_MESSAGE_BYTES,
+    PAIRING_TTL_SECONDS,
+    PROTOCOL,
+    PROTOCOL_VERSION,
+    DeviceSession,
+    FxOfflineError,
+    FxTimeoutError,
+    FxUnsupportedError,
+    FxValidationError,
+    SlidingWindowRateLimiter,
+    hash_secret,
+    make_device_credential,
+    make_pairing_code,
+    normalize_pairing_code,
+    validate_command,
+    validate_device_name,
+    validate_settings,
+)
 
 load_dotenv()
 
@@ -45,6 +66,22 @@ CORS_ALLOWED_ORIGINS  = tuple(
 )
 if any("*" in origin for origin in CORS_ALLOWED_ORIGINS):
     raise RuntimeError("CORS_ALLOWED_ORIGINS must list explicit origins; wildcards are forbidden")
+FX_ALLOWED_ORIGINS = tuple(
+    origin.strip().rstrip("/")
+    for origin in os.getenv("FX_ALLOWED_ORIGINS", ",".join(CORS_ALLOWED_ORIGINS)).split(",")
+    if origin.strip()
+)
+if any("*" in origin for origin in FX_ALLOWED_ORIGINS):
+    raise RuntimeError("FX_ALLOWED_ORIGINS must list explicit origins; wildcards are forbidden")
+_fx_configured_pepper = os.getenv("FX_CREDENTIAL_PEPPER", "")
+_fx_fallback_secret = os.getenv("EVENTSUB_SECRET", "")
+FX_CREDENTIAL_PEPPER = _fx_configured_pepper or (
+    hashlib.sha256(("excelprotocol-fx-v1:" + _fx_fallback_secret).encode("utf-8")).hexdigest()
+    if _fx_fallback_secret else ""
+)
+FX_WSS_BASE_URL = os.getenv("FX_WSS_BASE_URL", "wss://excelprotocol.fly.dev").rstrip("/")
+if not FX_WSS_BASE_URL.startswith("wss://"):
+    raise RuntimeError("FX_WSS_BASE_URL must use wss://")
 
 # Stable for one deployed source revision. OBS overlays compare this value
 # after reconnecting so a plain process restart keeps the active player alive,
@@ -572,7 +609,7 @@ def _session_can_manage_guild(session: dict, guild_id: str) -> bool:
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/twitch/callback", "/api/eventsub/callback")
-    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/fortuna-overlay/") or request.path.startswith("/media/chat-sounds/") or request.path.startswith("/auth/twitch/login") or request.path.startswith("/companion") or request.path.startswith("/api/fortuna/plugin"):
+    if request.path in public or request.path.startswith("/app") or request.path.startswith("/overlay") or request.path.startswith("/fortuna-overlay/") or request.path.startswith("/media/chat-sounds/") or request.path.startswith("/auth/twitch/login") or request.path.startswith("/companion") or request.path.startswith("/api/fortuna/plugin") or request.path in ("/api/fx/pair", "/api/fx/ws"):
         return await handler(request)
 
     session = get_session(request)
@@ -2966,6 +3003,7 @@ async def eventsub_callback(request):
 
         elif sub_type == "channel.channel_points_custom_reward_redemption.add":
             reward_id         = event.get("reward", {}).get("id")
+            redemption_id     = str(event.get("id") or uuid.uuid4())
             broadcaster_login = event.get("broadcaster_user_login", "").lower()
             redeemer          = event.get("user_name", "")
 
@@ -2979,11 +3017,17 @@ async def eventsub_callback(request):
             for row in rows:
                 guild_id = str(row["guild_id"])
                 trigger_rows = await db_fetch(
-                    "SELECT video_url, volume, audio_only, start_seconds, end_seconds FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
+                    """SELECT video_url, volume, audio_only, start_seconds, end_seconds,
+                              trigger_type, fx_device_id, fx_effect_id, fx_duration_ms,
+                              fx_intensity, fx_parameters_json, fx_queue
+                       FROM reward_triggers WHERE guild_id = ? AND reward_id = ?""",
                     (guild_id, reward_id)
                 )
                 if trigger_rows:
                     trigger = trigger_rows[0]
+                    if (trigger.get("trigger_type") or "media") == "fx":
+                        asyncio.create_task(_dispatch_fx_reward(guild_id, trigger, redemption_id))
+                        continue
                     import json as _json
                     payload = _json.dumps({
                         "type": "play",
@@ -3523,6 +3567,23 @@ function processQueue() {{
     })
 
 # ── Broadcaster Info + Rewards ────────────────────────────────────────────────
+_REWARD_TRIGGER_SELECT = """reward_id, reward_title, video_url, volume, hotkey,
+    audio_only, start_seconds, end_seconds, trigger_type, fx_device_id,
+    fx_effect_id, fx_duration_ms, fx_intensity, fx_parameters_json, fx_queue"""
+
+
+def _public_reward_trigger(row: dict) -> dict:
+    result = dict(row)
+    try:
+        result["fx_parameters"] = json.loads(result.pop("fx_parameters_json", "{}") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        result["fx_parameters"] = {}
+    result["audio_only"] = bool(result.get("audio_only"))
+    result["fx_queue"] = bool(result.get("fx_queue"))
+    result["trigger_type"] = result.get("trigger_type") or "media"
+    return result
+
+
 async def get_broadcaster_info(request):
     """Return connection status and channel rewards for a guild."""
     guild_id = request.match_info["guild_id"]
@@ -3583,7 +3644,11 @@ async def get_broadcaster_info(request):
         logger.error(f"Error fetching rewards for guild {guild_id}: {e}")
 
     # Get existing triggers
-    triggers = await db_fetch("SELECT reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+    trigger_rows = await db_fetch(
+        f"SELECT {_REWARD_TRIGGER_SELECT} FROM reward_triggers WHERE guild_id = ?",
+        (guild_id,),
+    )
+    triggers = [_public_reward_trigger(row) for row in trigger_rows]
 
     return web.json_response({
         "connected": True,
@@ -3596,9 +3661,9 @@ async def get_broadcaster_info(request):
     })
 
 async def upsert_reward_trigger(request):
-    """Add or update a video trigger for a reward."""
+    """Add or update a media or ExcelProtocol FX reward trigger."""
     guild_id     = request.match_info["guild_id"]
-    body         = await request.json()
+    body         = await _fx_json_body(request)
     reward_id    = body.get("reward_id", "").strip()
     reward_title = body.get("reward_title", "").strip()
     video_url    = body.get("video_url", "").strip()
@@ -3608,16 +3673,77 @@ async def upsert_reward_trigger(request):
     start_seconds = max(0.0, float(body.get("start_seconds") or 0))
     end_value    = body.get("end_seconds")
     end_seconds  = float(end_value) if end_value not in (None, "", 0, "0") else None
-    if not reward_id or not video_url:
-        raise web.HTTPBadRequest(reason="reward_id and video_url are required")
+    trigger_type = str(body.get("trigger_type") or "media")
+    if trigger_type not in {"media", "fx"}:
+        raise web.HTTPBadRequest(reason="trigger_type must be media or fx")
+    if not reward_id:
+        raise web.HTTPBadRequest(reason="reward_id is required")
     if not 0 <= volume <= 1:
         raise web.HTTPBadRequest(reason="volume must be between 0 and 1")
     if end_seconds is not None and end_seconds <= start_seconds:
         raise web.HTTPBadRequest(reason="end time must be after start time")
+
+    fx_device_id = fx_effect_id = None
+    fx_duration_ms = None
+    fx_intensity = None
+    fx_parameters = {}
+    fx_queue = False
+    if trigger_type == "media":
+        if not video_url:
+            raise web.HTTPBadRequest(reason="video_url is required for a video/audio trigger")
+    else:
+        fx_device_id = str(body.get("fx_device_id") or "")
+        fx_effect_id = str(body.get("fx_effect_id") or "")
+        owned = await db_fetch(
+            "SELECT id FROM fx_devices WHERE id = ? AND guild_id = ? AND revoked_at IS NULL",
+            (fx_device_id, guild_id),
+        )
+        if not owned:
+            raise web.HTTPBadRequest(reason="Select a paired ExcelProtocol FX device")
+        live = FX_REGISTRY.get(fx_device_id)
+        if live and not live.effects:
+            raise web.HTTPConflict(reason="Waiting for the plugin effect list")
+        if live and "commands.v1" not in live.capabilities:
+            raise web.HTTPBadRequest(reason="This plugin build cannot receive effect commands")
+        candidate = {
+            "type": "trigger_effect", "event_id": str(uuid.uuid4()),
+            "effect": fx_effect_id,
+            "duration_ms": body.get("fx_duration_ms"),
+            "intensity": body.get("fx_intensity"),
+            "parameters": body.get("fx_parameters") or {},
+            "queue": bool(body.get("fx_queue", False)),
+        }
+        try:
+            validated = validate_command(candidate, live.effects if live else None)
+        except FxValidationError as exc:
+            raise web.HTTPBadRequest(reason=str(exc))
+        fx_duration_ms = validated["duration_ms"]
+        fx_intensity = validated["intensity"]
+        fx_parameters = validated["parameters"]
+        fx_queue = validated["queue"]
+        video_url = ""
+        hotkey = None
+        audio_only = False
+        start_seconds = 0
+        end_seconds = None
     await db_execute(
-        "INSERT INTO reward_triggers (guild_id, reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(guild_id, reward_id) DO UPDATE SET reward_title=excluded.reward_title, video_url=excluded.video_url, volume=excluded.volume, hotkey=excluded.hotkey, audio_only=excluded.audio_only, start_seconds=excluded.start_seconds, end_seconds=excluded.end_seconds",
-        (guild_id, reward_id, reward_title, video_url, volume, hotkey, 1 if audio_only else 0, start_seconds, end_seconds)
+        """INSERT INTO reward_triggers
+           (guild_id, reward_id, reward_title, video_url, volume, hotkey, audio_only,
+            start_seconds, end_seconds, trigger_type, fx_device_id, fx_effect_id,
+            fx_duration_ms, fx_intensity, fx_parameters_json, fx_queue)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(guild_id, reward_id) DO UPDATE SET
+             reward_title=excluded.reward_title, video_url=excluded.video_url,
+             volume=excluded.volume, hotkey=excluded.hotkey,
+             audio_only=excluded.audio_only, start_seconds=excluded.start_seconds,
+             end_seconds=excluded.end_seconds, trigger_type=excluded.trigger_type,
+             fx_device_id=excluded.fx_device_id, fx_effect_id=excluded.fx_effect_id,
+             fx_duration_ms=excluded.fx_duration_ms, fx_intensity=excluded.fx_intensity,
+             fx_parameters_json=excluded.fx_parameters_json, fx_queue=excluded.fx_queue""",
+        (guild_id, reward_id, reward_title, video_url, volume, hotkey,
+         1 if audio_only else 0, start_seconds, end_seconds, trigger_type,
+         fx_device_id, fx_effect_id, fx_duration_ms, fx_intensity,
+         json.dumps(fx_parameters, separators=(",", ":")), 1 if fx_queue else 0),
     )
     return web.json_response({"ok": True})
 
@@ -8155,7 +8281,7 @@ async def landing_page(request):
 async def terms_page(request):
     html = _legal_html(
         "Terms of Service",
-        "Last updated: October 9, 2026",
+        "Last updated: October 21, 2026",
         """
         <div class="notice">These Terms govern the ExcelProtocol Discord bot, web dashboard, Twitch integrations, OBS browser sources, companion integrations, and related services (together, the "Service").</div>
 
@@ -8242,9 +8368,9 @@ async def terms_page(request):
 async def privacy_page(request):
     html = _legal_html(
         "Privacy Policy",
-        "Last updated: October 9, 2026",
+        "Last updated: October 21, 2026",
         """
-        <div class="notice">This Policy describes how ExcelProtocol processes information through its Discord bot, dashboard, Twitch integrations, OBS browser sources, companion integrations, support tools, and related services. It does not replace the privacy policies of Discord, Twitch, YouTube, Fly.io, Google, or Ko-fi.</div>
+        <div class="notice">This Policy describes how ExcelProtocol processes information through its Discord bot, dashboard, Twitch integrations, OBS browser sources, native OBS plugin integrations, companion integrations, support tools, and related services. It does not replace the privacy policies of Discord, Twitch, YouTube, Fly.io, Google, or Ko-fi.</div>
 
         <h2>1. Controller and Contact</h2>
         <p>The independent operator of ExcelProtocol is the controller responsible for the processing described here. Privacy questions and data requests may be sent to <strong>stayexcellent</strong> on Discord or through the <a href="https://discord.gg/Z4unn5DHgD">ExcelProtocol support server</a>.</p>
@@ -8275,6 +8401,7 @@ async def privacy_page(request):
         <ul>
           <li>Notification message IDs and delivery logs, permission issues, unresolvable Twitch accounts, and health state</li>
           <li>Hashed companion or plugin keys, opaque OBS overlay tokens, access timestamps, and revocation state</li>
+          <li>For ExcelProtocol FX: the device name, random device ID, plugin and OBS versions, negotiated capabilities, last-seen time, desired effect settings, and safe command-result metadata. Pairing codes and device credentials are stored only as one-way keyed hashes, and command bodies are not retained</li>
           <li>A random dashboard session identifier stored in a secure, HTTP-only cookie; the corresponding session data is held in application memory</li>
           <li>Standard web-server and platform logs, which may include request time, route, error information, and network metadata such as IP address</li>
         </ul>
@@ -8321,6 +8448,7 @@ async def privacy_page(request):
           <li>Custom-command per-viewer counters are deleted when that command is deleted</li>
           <li>Twitch OAuth tokens remain until the account is disconnected, authorization is revoked, the related server data is deleted, or a valid deletion request is completed</li>
           <li>Server configuration, birthdays, safety records, reward settings, OBS settings, and giveaway data are retained while needed for the enabled feature or its requested history</li>
+          <li>ExcelProtocol FX pairing codes expire after ten minutes; revoked device records and safe command audit metadata remain with the server configuration until guild data is deleted or a valid deletion request is completed</li>
           <li>Suggestions and their comments remain until an authorized admin deletes them or a valid deletion request is completed</li>
           <li>Admin audit history is limited to the latest 100 actions</li>
         </ul>
@@ -8341,7 +8469,7 @@ async def privacy_page(request):
         <p>To protect users, we may need to verify your Discord or Twitch identity and authority over the relevant server or account before fulfilling a request.</p>
 
         <h2>11. Security</h2>
-        <p>Safeguards include HTTPS, secure and HTTP-only session cookies, Discord permission checks, owner/admin access controls, OAuth state validation, hashed plugin keys, Twitch EventSub HMAC-SHA256 verification, scoped Twitch authorization, and restricted dashboard routes. OAuth tokens and overlay URLs should still be treated as secrets.</p>
+        <p>Safeguards include HTTPS/WSS, secure and HTTP-only session cookies, Discord permission checks, owner/admin access controls, OAuth state validation, short-lived one-time device pairing, one-way keyed credential hashes, strict native-plugin command schemas and limits, Twitch EventSub HMAC-SHA256 verification, scoped Twitch authorization, and restricted dashboard routes. OAuth tokens, device credentials, and overlay URLs should still be treated as secrets.</p>
         <p>No online system is completely secure. If you believe credentials, overlay URLs, or personal data have been exposed, revoke the affected authorization or key and contact us promptly.</p>
 
         <h2>12. Children</h2>
@@ -8394,6 +8522,574 @@ async def handle_companion_version(request: web.Request) -> web.Response:
     })
 
 
+# ── ExcelProtocol FX native OBS integration ──────────────────────────────────
+_fx_pair_rate = SlidingWindowRateLimiter()
+_fx_command_rate = SlidingWindowRateLimiter()
+_FX_HELLO_CAPABILITIES = frozenset({
+    "commands.v1", "effects.list.v1", "effects.status.v1",
+    "settings.apply.v1", "chaos.trigger.v1",
+})
+
+
+def _fx_pepper() -> str:
+    if not FX_CREDENTIAL_PEPPER:
+        raise web.HTTPServiceUnavailable(reason="FX device credential hashing is not configured")
+    return FX_CREDENTIAL_PEPPER
+
+
+def _fx_require_manager(request: web.Request) -> str:
+    guild_id = str(request.match_info["guild_id"])
+    if not _session_can_manage_guild(request["session"], guild_id):
+        raise web.HTTPForbidden(reason="Manage Server permission is required")
+    return guild_id
+
+
+async def _fx_json_body(request: web.Request, max_bytes: int = MAX_MESSAGE_BYTES) -> dict:
+    if request.content_length is not None and request.content_length > max_bytes:
+        raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=request.content_length)
+    raw = await request.read()
+    if len(raw) > max_bytes:
+        raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=len(raw))
+    try:
+        value = json.loads(raw or b"{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise web.HTTPBadRequest(reason="Malformed JSON")
+    if not isinstance(value, dict):
+        raise web.HTTPBadRequest(reason="JSON body must be an object")
+    return value
+
+
+def _fx_origin_allowed(request: web.Request) -> bool:
+    # Native QWebSocket clients normally omit Origin. If a client sends one,
+    # it must be an explicitly configured first-party origin.
+    origin = request.headers.get("Origin")
+    return not origin or origin.rstrip("/") in FX_ALLOWED_ORIGINS
+
+
+def _fx_valid_version(value) -> bool:
+    return isinstance(value, str) and 1 <= len(value) <= 64 and all(32 <= ord(ch) < 127 for ch in value)
+
+
+def _fx_require_tls(request: web.Request) -> None:
+    # Fly terminates TLS at the edge and forwards the original scheme. Local
+    # development intentionally remains available without a certificate.
+    if os.getenv("FLY_APP_NAME") and request.headers.get("X-Forwarded-Proto", "").lower() != "https":
+        raise web.HTTPUpgradeRequired(reason="ExcelProtocol FX requires TLS")
+
+
+def _fx_public_device(row: dict) -> dict:
+    device_id = str(row["id"])
+    live = FX_REGISTRY.get(device_id)
+    try:
+        stored_caps = json.loads(row.get("capabilities_json") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        stored_caps = []
+    return {
+        "id": device_id,
+        "name": row["name"],
+        "online": live is not None and not getattr(live.ws, "closed", False),
+        "created_at": row.get("created_at"),
+        "last_seen_at": row.get("last_seen_at"),
+        "plugin_version": live.plugin_version if live else row.get("plugin_version"),
+        "obs_version": live.obs_version if live else row.get("obs_version"),
+        "capabilities": sorted(live.capabilities) if live else stored_caps,
+        "effects": live.effects if live else [],
+        "status": live.status if live else {},
+        "active_effects": live.active_effects if live else [],
+    }
+
+
+async def get_fx_devices(request: web.Request) -> web.Response:
+    guild_id = _fx_require_manager(request)
+    rows = await db_fetch(
+        """SELECT id, name, plugin_version, obs_version, capabilities_json,
+                  created_at, last_seen_at
+           FROM fx_devices WHERE guild_id = ? AND revoked_at IS NULL
+           ORDER BY created_at""",
+        (guild_id,),
+    )
+    settings_rows = await db_fetch(
+        "SELECT revision, settings_json, updated_at FROM fx_desired_settings WHERE guild_id = ?",
+        (guild_id,),
+    )
+    desired = None
+    if settings_rows:
+        try:
+            desired = {
+                "revision": int(settings_rows[0]["revision"]),
+                "settings": json.loads(settings_rows[0]["settings_json"]),
+                "updated_at": settings_rows[0]["updated_at"],
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            desired = None
+    return web.json_response({
+        "protocol_version": PROTOCOL_VERSION,
+        "devices": [_fx_public_device(row) for row in rows],
+        "desired_settings": desired,
+        "wss_endpoint": f"{FX_WSS_BASE_URL}/api/fx/ws",
+    }, headers={"Cache-Control": "no-store"})
+
+
+async def create_fx_pairing_code(request: web.Request) -> web.Response:
+    guild_id = _fx_require_manager(request)
+    user_id = str(request["session"].get("user_id") or "system")
+    if not _fx_pair_rate.allow(f"create:{guild_id}:{user_id}", 5, 60):
+        raise web.HTTPTooManyRequests(reason="Too many pairing codes; try again shortly")
+    body = await _fx_json_body(request)
+    if set(body) - {"device_name"}:
+        raise web.HTTPBadRequest(reason="Unknown pairing field")
+    device_name = validate_device_name(body.get("device_name") or "Streaming PC")
+    code = make_pairing_code()
+    code_hash = hash_secret(code, _fx_pepper())
+    expires = datetime.now(timezone.utc) + timedelta(seconds=PAIRING_TTL_SECONDS)
+    await db_execute(
+        """INSERT INTO fx_pairing_codes
+           (guild_id, created_by_user_id, device_name, code_hash, expires_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (guild_id, user_id, device_name, code_hash, expires.isoformat()),
+    )
+    # The preferred name is intentionally returned but not put in the code row;
+    # the plugin supplies its final local name during pairing.
+    return web.json_response({
+        "pairing_code": code,
+        "device_name": device_name,
+        "expires_at": expires.isoformat().replace("+00:00", "Z"),
+        "expires_in_seconds": PAIRING_TTL_SECONDS,
+    }, status=201, headers={"Cache-Control": "no-store"})
+
+
+async def pair_fx_device(request: web.Request) -> web.Response:
+    _fx_require_tls(request)
+    if not _fx_origin_allowed(request):
+        raise web.HTTPForbidden(reason="Origin is not allowed")
+    remote_key = hashlib.sha256(str(request.remote or "unknown").encode()).hexdigest()[:24]
+    if not _fx_pair_rate.allow(f"redeem:{remote_key}", 10, 60):
+        raise web.HTTPTooManyRequests(reason="Too many pairing attempts; try again shortly")
+    body = await _fx_json_body(request)
+    if set(body) - {"pairing_code", "device_name", "plugin_version", "obs_version"}:
+        raise web.HTTPBadRequest(reason="Unknown pairing field")
+    try:
+        code = normalize_pairing_code(body.get("pairing_code"))
+        reported_name = validate_device_name(body.get("device_name") or "Streaming PC")
+    except FxValidationError as exc:
+        raise web.HTTPBadRequest(reason=str(exc))
+    plugin_version = body.get("plugin_version") or "unknown"
+    obs_version = body.get("obs_version") or "unknown"
+    if not _fx_valid_version(plugin_version) or not _fx_valid_version(obs_version):
+        raise web.HTTPBadRequest(reason="Plugin and OBS versions must be printable strings of at most 64 characters")
+    code_hash = hash_secret(code, _fx_pepper())
+    credential = make_device_credential()
+    credential_hash = hash_secret(credential, _fx_pepper())
+    device_id = str(uuid.uuid4())
+
+    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            """SELECT id, guild_id, created_by_user_id, device_name FROM fx_pairing_codes
+               WHERE code_hash = ? AND used_at IS NULL
+                 AND datetime(expires_at) > datetime('now') LIMIT 1""",
+            (code_hash,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            await db.rollback()
+            raise web.HTTPBadRequest(reason="Pairing code is invalid, expired, or already used")
+        changed = await db.execute(
+            "UPDATE fx_pairing_codes SET used_at = CURRENT_TIMESTAMP WHERE id = ? AND used_at IS NULL",
+            (row["id"],),
+        )
+        if changed.rowcount != 1:
+            await db.rollback()
+            raise web.HTTPConflict(reason="Pairing code was already used")
+        await db.execute(
+            """INSERT INTO fx_devices
+               (id, guild_id, paired_by_user_id, name, credential_hash, plugin_version, obs_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (device_id, str(row["guild_id"]), str(row["created_by_user_id"]),
+             str(row["device_name"] or reported_name),
+             credential_hash, plugin_version, obs_version),
+        )
+        await db.commit()
+    return web.json_response({
+        "device_id": device_id,
+        "device_credential": credential,
+        "wss_endpoint": f"{FX_WSS_BASE_URL}/api/fx/ws",
+        "protocol": PROTOCOL,
+        "protocol_version": PROTOCOL_VERSION,
+        "credential_storage": "Windows Credential Manager",
+    }, status=201, headers={"Cache-Control": "no-store"})
+
+
+async def rename_fx_device(request: web.Request) -> web.Response:
+    guild_id = _fx_require_manager(request)
+    body = await _fx_json_body(request)
+    if set(body) != {"name"}:
+        raise web.HTTPBadRequest(reason="Exactly one name field is required")
+    try:
+        name = validate_device_name(body["name"])
+    except FxValidationError as exc:
+        raise web.HTTPBadRequest(reason=str(exc))
+    device_id = str(request.match_info["device_id"])
+    rows = await db_fetch(
+        "SELECT id FROM fx_devices WHERE id = ? AND guild_id = ? AND revoked_at IS NULL",
+        (device_id, guild_id),
+    )
+    if not rows:
+        raise web.HTTPNotFound(reason="FX device not found")
+    await db_execute("UPDATE fx_devices SET name = ? WHERE id = ?", (name, device_id))
+    return web.json_response({"ok": True, "name": name})
+
+
+async def revoke_fx_device(request: web.Request) -> web.Response:
+    guild_id = _fx_require_manager(request)
+    device_id = str(request.match_info["device_id"])
+    rows = await db_fetch(
+        "SELECT id FROM fx_devices WHERE id = ? AND guild_id = ? AND revoked_at IS NULL",
+        (device_id, guild_id),
+    )
+    if not rows:
+        raise web.HTTPNotFound(reason="FX device not found")
+    await db_execute(
+        "UPDATE fx_devices SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND guild_id = ?",
+        (device_id, guild_id),
+    )
+    live = FX_REGISTRY.get(device_id)
+    if live:
+        await live.ws.close(code=1008, message=b"Device revoked")
+    return web.json_response({"ok": True})
+
+
+async def _fx_reserve_audit(guild_id: str, device_id: str, user_id: str, command: dict) -> int | None:
+    try:
+        return await db_insert(
+            """INSERT INTO fx_command_audit
+               (guild_id, device_id, user_id, command_type, effect_id, event_id, result_status)
+               VALUES (?, ?, ?, ?, ?, ?, 'pending')""",
+            (guild_id, device_id, user_id, command["type"], command.get("effect"), command.get("event_id")),
+        )
+    except aiosqlite.IntegrityError:
+        return None
+
+
+async def _fx_finish_audit(audit_id: int, status: str) -> None:
+    await db_execute(
+        "UPDATE fx_command_audit SET result_status = ? WHERE id = ?",
+        (status[:64], audit_id),
+    )
+
+
+async def _dispatch_fx_reward(guild_id: str, trigger: dict, redemption_id: str) -> None:
+    """Send one redeemed reward to the currently connected FX device.
+
+    The command is intentionally memory-only. If OBS is offline or does not
+    acknowledge it before expiry, it is audited and discarded rather than
+    replayed after a reconnect.
+    """
+    device_id = str(trigger.get("fx_device_id") or "")
+    try:
+        parameters = json.loads(trigger.get("fx_parameters_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        parameters = {}
+    command = {
+        "type": "trigger_effect",
+        "event_id": redemption_id[:128],
+        "effect": trigger.get("fx_effect_id"),
+        "duration_ms": trigger.get("fx_duration_ms"),
+        "intensity": trigger.get("fx_intensity"),
+        "parameters": parameters,
+        "queue": bool(trigger.get("fx_queue")),
+    }
+    audit_id = await _fx_reserve_audit(guild_id, device_id, "eventsub", command)
+    if audit_id is None:
+        return
+    try:
+        response = await FX_REGISTRY.send_command(device_id, command)
+        await _fx_finish_audit(audit_id, str(response.get("status") or "error"))
+    except FxOfflineError:
+        await _fx_finish_audit(audit_id, "offline")
+    except FxUnsupportedError:
+        await _fx_finish_audit(audit_id, "unsupported")
+    except FxTimeoutError:
+        await _fx_finish_audit(audit_id, "timeout")
+    except FxValidationError:
+        await _fx_finish_audit(audit_id, "invalid")
+
+
+async def command_fx_device(request: web.Request) -> web.Response:
+    guild_id = _fx_require_manager(request)
+    user_id = str(request["session"].get("user_id") or "system")
+    if not _fx_command_rate.allow(f"command:{guild_id}:{user_id}", 30, 60):
+        raise web.HTTPTooManyRequests(reason="FX command rate limit reached")
+    body = await _fx_json_body(request)
+    device_id = str(body.pop("device_id", ""))
+    rows = await db_fetch(
+        "SELECT id FROM fx_devices WHERE id = ? AND guild_id = ? AND revoked_at IS NULL",
+        (device_id, guild_id),
+    )
+    if not rows:
+        raise web.HTTPNotFound(reason="FX device not found")
+    if not _fx_command_rate.allow(f"device:{device_id}", 60, 60):
+        raise web.HTTPTooManyRequests(reason="FX device command rate limit reached")
+    command_type = body.get("type")
+    if command_type in {"trigger_effect", "trigger_random", "clear_effects", "cancel_effect", "trigger_chaos"}:
+        body.setdefault("event_id", str(uuid.uuid4()))
+    try:
+        live = FX_REGISTRY.get(device_id)
+        if body.get("type") == "trigger_effect" and live and not live.effects:
+            raise web.HTTPConflict(reason="Waiting for the plugin effect catalog")
+        command = validate_command(body, live.effects if live else None)
+    except FxValidationError as exc:
+        raise web.HTTPBadRequest(reason=str(exc))
+    audit_id = await _fx_reserve_audit(guild_id, device_id, user_id, command)
+    if audit_id is None:
+        raise web.HTTPConflict(reason="Duplicate event_id")
+    try:
+        response = await FX_REGISTRY.send_command(device_id, command)
+    except FxOfflineError as exc:
+        await _fx_finish_audit(audit_id, "offline")
+        raise web.HTTPConflict(reason=str(exc))
+    except FxUnsupportedError as exc:
+        await _fx_finish_audit(audit_id, "unsupported")
+        raise web.HTTPBadRequest(reason=str(exc))
+    except FxTimeoutError as exc:
+        await _fx_finish_audit(audit_id, "timeout")
+        raise web.HTTPGatewayTimeout(reason=str(exc))
+    status = str(response.get("status") or "error")
+    await _fx_finish_audit(audit_id, status)
+    if command["type"] in {"trigger_effect", "trigger_random", "clear_effects", "cancel_effect", "trigger_chaos"}:
+        asyncio.create_task(_fx_refresh_active(device_id))
+    return web.json_response({"acknowledged": True, "response": response})
+
+
+async def save_fx_settings(request: web.Request) -> web.Response:
+    guild_id = _fx_require_manager(request)
+    user_id = str(request["session"].get("user_id") or "system")
+    body = await _fx_json_body(request)
+    if set(body) - {"device_id", "settings"} or "settings" not in body:
+        raise web.HTTPBadRequest(reason="device_id and settings are the only supported fields")
+    try:
+        settings = validate_settings(body["settings"])
+    except FxValidationError as exc:
+        raise web.HTTPBadRequest(reason=str(exc))
+    device_id = str(body.get("device_id") or "")
+    if device_id:
+        owned = await db_fetch(
+            "SELECT id FROM fx_devices WHERE id = ? AND guild_id = ? AND revoked_at IS NULL",
+            (device_id, guild_id),
+        )
+        if not owned:
+            raise web.HTTPNotFound(reason="FX device not found")
+    async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA busy_timeout=30000")
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute("SELECT revision FROM fx_desired_settings WHERE guild_id = ?", (guild_id,))
+        row = await cursor.fetchone()
+        revision = int(row["revision"]) + 1 if row else 1
+        await db.execute(
+            """INSERT INTO fx_desired_settings
+               (guild_id, revision, settings_json, updated_by_user_id, updated_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(guild_id) DO UPDATE SET revision = excluded.revision,
+                 settings_json = excluded.settings_json,
+                 updated_by_user_id = excluded.updated_by_user_id,
+                 updated_at = CURRENT_TIMESTAMP""",
+            (guild_id, revision, json.dumps(settings, separators=(",", ":")), user_id),
+        )
+        await db.commit()
+    sync_status = "saved_for_reconnect"
+    response = None
+    if device_id:
+        live = FX_REGISTRY.get(device_id)
+        if live and "settings.apply.v1" in live.capabilities:
+            try:
+                response = await FX_REGISTRY.send_command(device_id, {
+                    "type": "apply_settings", "settings": settings, "revision": revision,
+                })
+                sync_status = "acknowledged" if response.get("ok") else "rejected"
+            except (FxOfflineError, FxTimeoutError):
+                sync_status = "saved_for_reconnect"
+        elif live:
+            sync_status = "capability_not_supported"
+    return web.json_response({
+        "saved": True, "revision": revision, "settings": settings,
+        "sync_status": sync_status, "response": response,
+    })
+
+
+async def _fx_sync_after_connect(device_id: str, guild_id: str) -> None:
+    # Queries are transient and best-effort. They are sent only after the
+    # authenticated connection is live and are never replayed on another one.
+    for command_type, capability in (
+        ("list_effects", "effects.list.v1"),
+        ("get_status", "effects.status.v1"),
+        ("get_active_effects", "effects.status.v1"),
+    ):
+        live = FX_REGISTRY.get(device_id)
+        if not live or capability not in live.capabilities:
+            continue
+        try:
+            await FX_REGISTRY.send_command(device_id, {"type": command_type})
+        except (FxOfflineError, FxTimeoutError, FxUnsupportedError, FxValidationError):
+            break
+    live = FX_REGISTRY.get(device_id)
+    if not live or "settings.apply.v1" not in live.capabilities:
+        return
+    rows = await db_fetch(
+        "SELECT revision, settings_json FROM fx_desired_settings WHERE guild_id = ?",
+        (guild_id,),
+    )
+    if rows:
+        try:
+            await FX_REGISTRY.send_command(device_id, {
+                "type": "apply_settings",
+                "revision": int(rows[0]["revision"]),
+                "settings": json.loads(rows[0]["settings_json"]),
+            })
+        except (FxOfflineError, FxTimeoutError, FxUnsupportedError, FxValidationError, json.JSONDecodeError):
+            pass
+
+
+async def _fx_refresh_active(device_id: str) -> None:
+    live = FX_REGISTRY.get(device_id)
+    if not live or "effects.status.v1" not in live.capabilities:
+        return
+    try:
+        await FX_REGISTRY.send_command(device_id, {"type": "get_active_effects"})
+    except (FxOfflineError, FxTimeoutError, FxUnsupportedError, FxValidationError):
+        pass
+
+
+async def fx_device_ws(request: web.Request) -> web.StreamResponse:
+    _fx_require_tls(request)
+    if not _fx_origin_allowed(request):
+        raise web.HTTPForbidden(reason="Origin is not allowed")
+    authorization = request.headers.get("Authorization", "")
+    credential = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    if not credential or len(credential) > 256:
+        raise web.HTTPUnauthorized(reason="Missing FX device credential")
+    credential_hash = hash_secret(credential, _fx_pepper())
+    rows = await db_fetch(
+        """SELECT id, guild_id FROM fx_devices
+           WHERE credential_hash = ? AND revoked_at IS NULL LIMIT 1""",
+        (credential_hash,),
+    )
+    if not rows:
+        raise web.HTTPUnauthorized(reason="Invalid or revoked FX device credential")
+    device_id, guild_id = str(rows[0]["id"]), str(rows[0]["guild_id"])
+    ws = web.WebSocketResponse(heartbeat=30, receive_timeout=90, max_msg_size=MAX_MESSAGE_BYTES)
+    await ws.prepare(request)
+    session = None
+    sync_task = None
+    try:
+        try:
+            first = await asyncio.wait_for(ws.receive(), timeout=10)
+        except asyncio.TimeoutError:
+            await ws.close(code=1008, message=b"Hello timeout")
+            return ws
+        if first.type != web.WSMsgType.TEXT:
+            await ws.close(code=1008, message=b"Hello required")
+            return ws
+        try:
+            hello = json.loads(first.data)
+        except (TypeError, json.JSONDecodeError):
+            await ws.close(code=1008, message=b"Invalid hello")
+            return ws
+        if set(hello) != {"protocol", "protocol_version", "type", "device_id", "plugin_version", "obs_version", "capabilities"}:
+            await ws.close(code=1008, message=b"Invalid hello schema")
+            return ws
+        capabilities = hello.get("capabilities")
+        if (
+            hello.get("protocol") != PROTOCOL
+            or hello.get("protocol_version") != PROTOCOL_VERSION
+            or hello.get("type") != "hello"
+            or hello.get("device_id") != device_id
+            or not isinstance(capabilities, list)
+            or len(capabilities) > 32
+            or any(not isinstance(item, str) for item in capabilities)
+            or len(capabilities) != len(set(capabilities))
+            or any(item not in _FX_HELLO_CAPABILITIES for item in capabilities)
+            or not _fx_valid_version(hello.get("plugin_version"))
+            or not _fx_valid_version(hello.get("obs_version"))
+        ):
+            await ws.close(code=1008, message=b"Unsupported hello")
+            return ws
+        plugin_version = str(hello.get("plugin_version") or "")[:64]
+        obs_version = str(hello.get("obs_version") or "")[:64]
+        session = DeviceSession(
+            device_id=device_id, guild_id=guild_id, ws=ws,
+            capabilities=frozenset(capabilities), plugin_version=plugin_version,
+            obs_version=obs_version,
+        )
+        old_ws = await FX_REGISTRY.register(session)
+        if old_ws:
+            await old_ws.close(code=1008, message=b"Replaced by newer connection")
+        await db_execute(
+            """UPDATE fx_devices SET plugin_version = ?, obs_version = ?,
+                 capabilities_json = ?, last_seen_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (plugin_version, obs_version, json.dumps(sorted(capabilities)), device_id),
+        )
+        await ws.send_str(json.dumps({
+            "protocol": PROTOCOL, "protocol_version": PROTOCOL_VERSION,
+            "type": "welcome", "device_id": device_id,
+            "heartbeat_seconds": 30, "max_message_bytes": MAX_MESSAGE_BYTES,
+        }, separators=(",", ":")))
+        sync_task = asyncio.create_task(_fx_sync_after_connect(device_id, guild_id))
+        last_db_heartbeat = time.monotonic()
+        async for message in ws:
+            if message.type != web.WSMsgType.TEXT:
+                if message.type in {web.WSMsgType.ERROR, web.WSMsgType.CLOSE, web.WSMsgType.CLOSED}:
+                    break
+                continue
+            if not _fx_command_rate.allow(f"ws-in:{device_id}", 120, 60):
+                await ws.close(code=1008, message=b"Message rate exceeded")
+                break
+            try:
+                payload = json.loads(message.data)
+                if not isinstance(payload, dict):
+                    raise ValueError
+            except (TypeError, ValueError, json.JSONDecodeError):
+                await ws.close(code=1008, message=b"Malformed message")
+                break
+            if payload.get("protocol") != PROTOCOL or payload.get("protocol_version") != PROTOCOL_VERSION:
+                await ws.close(code=1008, message=b"Protocol mismatch")
+                break
+            if payload.get("type") == "heartbeat":
+                if set(payload) - {"protocol", "protocol_version", "type", "sent_at"}:
+                    await ws.close(code=1008, message=b"Invalid heartbeat")
+                    break
+                session.last_heartbeat = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                await ws.send_str(json.dumps({
+                    "protocol": PROTOCOL, "protocol_version": PROTOCOL_VERSION,
+                    "type": "heartbeat_ack", "server_time": session.last_heartbeat,
+                }, separators=(",", ":")))
+                if time.monotonic() - last_db_heartbeat >= 30:
+                    await db_execute("UPDATE fx_devices SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?", (device_id,))
+                    last_db_heartbeat = time.monotonic()
+                continue
+            if set(payload) != {"protocol", "protocol_version", "request_id", "response"}:
+                await ws.close(code=1008, message=b"Invalid response envelope")
+                break
+            try:
+                FX_REGISTRY.receive_response(device_id, payload["request_id"], payload["response"])
+            except FxValidationError:
+                await ws.close(code=1008, message=b"Invalid response")
+                break
+    except (asyncio.CancelledError, ConnectionResetError, asyncio.TimeoutError):
+        pass
+    finally:
+        if sync_task:
+            sync_task.cancel()
+        if session:
+            await FX_REGISTRY.unregister(device_id, ws)
+            await db_execute("UPDATE fx_devices SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?", (device_id,))
+        if not ws.closed:
+            await ws.close()
+    return ws
+
+
 # ── App Factory ───────────────────────────────────────────────────────────────
 def create_dashboard_app(bot=None):
     global _bot_ref
@@ -8403,6 +9099,8 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/health",            health)
     app.router.add_get("/companion/version",             handle_companion_version)
     app.router.add_get("/companion/guild/{guild_id}",    handle_companion_guild_info)
+    app.router.add_post("/api/fx/pair",                  pair_fx_device)
+    app.router.add_get ("/api/fx/ws",                    fx_device_ws)
     app.router.add_get("/",                   landing_page)
     app.router.add_get("/terms",         terms_page)
     app.router.add_get("/privacy",       privacy_page)
@@ -8479,6 +9177,12 @@ def create_dashboard_app(bot=None):
     app.router.add_get("/fortuna-overlay/{token}/ws", fortuna_overlay_ws)
     app.router.add_get("/api/guilds",    get_guilds)
     app.router.add_get("/api/guild/{guild_id}", get_guild_summary)
+    app.router.add_get   ("/api/guild/{guild_id}/fx",                         get_fx_devices)
+    app.router.add_post  ("/api/guild/{guild_id}/fx/pairing-codes",           create_fx_pairing_code)
+    app.router.add_patch ("/api/guild/{guild_id}/fx/devices/{device_id}",     rename_fx_device)
+    app.router.add_delete("/api/guild/{guild_id}/fx/devices/{device_id}",     revoke_fx_device)
+    app.router.add_post  ("/api/guild/{guild_id}/fx/commands",                command_fx_device)
+    app.router.add_put   ("/api/guild/{guild_id}/fx/settings",                save_fx_settings)
 
     app.router.add_get   ("/api/guild/{guild_id}/streamers",              get_streamers)
     app.router.add_post  ("/api/guild/{guild_id}/streamers",              add_streamer)
@@ -8561,7 +9265,7 @@ def create_dashboard_app(bot=None):
             allow_credentials=True,
             expose_headers=("Content-Length",),
             allow_headers=("Authorization", "Content-Type"),
-            allow_methods=("GET", "POST", "DELETE", "PATCH", "OPTIONS"),
+            allow_methods=("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"),
         )
         for origin in CORS_ALLOWED_ORIGINS
     })
@@ -8575,6 +9279,8 @@ def create_dashboard_app(bot=None):
 
     async def on_cleanup(app):
         global _http_session
+        for live in list(FX_REGISTRY.connections.values()):
+            await live.ws.close(code=1001, message=b"Server shutdown")
         if _http_session and not _http_session.closed:
             await _http_session.close()
     app.on_cleanup.append(on_cleanup)

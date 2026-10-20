@@ -9,6 +9,7 @@ import {
   useSortable, arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { FX_CAPABILITIES, buildFxTrigger, fxControlsState, fxDurationBounds, hasFxCapability } from "./fxProtocol.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || "https://excelprotocol.fly.dev";
 
@@ -3374,10 +3375,11 @@ function OverlayAppearanceControls({ appearance, onToggle, saving, saved }) {
 
 function ChannelRewardsTab({ guildId }) {
   const [bcast, setBcast]         = useState(null);
+  const [fxData, setFxData]       = useState(null);
   const [loading, setLoading]     = useState(true);
   const [triggerModal, setTriggerModal] = useState(null);
   const [rewardModal, setRewardModal]   = useState(null);
-  const [triggerForm, setTriggerForm]   = useState({ video_url:"", volume:1.0, hotkey:"", audio_only:false, start_seconds:0, end_seconds:"" });
+  const [triggerForm, setTriggerForm]   = useState({ trigger_type:"media", video_url:"", volume:1.0, hotkey:"", audio_only:false, start_seconds:0, end_seconds:"", fx_device_id:"", fx_effect_id:"", fx_duration_ms:8000, fx_intensity:.7, fx_parameters:{}, fx_queue:false });
   const [rewardForm, setRewardForm]     = useState({ title:"", cost:100, is_enabled:true });
   const [saving, setSaving]       = useState(false);
   const [copied, setCopied]       = useState(false);
@@ -3394,6 +3396,8 @@ function ChannelRewardsTab({ guildId }) {
     try {
       const data = await apiFetch(`/api/guild/${guildId}/broadcaster`);
       setBcast(data);
+      try { setFxData(await apiFetch(`/api/guild/${guildId}/fx`)); }
+      catch(e) { console.error("Failed to load ExcelProtocol FX devices:", e); setFxData({devices:[]}); }
       setOverlayVolume(data.overlay_volume ?? 100);
       setOverlayAppearance({
         show_progress: data.show_progress !== false,
@@ -3416,12 +3420,19 @@ function ChannelRewardsTab({ guildId }) {
   const openTrigger = (reward) => {
     const existing = bcast?.triggers?.find(t => t.reward_id === reward.id);
     setTriggerForm({
+      trigger_type: existing?.trigger_type || "media",
       video_url: existing?.video_url || "",
       volume: existing?.volume ?? 1.0,
       hotkey: existing?.hotkey || "",
       audio_only: Boolean(existing?.audio_only),
       start_seconds: Number(existing?.start_seconds || 0),
       end_seconds: existing?.end_seconds ?? "",
+      fx_device_id: existing?.fx_device_id || fxData?.devices?.[0]?.id || "",
+      fx_effect_id: existing?.fx_effect_id || "",
+      fx_duration_ms: Number(existing?.fx_duration_ms || 8000),
+      fx_intensity: Number(existing?.fx_intensity ?? .7),
+      fx_parameters: existing?.fx_parameters || {},
+      fx_queue: Boolean(existing?.fx_queue),
     });
     setPreviewSeek(null);
     setPreviewDuration(0);
@@ -3444,12 +3455,19 @@ function ChannelRewardsTab({ guildId }) {
       await apiFetch(`/api/guild/${guildId}/broadcaster/triggers`, { method:"POST", body: JSON.stringify({
           reward_id:    triggerModal.id,
           reward_title: triggerModal.title,
+          trigger_type: triggerForm.trigger_type,
           video_url:    triggerForm.video_url.trim(),
           volume:       Number(triggerForm.volume),
           hotkey:       triggerForm.hotkey.trim() || null,
           audio_only:   triggerForm.audio_only,
           start_seconds:Number(triggerForm.start_seconds || 0),
           end_seconds:  triggerForm.end_seconds === "" ? null : Number(triggerForm.end_seconds),
+          fx_device_id: triggerForm.fx_device_id,
+          fx_effect_id: triggerForm.fx_effect_id,
+          fx_duration_ms:Number(triggerForm.fx_duration_ms),
+          fx_intensity: Number(triggerForm.fx_intensity),
+          fx_parameters:triggerForm.fx_parameters,
+          fx_queue:     triggerForm.fx_queue,
         })});
       setTriggerModal(null); load();
     } catch(e) { alert("Failed: " + e.message); }
@@ -3632,6 +3650,10 @@ function ChannelRewardsTab({ guildId }) {
         <OverlayAppearanceControls appearance={overlayAppearance} onToggle={saveAppearance} saving={appearanceSaving} saved={appearanceSaved} />
       </div>
 
+      <FxDevicePanel guildId={guildId} data={fxData} onChange={async()=>{
+        try { setFxData(await apiFetch(`/api/guild/${guildId}/fx`)); } catch(e) { console.error(e); }
+      }} />
+
       {/* Rewards list */}
       <div style={{ ...C.card }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
@@ -3667,12 +3689,15 @@ function ChannelRewardsTab({ guildId }) {
                       {trigger?.hotkey ? (
                         <span style={{ fontSize:11, color:"var(--cyan)", fontFamily:"'JetBrains Mono',monospace", background:"rgba(0,245,212,0.08)", padding:"1px 6px", borderRadius:4, border:"1px solid rgba(0,245,212,0.2)" }}>⌨ {trigger.hotkey}</span>
                       ) : null}
-                      {!trigger?.video_url && !trigger?.hotkey ? (
+                      {trigger?.trigger_type === "fx" ? (
+                        <span style={{ fontSize:11, color:"var(--cyan)", fontFamily:"'JetBrains Mono',monospace", background:"rgba(0,245,212,.08)", padding:"1px 6px", borderRadius:4, border:"1px solid rgba(0,245,212,.2)" }}>✨ FX · {fxName({id:trigger.fx_effect_id})}</span>
+                      ) : null}
+                      {!trigger?.video_url && !trigger?.hotkey && trigger?.trigger_type !== "fx" ? (
                         <span style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>No triggers set</span>
                       ) : null}
                     </div>
                   </div>
-                  <button onClick={() => openTrigger(reward)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>{trigger ? "Edit Trigger" : "+ Trigger"}</button>
+                  <button onClick={() => openTrigger(reward)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>{trigger ? "Edit Trigger" : "+ Add Trigger"}</button>
                   {reward.manageable && <button onClick={() => { setRewardForm({ title:reward.title, cost:reward.cost, is_enabled:reward.is_enabled }); setRewardModal(reward); }} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>Edit</button>}
                   {reward.manageable && <button onClick={() => deleteReward(reward.id)} style={{ ...C.btnDanger, flexShrink:0 }}>Delete</button>}
                 </div>
@@ -3686,8 +3711,15 @@ function ChannelRewardsTab({ guildId }) {
       {triggerModal && (
         <Modal onClose={() => setTriggerModal(null)} width={560}>
           <div style={{ fontWeight:800, fontSize:16, fontFamily:"'Orbitron',sans-serif", color:"var(--cyan)", textShadow:"0 0 10px rgba(0,245,212,0.4)" }}>
-            🎬 Video Trigger — {triggerModal.title}
+            Reward Trigger — {triggerModal.title}
           </div>
+          <Field label="Trigger type">
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
+              <button type="button" onClick={()=>setTriggerForm(p=>({...p,trigger_type:"media"}))} style={{...C.btnSecondary,padding:12,borderColor:triggerForm.trigger_type==="media"?"var(--cyan)":"var(--border)",color:triggerForm.trigger_type==="media"?"var(--cyan)":"var(--text2)"}}>🎬 Video / Audio</button>
+              <button type="button" onClick={()=>{const device=fxData?.devices?.find(d=>d.id===triggerForm.fx_device_id)||fxData?.devices?.[0],effect=device?.effects?.find(e=>fxId(e)===triggerForm.fx_effect_id)||device?.effects?.[0],range=fxDurationBounds(effect);setTriggerForm(p=>({...p,trigger_type:"fx",fx_device_id:device?.id||"",fx_effect_id:fxId(effect),fx_duration_ms:range.value,fx_intensity:Number(effect?.default_intensity??.7),fx_parameters:Object.fromEntries(fxParams(effect).map(([key,meta])=>[key,meta?.default??(meta?.type==="boolean"?false:meta?.min??0)]))}))}} style={{...C.btnSecondary,padding:12,borderColor:triggerForm.trigger_type==="fx"?"var(--cyan)":"var(--border)",color:triggerForm.trigger_type==="fx"?"var(--cyan)":"var(--text2)"}}>✨ ExcelProtocol FX Plugin</button>
+            </div>
+          </Field>
+          {triggerForm.trigger_type === "media" ? <>
           <Field label="Video URL">
             <CyanInput value={triggerForm.video_url} onChange={e=>setTriggerForm(p=>({...p,video_url:e.target.value}))}
               placeholder="https://www.youtube.com/watch?v=..." />
@@ -3727,9 +3759,10 @@ function ChannelRewardsTab({ guildId }) {
               onChange={v => setTriggerForm(p=>({...p, hotkey:v}))}
             />
           </Field>
+          </> : <FxRewardTriggerFields data={fxData} form={triggerForm} setForm={setTriggerForm} />}
           <div style={{ display:"flex", justifyContent:"flex-end", gap:10 }}>
             <button onClick={() => setTriggerModal(null)} style={C.btnSecondary}>Cancel</button>
-            <button onClick={saveTrigger} disabled={saving} style={{ ...C.btnPrimary, opacity:saving?0.4:1 }}>{saving?"Saving...":"Save"}</button>
+            <button onClick={saveTrigger} disabled={saving||(triggerForm.trigger_type==="media"?!triggerForm.video_url.trim():!triggerForm.fx_device_id||!triggerForm.fx_effect_id)} style={{ ...C.btnPrimary, opacity:saving?0.4:1 }}>{saving?"Saving...":"Save"}</button>
           </div>
         </Modal>
       )}
@@ -3757,6 +3790,87 @@ function ChannelRewardsTab({ guildId }) {
       )}
     </div>
   );
+}
+
+// ── ExcelProtocol FX ─────────────────────────────────────────────────────────
+const fxId = effect => effect?.id || effect?.effect || "";
+const fxName = effect => effect?.name || fxId(effect).split("_").map(part=>part.charAt(0).toUpperCase()+part.slice(1)).join(" ");
+const fxParams = effect => Array.isArray(effect?.parameters)
+  ? effect.parameters.map(item=>[item.id || item.name,item])
+  : Object.entries(effect?.parameters && typeof effect.parameters === "object" ? effect.parameters : {});
+
+function FxParameterFields({ effect, values={}, onChange, disabled=false }) {
+  return fxParams(effect).map(([key,raw])=>{
+    const meta=raw&&typeof raw==="object"?raw:{}, type=meta.type||(typeof meta.default==="boolean"?"boolean":"number"), value=values[key]??meta.default??(type==="boolean"?false:meta.min??0);
+    if(type==="boolean") return <label key={key} style={{display:"flex",gap:7,alignItems:"center",fontSize:11,color:"var(--text2)"}}><input disabled={disabled} type="checkbox" checked={!!value} onChange={e=>onChange({...values,[key]:e.target.checked})}/>{meta.label||key}</label>;
+    return <Field key={key} label={meta.label||key}><CyanInput disabled={disabled} type="number" min={meta.min} max={meta.max} step={meta.step||(type==="integer"?1:.05)} value={value} onChange={e=>onChange({...values,[key]:type==="integer"?parseInt(e.target.value,10):Number(e.target.value)})}/></Field>;
+  });
+}
+
+function FxDevicePanel({ guildId, data, onChange }) {
+  const [name,setName]=useState("Streaming PC"),[pairing,setPairing]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  const devices=data?.devices||[];
+  const createPair=async()=>{setBusy(true);setError("");try{setPairing(await apiFetch(`/api/guild/${guildId}/fx/pairing-codes`,{method:"POST",body:JSON.stringify({device_name:name})}))}catch(e){setError(e.message)}finally{setBusy(false)}};
+  const rename=async device=>{const next=prompt("Device name",device.name);if(!next||next===device.name)return;try{await apiFetch(`/api/guild/${guildId}/fx/devices/${device.id}`,{method:"PATCH",body:JSON.stringify({name:next})});await onChange()}catch(e){setError(e.message)}};
+  const revoke=async device=>{if(!confirm(`Revoke ${device.name}? It will need to be paired again.`))return;try{await apiFetch(`/api/guild/${guildId}/fx/devices/${device.id}`,{method:"DELETE"});await onChange()}catch(e){setError(e.message)}};
+  return <div style={{...C.card,marginBottom:16}}><div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:9}}><div style={{flex:1,minWidth:220}}><div style={{fontWeight:800,fontSize:14,fontFamily:"'Orbitron',sans-serif",color:"var(--cyan)"}}>✨ ExcelProtocol FX Plugin</div><div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>Pair the native OBS plugin once, then select its effects inside any reward trigger.</div></div><button onClick={onChange} style={C.btnSecondary}>↻ Refresh</button></div>{error&&<div style={{fontSize:11,color:"var(--red)",marginBottom:8}}>⚠ {error}</div>}
+    {devices.length>0&&<div style={{display:"grid",gap:7,marginBottom:12}}>{devices.map(device=><div key={device.id} style={{display:"flex",alignItems:"center",gap:9,padding:"9px 11px",border:"1px solid var(--border)",borderRadius:7,background:"rgba(8,11,15,.55)"}}><span style={{width:8,height:8,borderRadius:"50%",background:device.online?"var(--green)":"var(--text3)",boxShadow:device.online?"0 0 8px var(--green)":"none"}}/><div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:700}}>{device.name}</div><div style={{fontSize:9,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>{device.online?`${device.effects?.length||0} effects ready`:`Offline · last seen ${device.last_seen_at?timeAgo(device.last_seen_at):"never"}`}</div></div><button onClick={()=>rename(device)} style={{...C.btnSecondary,padding:"4px 8px"}}>Rename</button><button onClick={()=>revoke(device)} style={{...C.btnDanger,padding:"4px 8px"}}>Revoke</button></div>)}</div>}
+    {pairing?<div style={{padding:12,border:"1px solid rgba(0,245,212,.35)",borderRadius:8,background:"rgba(0,245,212,.06)",textAlign:"center"}}><div style={{fontSize:10,color:"var(--text3)"}}>ENTER THIS ONCE IN THE FX PLUGIN</div><div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:24,fontWeight:800,letterSpacing:3,color:"var(--cyan)",margin:"8px 0",userSelect:"all"}}>{pairing.pairing_code}</div><div style={{fontSize:10,color:"var(--yellow)"}}>Expires in 10 minutes</div><button onClick={()=>{setPairing(null);onChange()}} style={{...C.btnSecondary,marginTop:8}}>Done</button></div>:<div style={{display:"flex",gap:8,alignItems:"end",flexWrap:"wrap"}}><div style={{flex:1,minWidth:210}}><Field label="Pair another OBS computer"><CyanInput value={name} maxLength={64} onChange={e=>setName(e.target.value)} placeholder="Streaming PC"/></Field></div><button disabled={busy||!name.trim()} onClick={createPair} style={{...C.btnPrimary,marginBottom:10}}>{busy?"Creating…":"Create Pairing Code"}</button></div>}
+  </div>;
+}
+
+function FxRewardTriggerFields({ data, form, setForm }) {
+  const devices=data?.devices||[],device=devices.find(item=>item.id===form.fx_device_id),reported=device?.effects||[];
+  const effects=reported.length?reported:(form.fx_effect_id?[{id:form.fx_effect_id,name:fxName({id:form.fx_effect_id}),min_duration_ms:100,max_duration_ms:60000,default_duration_ms:form.fx_duration_ms}]:[]);
+  const effect=effects.find(item=>fxId(item)===form.fx_effect_id),range=fxDurationBounds(effect);
+  const selectEffect=id=>{const next=effects.find(item=>fxId(item)===id),bounds=fxDurationBounds(next);setForm(current=>({...current,fx_effect_id:id,fx_duration_ms:bounds.value,fx_intensity:Number(next?.default_intensity??.7),fx_parameters:Object.fromEntries(fxParams(next).map(([key,meta])=>[key,meta?.default??(meta?.type==="boolean"?false:meta?.min??0)]))}))};
+  return <div><Field label="Paired OBS device"><CyanSelect value={form.fx_device_id} onChange={e=>{const next=devices.find(item=>item.id===e.target.value),first=next?.effects?.[0];setForm(current=>({...current,fx_device_id:e.target.value,fx_effect_id:fxId(first),fx_duration_ms:fxDurationBounds(first).value,fx_intensity:Number(first?.default_intensity??.7),fx_parameters:Object.fromEntries(fxParams(first).map(([key,meta])=>[key,meta?.default??(meta?.type==="boolean"?false:meta?.min??0)]))}))}}><option value="">Select an FX device…</option>{devices.map(item=><option key={item.id} value={item.id}>{item.name}{item.online?" · connected":" · offline"}</option>)}</CyanSelect></Field>
+    {!devices.length&&<div style={{padding:12,border:"1px solid var(--border)",borderRadius:8,color:"var(--yellow)",fontSize:11}}>Pair the ExcelProtocol FX plugin in the panel above before creating this trigger.</div>}
+    {device&&!device.online&&<div style={{padding:10,border:"1px solid rgba(255,199,0,.3)",borderRadius:7,color:"var(--yellow)",fontSize:11,marginBottom:10}}>This device is offline. The reward stays configured, but redemptions are discarded while OBS is disconnected.</div>}
+    {device&&device.online&&!hasFxCapability(device,FX_CAPABILITIES.listEffects)&&<div style={{padding:10,color:"var(--yellow)",fontSize:11}}>This plugin build does not report its effect list.</div>}
+    {device&&hasFxCapability(device,FX_CAPABILITIES.listEffects)&&!reported.length&&<div style={{display:"flex",gap:8,alignItems:"center",fontSize:11,color:"var(--text3)",padding:10}}><Spinner size={15}/>Waiting for the plugin effect list…</div>}
+    {!!effects.length&&<><Field label="Effect overlay"><CyanSelect value={form.fx_effect_id} onChange={e=>selectEffect(e.target.value)}><option value="">Select an effect…</option>{effects.map(item=><option key={fxId(item)} value={fxId(item)}>{fxName(item)}</option>)}</CyanSelect></Field>{effect&&<div style={{border:"1px solid var(--border)",borderRadius:8,padding:12,background:"rgba(8,11,15,.55)"}}><div style={{fontSize:11,color:"var(--text3)",marginBottom:9}}>{effect.description||`Trigger the ${fxName(effect)} overlay in OBS.`}</div><Field label={`Duration ${(Number(form.fx_duration_ms)/1000).toFixed(1)}s`}><input type="range" min={range.min} max={range.max} step={100} value={form.fx_duration_ms} onChange={e=>setForm(p=>({...p,fx_duration_ms:Number(e.target.value)}))} style={{width:"100%",accentColor:"var(--cyan)"}}/></Field><Field label={`Intensity ${Number(form.fx_intensity).toFixed(2)}`}><input type="range" min={.05} max={1} step={.05} value={form.fx_intensity} onChange={e=>setForm(p=>({...p,fx_intensity:Number(e.target.value)}))} style={{width:"100%",accentColor:"var(--cyan)"}}/></Field><FxParameterFields effect={effect} values={form.fx_parameters} onChange={fx_parameters=>setForm(p=>({...p,fx_parameters}))}/><label style={{display:"flex",gap:7,alignItems:"center",fontSize:11,color:"var(--text2)",marginTop:8}}><input type="checkbox" checked={!!form.fx_queue} onChange={e=>setForm(p=>({...p,fx_queue:e.target.checked}))}/>Queue if another effect is active</label></div>}</>}
+  </div>;
+}
+
+function FxTab({ guildId }) {
+  const [data,setData]=useState(null),[selectedId,setSelectedId]=useState(""),[busy,setBusy]=useState(""),[notice,setNotice]=useState(null),[pairing,setPairing]=useState(null),[pairName,setPairName]=useState("Streaming PC"),[values,setValues]=useState({}),[settings,setSettings]=useState({});
+  const load=useCallback(async(silent=false)=>{try{const next=await apiFetch(`/api/guild/${guildId}/fx`);setData(next);setSelectedId(old=>next.devices.some(d=>d.id===old)?old:(next.devices[0]?.id||""));if(!silent)setNotice(null)}catch(e){setNotice({bad:true,text:e.message})}},[guildId]);
+  useEffect(()=>{setData(null);setSelectedId("");setPairing(null);load();const timer=setInterval(()=>load(true),5000);return()=>clearInterval(timer)},[load]);
+  const device=data?.devices?.find(d=>d.id===selectedId),controls=fxControlsState(device),effects=device?.effects||[];
+  // Reset forms only when the selected device's usable metadata changes; the
+  // five-second status poll must not erase edits in progress.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>{if(!device)return;const fresh={};for(const effect of effects){const id=fxId(effect),range=fxDurationBounds(effect);fresh[id]={duration_ms:range.value,intensity:Number(effect.default_intensity??.7),queue:false,parameters:Object.fromEntries(fxParams(effect).map(([key,meta])=>[key,meta?.default??(meta?.type==="boolean"?false:meta?.min??0)]))}}setValues(fresh);setSettings(data?.desired_settings?.settings||device.status?.settings||{enabled:true,desktop_enabled:true,stream_enabled:true,overall_intensity:1,max_simultaneous:2,effects:{},chaos:{min_effects:1,max_effects:3,duration_ms:8000,combined_intensity:1}})},[selectedId,device?.online,effects.length,data?.desired_settings?.revision]);
+  const createPair=async()=>{setBusy("pair");try{setPairing(await apiFetch(`/api/guild/${guildId}/fx/pairing-codes`,{method:"POST",body:JSON.stringify({device_name:pairName})}))}catch(e){setNotice({bad:true,text:e.message})}finally{setBusy("")}};
+  const send=async(command,key)=>{setBusy(key);setNotice({text:"Waiting for the OBS plugin to acknowledge…"});try{const result=await apiFetch(`/api/guild/${guildId}/fx/commands`,{method:"POST",body:JSON.stringify({device_id:selectedId,...command})}),response=result.response;setNotice({bad:!response.ok,text:response.ok?`OBS acknowledged: ${response.status}`:`Plugin rejected the command: ${response.status}${response.error?` — ${response.error}`:""}`});await load(true)}catch(e){setNotice({bad:true,text:e.message})}finally{setBusy("")}};
+  const rename=async()=>{const name=prompt("Device name",device?.name||"");if(!name)return;try{await apiFetch(`/api/guild/${guildId}/fx/devices/${selectedId}`,{method:"PATCH",body:JSON.stringify({name})});await load()}catch(e){setNotice({bad:true,text:e.message})}};
+  const revoke=async()=>{if(!confirm(`Revoke ${device?.name}? It must be paired again to reconnect.`))return;try{await apiFetch(`/api/guild/${guildId}/fx/devices/${selectedId}`,{method:"DELETE"});setSelectedId("");await load()}catch(e){setNotice({bad:true,text:e.message})}};
+  const saveSettings=async()=>{setBusy("settings");try{const result=await apiFetch(`/api/guild/${guildId}/fx/settings`,{method:"PUT",body:JSON.stringify({device_id:selectedId,settings})});setNotice({bad:result.sync_status==="rejected",text:result.sync_status==="acknowledged"?"Settings saved and acknowledged by OBS.":`Settings saved (${result.sync_status.replaceAll("_"," ")}).`});await load(true)}catch(e){setNotice({bad:true,text:e.message})}finally{setBusy("")}};
+  if(!data)return <div style={{display:"flex",justifyContent:"center",padding:60}}><Spinner/></div>;
+  return <div><PageHeader title="ExcelProtocol FX" subtitle="Secure native OBS effects paired directly to this server"/>
+    {notice&&<div style={{...C.card,padding:"10px 14px",marginBottom:14,color:notice.bad?"var(--red)":"var(--cyan)",borderColor:notice.bad?"rgba(255,77,109,.4)":"rgba(0,245,212,.35)",fontSize:12}}>{notice.text}</div>}
+    <div className="mob-stack" style={{display:"grid",gridTemplateColumns:"310px minmax(0,1fr)",gap:14,alignItems:"start"}}>
+      <div style={{display:"grid",gap:14}}>
+        <div style={C.card}><div style={{fontFamily:"'Orbitron',sans-serif",fontWeight:700,fontSize:14,marginBottom:8}}>OBS Devices</div><div style={{fontSize:11,color:"var(--text3)",lineHeight:1.5,marginBottom:12}}>Outbound encrypted WSS only. No browser-to-OBS control or local server.</div>
+          {!data.devices.length&&<div style={{fontSize:12,color:"var(--text3)",padding:"12px 0"}}>No paired devices.</div>}{data.devices.map(item=><button key={item.id} onClick={()=>setSelectedId(item.id)} style={{width:"100%",padding:10,marginBottom:7,borderRadius:8,border:`1px solid ${selectedId===item.id?"var(--cyan)":"var(--border)"}`,background:selectedId===item.id?"var(--cyan-dim)":"rgba(8,11,15,.6)",color:"var(--text)",cursor:"pointer",textAlign:"left"}}><div style={{display:"flex",gap:8,alignItems:"center"}}><span style={{width:8,height:8,borderRadius:"50%",background:item.online?"var(--green)":"var(--text3)"}}/><b>{item.name}</b><span style={{marginLeft:"auto",fontSize:9,color:item.online?"var(--green)":"var(--text3)"}}>{item.online?"CONNECTED":"OFFLINE"}</span></div><div style={{fontSize:10,color:"var(--text3)",marginTop:5}}>Plugin {item.plugin_version||"—"} · OBS {item.obs_version||"—"}<br/>Last seen {item.last_seen_at?timeAgo(item.last_seen_at):"never"}</div></button>)}
+          {device&&<div style={{display:"flex",gap:7}}><button onClick={rename} style={{...C.btnSecondary,flex:1}}>Rename</button><button onClick={revoke} style={{...C.btnDanger,flex:1}}>Revoke</button></div>}
+        </div>
+        <div style={C.card}><div style={{fontFamily:"'Orbitron',sans-serif",fontWeight:700,fontSize:13,marginBottom:9}}>Pair Another Device</div>{!pairing?<><Field label="Device name"><CyanInput maxLength={64} value={pairName} onChange={e=>setPairName(e.target.value)}/></Field><button disabled={busy==="pair"||!pairName.trim()} onClick={createPair} style={{...C.btnPrimary,width:"100%"}}>{busy==="pair"?"Creating…":"Create Pairing Code"}</button></>:<div style={{textAlign:"center"}}><div style={{fontSize:10,color:"var(--text3)"}}>ENTER ONCE IN THE FX PLUGIN</div><div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:24,color:"var(--cyan)",fontWeight:700,letterSpacing:3,margin:"12px 0",userSelect:"all"}}>{pairing.pairing_code}</div><div style={{fontSize:10,color:"var(--yellow)"}}>Expires in 10 minutes</div><button onClick={()=>setPairing(null)} style={{...C.btnSecondary,marginTop:10}}>Done</button></div>}</div>
+      </div>
+      {!device?<div style={{...C.card,textAlign:"center",padding:48,color:"var(--text3)"}}>Pair or select a device to manage native OBS effects.</div>:<div style={{display:"grid",gap:14,minWidth:0}}>
+        <div style={C.card}><div style={{display:"flex",alignItems:"center",gap:10}}><div style={{flex:1}}><div style={{fontFamily:"'Orbitron',sans-serif",fontWeight:700}}>{device.name}</div><div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:9,color:"var(--text3)",marginTop:5}}>{device.capabilities.length?device.capabilities.join(" · "):"No capabilities reported"}</div></div><Badge text={device.online?"Connected":"Offline"} color={device.online?"var(--green)":"var(--text3)"}/></div></div>
+        <div style={C.card}><div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:12}}><div style={{fontFamily:"'Orbitron',sans-serif",fontWeight:700,fontSize:14,flex:1}}>Live Effects</div>{hasFxCapability(device,FX_CAPABILITIES.chaos)&&<button disabled={!!busy} onClick={()=>send({type:"trigger_chaos",duration_ms:Number(settings.chaos?.duration_ms??8000),intensity:Math.min(1,Number(settings.chaos?.combined_intensity??1))},"chaos")} style={C.btnPrimary}>⚡ Chaos</button>}<button disabled={!controls.trigger||!!busy} onClick={()=>send({type:"trigger_random"},"random")} style={C.btnPrimary}>🎲 Random</button><button disabled={!controls.trigger||!!busy} onClick={()=>send({type:"clear_effects"},"clear")} style={C.btnDanger}>Clear All</button></div>
+          {!device.online?<div style={{fontSize:12,color:"var(--text3)"}}>Device offline. Live commands expire and are never replayed after reconnect.</div>:!hasFxCapability(device,FX_CAPABILITIES.listEffects)?<div style={{fontSize:12,color:"var(--yellow)"}}>Update the plugin to one that reports effects.list.v1.</div>:!effects.length?<div style={{fontSize:12,color:"var(--text3)",display:"flex",gap:9,alignItems:"center"}}><Spinner size={16}/>Waiting for the plugin effect catalog…</div>:<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(225px,1fr))",gap:10}}>{effects.map(effect=>{const id=fxId(effect),range=fxDurationBounds(effect),item=values[id]||{duration_ms:range.value,intensity:.7,parameters:{}};return <div key={id} style={{border:"1px solid var(--border)",borderRadius:8,padding:12,background:"rgba(8,11,15,.55)"}}><div style={{fontWeight:700,fontSize:13}}>{fxName(effect)}</div><div style={{fontSize:10,color:"var(--text3)",minHeight:28,marginTop:3}}>{effect.description||id}</div><Field label={`Duration ${(item.duration_ms/1000).toFixed(1)}s`}><input style={{width:"100%"}} type="range" min={range.min} max={range.max} step={100} value={item.duration_ms} onChange={e=>setValues({...values,[id]:{...item,duration_ms:Number(e.target.value)}})}/></Field><Field label={`Intensity ${Number(item.intensity).toFixed(2)}`}><input style={{width:"100%"}} type="range" min={.05} max={1} step={.05} value={item.intensity} onChange={e=>setValues({...values,[id]:{...item,intensity:Number(e.target.value)}})}/></Field><FxParameterFields effect={effect} values={item.parameters} onChange={parameters=>setValues({...values,[id]:{...item,parameters}})}/><label style={{display:"flex",gap:6,fontSize:10,color:"var(--text3)",margin:"8px 0"}}><input type="checkbox" checked={!!item.queue} onChange={e=>setValues({...values,[id]:{...item,queue:e.target.checked}})}/>Queue if busy (max 16)</label><button disabled={!controls.trigger||!!busy} onClick={()=>{try{send(buildFxTrigger(effect,item),id)}catch(e){setNotice({bad:true,text:e.message})}}} style={{...C.btnPrimary,width:"100%"}}>{busy===id?"Waiting for OBS…":"Trigger"}</button></div>})}</div>}
+        </div>
+        {hasFxCapability(device,FX_CAPABILITIES.status)&&<div style={C.card}><div style={{fontFamily:"'Orbitron',sans-serif",fontWeight:700,fontSize:14,marginBottom:8}}>Active Effects</div>{device.active_effects?.length?device.active_effects.map(active=><div key={active.event_id||active.effect} style={{display:"flex",gap:8,alignItems:"center",padding:"7px 0",borderTop:"1px solid var(--border)"}}><span style={{flex:1,fontSize:12}}>{fxName({id:active.effect})}</span><span style={{fontSize:10,color:"var(--text3)"}}>{active.remaining_ms?`${(active.remaining_ms/1000).toFixed(1)}s`:"active"}</span><button disabled={!controls.trigger||!!busy} onClick={()=>send({type:"cancel_effect",effect:active.effect},`cancel-${active.effect}`)} style={C.btnDanger}>Cancel</button></div>):<div style={{fontSize:12,color:"var(--text3)"}}>No active effects.</div>}</div>}
+        <div style={{...C.card,opacity:controls.settings?1:.7}}><div style={{fontFamily:"'Orbitron',sans-serif",fontWeight:700,fontSize:14}}>Persistent Configuration</div><div style={{fontSize:11,color:"var(--text3)",lineHeight:1.5,margin:"6px 0 13px"}}>{controls.settings?"Saved settings sync after authenticated reconnects.":"Requires settings.apply.v1. Current beta plugin settings stay local and these controls remain locked."}</div><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))",gap:9}}>{[["enabled","Plugin enabled"],["desktop_enabled","Desktop overlay"],["stream_enabled","Stream overlay"]].map(([key,label])=><label key={key} style={{fontSize:11,color:"var(--text2)"}}><input disabled={!controls.settings} type="checkbox" checked={!!settings[key]} onChange={e=>setSettings({...settings,[key]:e.target.checked})}/> {label}</label>)}<Field label="Overall intensity"><CyanInput disabled={!controls.settings} type="number" min={.05} max={1} step={.05} value={settings.overall_intensity??1} onChange={e=>setSettings({...settings,overall_intensity:Number(e.target.value)})}/></Field><Field label="Max simultaneous"><CyanInput disabled={!controls.settings} type="number" min={1} max={4} value={settings.max_simultaneous??2} onChange={e=>setSettings({...settings,max_simultaneous:Number(e.target.value)})}/></Field></div>
+          {controls.settings&&effects.map(effect=>{const id=fxId(effect),range=fxDurationBounds(effect),item=settings.effects?.[id]||{},update=next=>setSettings({...settings,effects:{...(settings.effects||{}),[id]:{...item,...next}}});return <details key={id} style={{borderTop:"1px solid var(--border)",padding:"10px 0"}}><summary style={{cursor:"pointer",fontSize:12,fontWeight:700}}>{fxName(effect)}</summary><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(125px,1fr))",gap:8,marginTop:9}}><label style={{fontSize:11}}><input type="checkbox" checked={item.enabled??true} onChange={e=>update({enabled:e.target.checked})}/> Enabled</label><Field label="Intensity"><CyanInput type="number" min={.05} max={1} step={.05} value={item.intensity??effect.default_intensity??.7} onChange={e=>update({intensity:Number(e.target.value)})}/></Field><Field label="Duration ms"><CyanInput type="number" min={range.min} max={range.max} value={item.duration_ms??range.value} onChange={e=>update({duration_ms:Number(e.target.value)})}/></Field><Field label="Cooldown ms"><CyanInput type="number" min={0} max={3600000} value={item.cooldown_ms??effect.default_cooldown_ms??0} onChange={e=>update({cooldown_ms:Number(e.target.value)})}/></Field><Field label="Random weight"><CyanInput type="number" min={0} max={100} value={item.random_weight??effect.default_random_weight??100} onChange={e=>update({random_weight:Number(e.target.value)})}/></Field><FxParameterFields effect={effect} values={item.parameters||{}} onChange={parameters=>update({parameters})}/></div></details>})}
+          <div style={{borderTop:"1px solid var(--border)",paddingTop:10,marginTop:8}}><b style={{fontSize:12}}>Chaos</b><div style={{fontSize:10,color:"var(--text3)",margin:"4px 0 9px"}}>{hasFxCapability(device,FX_CAPABILITIES.chaos)?"Chaos trigger supported.":"Triggering remains locked until chaos.trigger.v1 is negotiated."} Limits and eligibility persist only through settings.apply.v1.</div>{controls.settings&&<><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(125px,1fr))",gap:8}}>{[["min_effects",1,4,1],["max_effects",1,4,3],["duration_ms",1000,15000,8000],["combined_intensity",.1,3,1]].map(([key,min,max,fallback])=><Field key={key} label={key.replaceAll("_"," ")}><CyanInput type="number" min={min} max={max} step={key==="combined_intensity"?.1:1} value={settings.chaos?.[key]??fallback} onChange={e=>setSettings({...settings,chaos:{...(settings.chaos||{}),[key]:Number(e.target.value)}})}/></Field>)}</div><div style={{fontSize:10,color:"var(--cyan2)",textTransform:"uppercase",letterSpacing:1,margin:"9px 0 6px"}}>Eligible effects</div><div style={{display:"flex",gap:9,flexWrap:"wrap"}}>{effects.map(effect=>{const id=fxId(effect),allowed=settings.chaos?.allowed_effects||effects.map(fxId);return <label key={id} style={{fontSize:10,color:"var(--text2)"}}><input type="checkbox" checked={allowed.includes(id)} onChange={e=>{const next=e.target.checked?[...new Set([...allowed,id])]:allowed.filter(x=>x!==id);setSettings({...settings,chaos:{...(settings.chaos||{}),allowed_effects:next}})}}/> {fxName(effect)}</label>})}</div></>}</div><button disabled={!controls.settings||!!busy} onClick={saveSettings} style={{...C.btnPrimary,marginTop:13}}>{busy==="settings"?"Waiting for OBS…":"Save & Sync Settings"}</button>
+        </div>
+      </div>}
+    </div>
+  </div>;
 }
 
 // ── Dev: Global Stats Tab ─────────────────────────────────────────────────────

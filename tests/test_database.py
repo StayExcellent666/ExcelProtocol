@@ -3,6 +3,7 @@
 Each test gets a fresh temp DB via the `db` fixture in conftest.py.
 """
 from datetime import datetime, timedelta, timezone
+import pytest
 
 
 # ── Schema initialisation ─────────────────────────────────────────────────────
@@ -360,7 +361,6 @@ class TestSchema:
                 entry,
             )
         conn.close()
-
 
 # ── log_stream_event + mark_stream_ended ──────────────────────────────────────
 
@@ -1677,3 +1677,57 @@ class TestTwitchBuiltinCommandSettings:
         assert db.is_builtin_command_enabled("streamer", "!uptime") is False
         assert db.is_builtin_command_enabled("streamer", "!game") is True
         assert db.get_builtin_command_settings("STREAMER")["!uptime"] is False
+
+
+class TestExcelProtocolFxSchema:
+    def test_device_credentials_and_pairing_codes_are_hash_only(self, db):
+        conn = db.get_connection()
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"fx_pairing_codes", "fx_devices", "fx_desired_settings", "fx_command_audit"} <= tables
+        device_columns = {row[1] for row in conn.execute("PRAGMA table_info(fx_devices)")}
+        assert "credential_hash" in device_columns
+        assert "credential" not in device_columns
+        pairing_columns = {row[1] for row in conn.execute("PRAGMA table_info(fx_pairing_codes)")}
+        assert "code_hash" in pairing_columns
+        assert "pairing_code" not in pairing_columns
+        reward_columns = {row[1] for row in conn.execute("PRAGMA table_info(reward_triggers)")}
+        assert {
+            "trigger_type", "fx_device_id", "fx_effect_id", "fx_duration_ms",
+            "fx_intensity", "fx_parameters_json", "fx_queue",
+        } <= reward_columns
+        conn.close()
+
+    def test_fx_reward_trigger_round_trip(self, db):
+        db.set_reward_trigger(
+            1, "reward", "Fog me", "", trigger_type="fx",
+            fx_device_id="device", fx_effect_id="fog", fx_duration_ms=5000,
+            fx_intensity=0.6, fx_parameters={}, fx_queue=True,
+        )
+        trigger = db.get_reward_trigger(1, "reward")
+        assert trigger["trigger_type"] == "fx"
+        assert trigger["fx_device_id"] == "device"
+        assert trigger["fx_effect_id"] == "fog"
+        assert trigger["fx_duration_ms"] == 5000
+        assert trigger["fx_intensity"] == 0.6
+        assert trigger["fx_parameters"] == {}
+        assert trigger["fx_queue"] is True
+
+    def test_duplicate_device_event_is_rejected(self, db):
+        import sqlite3
+
+        conn = db.get_connection()
+        values = ("guild", "device", "user", "trigger_random", None, "event-1", "pending")
+        conn.execute(
+            """INSERT INTO fx_command_audit
+               (guild_id, device_id, user_id, command_type, effect_id, event_id, result_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """INSERT INTO fx_command_audit
+                   (guild_id, device_id, user_id, command_type, effect_id, event_id, result_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                values,
+            )
+        conn.close()

@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://excelprotocol.fly.dev/schemas/excelprotocol-fx-protocol-v1.schema.json",
+  "title": "ExcelProtocol FX protocol v1 messages",
+  "oneOf": [
+    {"$ref": "#/$defs/hello"},
+    {"$ref": "#/$defs/heartbeat"},
+    {"$ref": "#/$defs/commandEnvelope"},
+    {"$ref": "#/$defs/responseEnvelope"}
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "properties": {
+        "protocol": {"const": "excelprotocol-fx"},
+        "protocol_version": {"const": 1}
+      },
+      "required": ["protocol", "protocol_version"]
+    },
+    "hello": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": {"const": "excelprotocol-fx"},
+            "protocol_version": {"const": 1},
+            "type": {"const": "hello"},
+            "device_id": {"type": "string", "format": "uuid"},
+            "plugin_version": {"type": "string", "maxLength": 64},
+            "obs_version": {"type": "string", "maxLength": 64},
+            "capabilities": {
+              "type": "array", "maxItems": 32, "uniqueItems": true,
+              "items": {"enum": ["commands.v1", "effects.list.v1", "effects.status.v1", "settings.apply.v1", "chaos.trigger.v1"]}
+            }
+          },
+          "required": ["protocol", "protocol_version", "type", "device_id", "plugin_version", "obs_version", "capabilities"]
+        }
+      ]
+    },
+    "heartbeat": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "protocol": {"const": "excelprotocol-fx"}, "protocol_version": {"const": 1},
+        "type": {"const": "heartbeat"}, "sent_at": {"type": "string", "format": "date-time"}
+      },
+      "required": ["protocol", "protocol_version", "type"]
+    },
+    "eventId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "effectId": {"enum": ["crash", "ink_splatter", "screen_cracks", "error_invasion", "corruption", "darkness", "creepy_eyes", "fog", "mouse_invasion", "jumpscare_lite"]},
+    "triggerEffect": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "type": {"const": "trigger_effect"}, "event_id": {"$ref": "#/$defs/eventId"},
+        "effect": {"$ref": "#/$defs/effectId"}, "duration_ms": {"type": "integer", "minimum": 100},
+        "intensity": {"type": "number", "minimum": 0.05, "maximum": 1.0},
+        "parameters": {"type": "object"}, "queue": {"type": "boolean"}
+      },
+      "required": ["type", "event_id", "effect", "duration_ms", "intensity"],
+      "allOf": [
+        {
+          "if": {"properties": {"effect": {"const": "ink_splatter"}}},
+          "then": {"properties": {"parameters": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "splatters": {"type": "integer", "minimum": 1, "maximum": 12},
+              "drips": {"type": "boolean"},
+              "opacity": {"type": "number", "minimum": 0.1, "maximum": 1.0}
+            }
+          }}}
+        },
+        {
+          "if": {"properties": {"effect": {"const": "crash"}}},
+          "then": {"properties": {"parameters": {
+            "type": "object", "additionalProperties": false,
+            "properties": {"style": {"type": "integer", "minimum": 0, "maximum": 2}}
+          }}}
+        },
+        {
+          "if": {"properties": {"effect": {"not": {"enum": ["ink_splatter", "crash"]}}}},
+          "then": {"properties": {"parameters": {"type": "object", "maxProperties": 0}}}
+        }
+      ]
+    },
+    "eventOnly": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"type": {"enum": ["trigger_random", "clear_effects"]}, "event_id": {"$ref": "#/$defs/eventId"}},
+      "required": ["type", "event_id", "duration_ms", "intensity"]
+    },
+    "cancelEffect": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"type": {"const": "cancel_effect"}, "event_id": {"$ref": "#/$defs/eventId"}, "effect": {"$ref": "#/$defs/effectId"}},
+      "required": ["type", "event_id", "effect"]
+    },
+    "readCommand": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"type": {"enum": ["get_active_effects", "list_effects", "get_status"]}},
+      "required": ["type"]
+    },
+    "applySettings": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "type": {"const": "apply_settings"}, "revision": {"type": "integer", "minimum": 1},
+        "settings": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"}, "desktop_enabled": {"type": "boolean"}, "stream_enabled": {"type": "boolean"},
+            "overall_intensity": {"type": "number", "minimum": 0.05, "maximum": 1.0},
+            "max_simultaneous": {"type": "integer", "minimum": 1, "maximum": 4},
+            "effects": {"type": "object"},
+            "chaos": {
+              "type": "object", "additionalProperties": false,
+              "properties": {
+                "allowed_effects": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/effectId"}},
+                "min_effects": {"type": "integer", "minimum": 1, "maximum": 4},
+                "max_effects": {"type": "integer", "minimum": 1, "maximum": 4},
+                "duration_ms": {"type": "integer", "minimum": 1000, "maximum": 15000},
+                "combined_intensity": {"type": "number", "minimum": 0.1, "maximum": 3.0}
+              }
+            }
+          }
+        }
+      },
+      "required": ["type", "revision", "settings"]
+    },
+    "triggerChaos": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "type": {"const": "trigger_chaos"}, "event_id": {"$ref": "#/$defs/eventId"},
+        "duration_ms": {"type": "integer", "minimum": 1000, "maximum": 15000},
+        "intensity": {"type": "number", "minimum": 0.05, "maximum": 1.0}
+      },
+      "required": ["type", "event_id"]
+    },
+    "command": {"oneOf": [{"$ref": "#/$defs/triggerEffect"}, {"$ref": "#/$defs/eventOnly"}, {"$ref": "#/$defs/cancelEffect"}, {"$ref": "#/$defs/readCommand"}, {"$ref": "#/$defs/applySettings"}, {"$ref": "#/$defs/triggerChaos"}]},
+    "commandEnvelope": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "protocol": {"const": "excelprotocol-fx"}, "protocol_version": {"const": 1},
+        "request_id": {"type": "string", "format": "uuid"}, "expires_at": {"type": "string", "format": "date-time"},
+        "command": {"$ref": "#/$defs/command"}
+      },
+      "required": ["protocol", "protocol_version", "request_id", "expires_at", "command"]
+    },
+    "response": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "ok": {"type": "boolean"},
+        "status": {"enum": ["triggered", "queued", "cleared", "cancelled", "cooldown", "busy", "conflict", "intensity_limit", "effect_disabled", "disabled", "duplicate_event", "invalid_event_id", "invalid_effect", "invalid_duration", "invalid_intensity", "invalid_parameters", "invalid_parameter", "unknown_effect", "no_available_effect", "unknown_command", "ok", "error"]},
+        "event_id": {"$ref": "#/$defs/eventId"}, "error": {"type": "string", "maxLength": 1024},
+        "effects": {"type": "array"}, "active_effects": {"type": "array"}, "settings": {"type": "object"},
+        "queue_size": {"type": "integer", "minimum": 0, "maximum": 16}, "enabled": {"type": "boolean"}
+      },
+      "required": ["ok", "status"]
+    },
+    "responseEnvelope": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "protocol": {"const": "excelprotocol-fx"}, "protocol_version": {"const": 1},
+        "request_id": {"type": "string", "format": "uuid"}, "response": {"$ref": "#/$defs/response"}
+      },
+      "required": ["protocol", "protocol_version", "request_id", "response"]
+    }
+  }
+}

@@ -9,6 +9,8 @@ import hmac as _hmac
 import hashlib as _hashlib
 import inspect
 import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -58,6 +60,198 @@ class _FakeDashboardRequest(dict):
     @property
     def rel_url(self):
         return SimpleNamespace(query=self.get("query", {}))
+
+
+class _FakeFxRequest(_FakeDashboardRequest):
+    def __init__(self, payload, *, match_info=None, session=None, headers=None, remote="127.0.0.1"):
+        super().__init__({"match_info": match_info or {}, "session": session or {"dev": True, "user_id": "owner"}})
+        self._body = json.dumps(payload).encode()
+        self.headers = headers or {}
+        self.remote = remote
+
+    @property
+    def content_length(self):
+        return len(self._body)
+
+    async def read(self):
+        return self._body
+
+    async def json(self):
+        return json.loads(self._body)
+
+
+def _sqlite_fetchone(path, query, params=()):
+    """Fetch one test row without leaving a Windows file handle open."""
+    connection = sqlite3.connect(path)
+    try:
+        return connection.execute(query, params).fetchone()
+    finally:
+        connection.close()
+
+
+class TestFxPairingAndIsolation:
+    @pytest.mark.asyncio
+    async def test_pairing_code_is_one_time(self, db, monkeypatch):
+        from excelprotocol_fx import hash_secret, make_pairing_code
+
+        monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
+        monkeypatch.setattr(dashboard_server, "FX_CREDENTIAL_PEPPER", "test-fx-pepper")
+        code = make_pairing_code()
+        conn = sqlite3.connect(db.db_path)
+        conn.execute(
+            """INSERT INTO fx_pairing_codes
+               (guild_id, created_by_user_id, device_name, code_hash, expires_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            ("guild-a", "owner", "Dashboard Studio", hash_secret(code, "test-fx-pepper"),
+             (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        request = _FakeFxRequest({
+            "pairing_code": code, "device_name": "Studio PC",
+            "plugin_version": "1.1.0", "obs_version": "31.0",
+        })
+        response = await dashboard_server.pair_fx_device(request)
+        payload = json.loads(response.body)
+        assert response.status == 201
+        assert payload["device_credential"].startswith("fxd_")
+        stored = _sqlite_fetchone(
+            db.db_path,
+            "SELECT credential_hash, revoked_at, name FROM fx_devices WHERE id = ?",
+            (payload["device_id"],),
+        )
+        assert stored[0] != payload["device_credential"]
+        assert stored[1] is None
+        assert stored[2] == "Dashboard Studio"
+        with pytest.raises(dashboard_server.web.HTTPBadRequest):
+            await dashboard_server.pair_fx_device(request)
+
+    @pytest.mark.asyncio
+    async def test_expired_pairing_code_is_rejected(self, db, monkeypatch):
+        from excelprotocol_fx import hash_secret, make_pairing_code
+
+        monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
+        monkeypatch.setattr(dashboard_server, "FX_CREDENTIAL_PEPPER", "test-fx-pepper")
+        code = make_pairing_code()
+        conn = sqlite3.connect(db.db_path)
+        conn.execute(
+            """INSERT INTO fx_pairing_codes
+               (guild_id, created_by_user_id, code_hash, expires_at)
+               VALUES (?, ?, ?, ?)""",
+            ("guild-a", "owner", hash_secret(code, "test-fx-pepper"),
+             (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        with pytest.raises(dashboard_server.web.HTTPBadRequest):
+            await dashboard_server.pair_fx_device(_FakeFxRequest({"pairing_code": code, "device_name": "Old"}))
+
+    @pytest.mark.asyncio
+    async def test_tenant_cannot_rename_or_revoke_another_guild_device(self, db, monkeypatch):
+        monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
+        conn = sqlite3.connect(db.db_path)
+        conn.execute(
+            """INSERT INTO fx_devices
+               (id, guild_id, paired_by_user_id, name, credential_hash)
+               VALUES ('device-b', 'guild-b', 'owner-b', 'Other OBS', 'hash-b')"""
+        )
+        conn.commit()
+        conn.close()
+        request = _FakeFxRequest(
+            {"name": "Stolen"}, match_info={"guild_id": "guild-a", "device_id": "device-b"},
+        )
+        with pytest.raises(dashboard_server.web.HTTPNotFound):
+            await dashboard_server.rename_fx_device(request)
+        with pytest.raises(dashboard_server.web.HTTPNotFound):
+            await dashboard_server.revoke_fx_device(request)
+
+    @pytest.mark.asyncio
+    async def test_revocation_invalidates_device_record(self, db, monkeypatch):
+        monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
+        conn = sqlite3.connect(db.db_path)
+        conn.execute(
+            """INSERT INTO fx_devices
+               (id, guild_id, paired_by_user_id, name, credential_hash)
+               VALUES ('device-a', 'guild-a', 'owner-a', 'Studio OBS', 'hash-a')"""
+        )
+        conn.commit()
+        conn.close()
+        request = _FakeFxRequest(
+            {}, match_info={"guild_id": "guild-a", "device_id": "device-a"},
+        )
+        response = await dashboard_server.revoke_fx_device(request)
+        assert response.status == 200
+        revoked_at = _sqlite_fetchone(
+            db.db_path,
+            "SELECT revoked_at FROM fx_devices WHERE id = 'device-a'"
+        )[0]
+        assert revoked_at is not None
+
+    @pytest.mark.asyncio
+    async def test_fx_reward_trigger_is_tenant_scoped_and_persisted(self, db, monkeypatch):
+        monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
+        conn = sqlite3.connect(db.db_path)
+        conn.execute(
+            """INSERT INTO fx_devices
+               (id, guild_id, paired_by_user_id, name, credential_hash)
+               VALUES ('device-a', 'guild-a', 'owner-a', 'Studio OBS', 'hash-a')"""
+        )
+        conn.commit()
+        conn.close()
+        payload = {
+            "reward_id": "reward-1", "reward_title": "Fog me",
+            "trigger_type": "fx", "fx_device_id": "device-a",
+            "fx_effect_id": "fog", "fx_duration_ms": 8000,
+            "fx_intensity": 0.7, "fx_parameters": {}, "fx_queue": True,
+        }
+        response = await dashboard_server.upsert_reward_trigger(
+            _FakeFxRequest(payload, match_info={"guild_id": "guild-a"})
+        )
+        assert response.status == 200
+        stored = _sqlite_fetchone(
+            db.db_path,
+            """SELECT trigger_type, fx_device_id, fx_effect_id, fx_duration_ms,
+                      fx_intensity, fx_parameters_json, fx_queue, video_url
+               FROM reward_triggers WHERE guild_id = 'guild-a' AND reward_id = 'reward-1'"""
+        )
+        assert stored == ("fx", "device-a", "fog", 8000, 0.7, "{}", 1, "")
+
+        payload["fx_device_id"] = "device-from-another-guild"
+        with pytest.raises(dashboard_server.web.HTTPBadRequest):
+            await dashboard_server.upsert_reward_trigger(
+                _FakeFxRequest(payload, match_info={"guild_id": "guild-a"})
+            )
+
+    @pytest.mark.asyncio
+    async def test_reward_redemption_dispatches_correlated_fx_command(self, monkeypatch):
+        sent = []
+        finished = []
+
+        async def reserve(*_args):
+            return 42
+
+        async def finish(audit_id, status):
+            finished.append((audit_id, status))
+
+        async def send(device_id, command):
+            sent.append((device_id, command))
+            return {"ok": True, "status": "triggered", "event_id": command["event_id"]}
+
+        monkeypatch.setattr(dashboard_server, "_fx_reserve_audit", reserve)
+        monkeypatch.setattr(dashboard_server, "_fx_finish_audit", finish)
+        monkeypatch.setattr(dashboard_server.FX_REGISTRY, "send_command", send)
+        await dashboard_server._dispatch_fx_reward("guild-a", {
+            "fx_device_id": "device-a", "fx_effect_id": "fog",
+            "fx_duration_ms": 5000, "fx_intensity": 0.5,
+            "fx_parameters_json": "{}", "fx_queue": 0,
+        }, "redemption-1")
+        assert sent[0][0] == "device-a"
+        assert sent[0][1] == {
+            "type": "trigger_effect", "event_id": "redemption-1",
+            "effect": "fog", "duration_ms": 5000, "intensity": 0.5,
+            "parameters": {}, "queue": False,
+        }
+        assert finished == [(42, "triggered")]
 
 
 class TestWelcomePreview:
@@ -416,6 +610,14 @@ class TestDevDashboardRoutes:
         assert ("GET", "/api/admin/suggestions") in routes
         assert ("POST", "/api/admin/suggestions/{suggestion_id}/comments") in routes
         assert ("DELETE", "/api/admin/suggestions/{suggestion_id}") in routes
+        assert ("POST", "/api/fx/pair") in routes
+        assert ("GET", "/api/fx/ws") in routes
+        assert ("GET", "/api/guild/{guild_id}/fx") in routes
+        assert ("POST", "/api/guild/{guild_id}/fx/pairing-codes") in routes
+        assert ("PATCH", "/api/guild/{guild_id}/fx/devices/{device_id}") in routes
+        assert ("DELETE", "/api/guild/{guild_id}/fx/devices/{device_id}") in routes
+        assert ("POST", "/api/guild/{guild_id}/fx/commands") in routes
+        assert ("PUT", "/api/guild/{guild_id}/fx/settings") in routes
 
     def test_fortuna_overlay_layout_is_clamped_to_canvas(self):
         layout = dashboard_server._fortuna_normalize_overlay_layout({
@@ -1186,10 +1388,10 @@ class TestDevDashboardRoutes:
 
         terms = inspect.getsource(dashboard_server.terms_page)
         privacy = inspect.getsource(dashboard_server.privacy_page)
-        assert "October 9, 2026" in terms
+        assert "October 21, 2026" in terms
         assert "Twitch chat commands, clip creation" in terms
         assert "seven-day re-invite grace period" in terms
-        assert "October 9, 2026" in privacy
+        assert "October 21, 2026" in privacy
         assert "per-viewer Twitch ID or login and use count" in privacy
         assert "Giveaway configuration" in privacy
         assert "Automated Moderation" in privacy

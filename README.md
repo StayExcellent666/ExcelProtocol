@@ -34,6 +34,7 @@ A Discord bot built for Twitch streaming communities. ExcelProtocol delivers ins
 - EventSub webhook integration for reward redemptions
 - OBS browser source overlay for video triggers
 - Full channel rewards management from the dashboard
+- Secure native OBS effects as Channel Point reward triggers through ExcelProtocol FX (plugin v1.1.0+)
 
 ### ⚙️ Server Management
 - Web dashboard at [excelprotocol.fly.dev](https://excelprotocol.fly.dev/app) — no commands needed
@@ -90,6 +91,10 @@ The web dashboard gives server admins full control without needing slash command
 
 - [Terms of Service](https://excelprotocol.fly.dev/terms)
 - [Privacy Policy](https://excelprotocol.fly.dev/privacy)
+
+## ExcelProtocol FX developers
+
+The bot/dashboard side of the authenticated native OBS integration is documented in [protocol v1](docs/excelprotocol-fx-protocol-v1.md) and the [deployment/rollback guide](docs/excelprotocol-fx-deployment.md). Production WSS is `wss://excelprotocol.fly.dev/api/fx/ws`.
 
 ---
 

@@ -721,7 +721,8 @@ class Database:
             )
         ''')
 
-        # Video triggers -- links a Twitch reward_id to a video URL
+        # Reward triggers link a Twitch reward to either the existing OBS media
+        # overlay or a paired ExcelProtocol FX device.
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS reward_triggers (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -734,6 +735,13 @@ class Database:
                 audio_only INTEGER NOT NULL DEFAULT 0,
                 start_seconds REAL NOT NULL DEFAULT 0,
                 end_seconds REAL,
+                trigger_type TEXT NOT NULL DEFAULT 'media',
+                fx_device_id TEXT,
+                fx_effect_id TEXT,
+                fx_duration_ms INTEGER,
+                fx_intensity REAL,
+                fx_parameters_json TEXT NOT NULL DEFAULT '{}',
+                fx_queue INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(guild_id, reward_id)
             )
         ''')
@@ -748,6 +756,13 @@ class Database:
             "ALTER TABLE reward_triggers ADD COLUMN audio_only INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE reward_triggers ADD COLUMN start_seconds REAL NOT NULL DEFAULT 0",
             "ALTER TABLE reward_triggers ADD COLUMN end_seconds REAL",
+            "ALTER TABLE reward_triggers ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'media'",
+            "ALTER TABLE reward_triggers ADD COLUMN fx_device_id TEXT",
+            "ALTER TABLE reward_triggers ADD COLUMN fx_effect_id TEXT",
+            "ALTER TABLE reward_triggers ADD COLUMN fx_duration_ms INTEGER",
+            "ALTER TABLE reward_triggers ADD COLUMN fx_intensity REAL",
+            "ALTER TABLE reward_triggers ADD COLUMN fx_parameters_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE reward_triggers ADD COLUMN fx_queue INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 cursor.execute(column_sql)
@@ -1076,6 +1091,73 @@ class Database:
                 guild_name TEXT,
                 kicked_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        ''')
+
+        # ExcelProtocol FX native OBS devices. Pairing codes and device
+        # credentials are one-way HMAC digests; plaintext values are returned
+        # once and are never persisted or logged.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fx_pairing_codes (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id           TEXT NOT NULL,
+                created_by_user_id TEXT NOT NULL,
+                device_name        TEXT NOT NULL DEFAULT 'Streaming PC',
+                code_hash          TEXT NOT NULL UNIQUE,
+                expires_at         TIMESTAMP NOT NULL,
+                used_at            TIMESTAMP,
+                created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_fx_pairing_codes_expiry
+            ON fx_pairing_codes(expires_at, used_at)
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fx_devices (
+                id                 TEXT PRIMARY KEY,
+                guild_id           TEXT NOT NULL,
+                paired_by_user_id  TEXT NOT NULL,
+                name               TEXT NOT NULL,
+                credential_hash    TEXT NOT NULL UNIQUE,
+                plugin_version     TEXT,
+                obs_version        TEXT,
+                capabilities_json  TEXT NOT NULL DEFAULT '[]',
+                created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at       TIMESTAMP,
+                revoked_at         TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_fx_devices_guild
+            ON fx_devices(guild_id, revoked_at)
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fx_desired_settings (
+                guild_id           TEXT PRIMARY KEY,
+                revision           INTEGER NOT NULL DEFAULT 1,
+                settings_json      TEXT NOT NULL,
+                updated_by_user_id TEXT NOT NULL,
+                updated_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fx_command_audit (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id      TEXT NOT NULL,
+                device_id     TEXT NOT NULL,
+                user_id       TEXT NOT NULL,
+                command_type  TEXT NOT NULL,
+                effect_id     TEXT,
+                request_id    TEXT,
+                event_id      TEXT,
+                result_status TEXT NOT NULL,
+                created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(device_id, event_id)
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_fx_command_audit_guild
+            ON fx_command_audit(guild_id, created_at)
         ''')
 
         conn.commit()
@@ -3255,13 +3337,18 @@ class Database:
     def set_reward_trigger(self, guild_id: int, reward_id: str, reward_title: str,
                            video_url: str, volume: float = 1.0, hotkey: str = None,
                            audio_only: bool = False, start_seconds: float = 0,
-                           end_seconds: float = None):
+                           end_seconds: float = None, trigger_type: str = "media",
+                           fx_device_id: str = None, fx_effect_id: str = None,
+                           fx_duration_ms: int = None, fx_intensity: float = None,
+                           fx_parameters: dict = None, fx_queue: bool = False):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO reward_triggers
-                (guild_id, reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (guild_id, reward_id, reward_title, video_url, volume, hotkey, audio_only,
+                 start_seconds, end_seconds, trigger_type, fx_device_id, fx_effect_id,
+                 fx_duration_ms, fx_intensity, fx_parameters_json, fx_queue)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, reward_id) DO UPDATE SET
                 reward_title = excluded.reward_title,
                 video_url    = excluded.video_url,
@@ -3269,29 +3356,38 @@ class Database:
                 hotkey       = excluded.hotkey,
                 audio_only   = excluded.audio_only,
                 start_seconds = excluded.start_seconds,
-                end_seconds  = excluded.end_seconds
+                end_seconds  = excluded.end_seconds,
+                trigger_type = excluded.trigger_type,
+                fx_device_id = excluded.fx_device_id,
+                fx_effect_id = excluded.fx_effect_id,
+                fx_duration_ms = excluded.fx_duration_ms,
+                fx_intensity = excluded.fx_intensity,
+                fx_parameters_json = excluded.fx_parameters_json,
+                fx_queue = excluded.fx_queue
         """, (guild_id, reward_id, reward_title, video_url, volume, hotkey,
-              1 if audio_only else 0, start_seconds, end_seconds))
+              1 if audio_only else 0, start_seconds, end_seconds, trigger_type,
+              fx_device_id, fx_effect_id, fx_duration_ms, fx_intensity,
+              json.dumps(fx_parameters or {}, separators=(",", ":")), 1 if fx_queue else 0))
         conn.commit()
         conn.close()
 
     def get_reward_triggers(self, guild_id: int) -> List[Dict]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds FROM reward_triggers WHERE guild_id = ?", (guild_id,))
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds, trigger_type, fx_device_id, fx_effect_id, fx_duration_ms, fx_intensity, fx_parameters_json, fx_queue FROM reward_triggers WHERE guild_id = ?", (guild_id,))
         rows = cursor.fetchall()
         conn.close()
-        return [{"reward_id": r[0], "reward_title": r[1], "video_url": r[2], "volume": r[3], "hotkey": r[4], "audio_only": bool(r[5]), "start_seconds": r[6] or 0, "end_seconds": r[7]} for r in rows]
+        return [self._reward_trigger_row(r) for r in rows]
 
     def get_reward_trigger(self, guild_id: int, reward_id: str) -> Optional[Dict]:
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+        cursor.execute("SELECT reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds, trigger_type, fx_device_id, fx_effect_id, fx_duration_ms, fx_intensity, fx_parameters_json, fx_queue FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
         row = cursor.fetchone()
         conn.close()
         if not row:
             return None
-        return {"reward_id": row[0], "reward_title": row[1], "video_url": row[2], "volume": row[3], "hotkey": row[4], "audio_only": bool(row[5]), "start_seconds": row[6] or 0, "end_seconds": row[7]}
+        return self._reward_trigger_row(row)
 
     def delete_reward_trigger(self, guild_id: int, reward_id: str):
         conn = self.get_connection()
@@ -3304,10 +3400,26 @@ class Database:
         """Get all triggers across all guilds -- used for EventSub routing."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT guild_id, reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds FROM reward_triggers")
+        cursor.execute("SELECT guild_id, reward_id, reward_title, video_url, volume, hotkey, audio_only, start_seconds, end_seconds, trigger_type, fx_device_id, fx_effect_id, fx_duration_ms, fx_intensity, fx_parameters_json, fx_queue FROM reward_triggers")
         rows = cursor.fetchall()
         conn.close()
-        return [{"guild_id": r[0], "reward_id": r[1], "reward_title": r[2], "video_url": r[3], "volume": r[4], "hotkey": r[5], "audio_only": bool(r[6]), "start_seconds": r[7] or 0, "end_seconds": r[8]} for r in rows]
+        return [{"guild_id": r[0], **self._reward_trigger_row(r[1:])} for r in rows]
+
+    @staticmethod
+    def _reward_trigger_row(row) -> Dict:
+        try:
+            parameters = json.loads(row[13] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            parameters = {}
+        return {
+            "reward_id": row[0], "reward_title": row[1], "video_url": row[2],
+            "volume": row[3], "hotkey": row[4], "audio_only": bool(row[5]),
+            "start_seconds": row[6] or 0, "end_seconds": row[7],
+            "trigger_type": row[8] or "media", "fx_device_id": row[9],
+            "fx_effect_id": row[10], "fx_duration_ms": row[11],
+            "fx_intensity": row[12], "fx_parameters": parameters,
+            "fx_queue": bool(row[14]),
+        }
 
     def get_overlay_volume(self, guild_id: int) -> int:
         """Get the saved overlay volume (0-100) for a guild."""
@@ -3469,6 +3581,10 @@ class Database:
         cursor.execute('DELETE FROM fortuna_plugin_keys WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM fortuna_overlay_settings WHERE guild_id = ?', (str(guild_id),))
         cursor.execute('DELETE FROM admin_audit_log WHERE guild_id = ?', (str(guild_id),))
+        cursor.execute('DELETE FROM fx_pairing_codes WHERE guild_id = ?', (str(guild_id),))
+        cursor.execute('DELETE FROM fx_command_audit WHERE guild_id = ?', (str(guild_id),))
+        cursor.execute('DELETE FROM fx_desired_settings WHERE guild_id = ?', (str(guild_id),))
+        cursor.execute('DELETE FROM fx_devices WHERE guild_id = ?', (str(guild_id),))
 
         if twitch_channel:
             still_linked = cursor.execute(
