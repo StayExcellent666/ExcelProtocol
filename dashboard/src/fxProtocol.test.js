@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { FX_CAPABILITIES, buildFxTrigger, fxControlsState, hasFxCapability } from "./fxProtocol.js";
+import {
+  FX_CAPABILITIES, buildFxTrigger, fxControlsState, hasFxCapability,
+  normalizeFxParameter, normalizeFxParameters,
+} from "./fxProtocol.js";
 
 test("offline devices never expose effect controls", () => {
   const device = { online: false, capabilities: Object.values(FX_CAPABILITIES) };
@@ -24,5 +27,25 @@ test("effect payload comes from plugin metadata and enforces its duration limits
     intensity: 0.6, parameters: {}, queue: false,
   });
   assert.throws(() => buildFxTrigger(effect, { duration_ms: 6000 }), /500-5000/);
+});
+
+test("plugin parameter defaults are normalized before sending", () => {
+  const effect = {
+    id: "ink_splatter",
+    parameters: {
+      splatters: { type: "integer", default: "12", min: 1, max: 12 },
+      drips: { type: "boolean", default: "true" },
+      opacity: { type: "number", default: "1", min: 0.1, max: 1 },
+      size: { type: "number", default: "1", min: 0.5, max: 1.5 },
+    },
+  };
+  assert.deepEqual(normalizeFxParameters(effect), {
+    splatters: 12, drips: true, opacity: 1, size: 1,
+  });
+  assert.equal(normalizeFxParameter({ type: "boolean", default: "false" }), false);
+  assert.equal(normalizeFxParameter({ type: "number", default: "1" }), 1);
+  assert.deepEqual(buildFxTrigger(effect).parameters, {
+    splatters: 12, drips: true, opacity: 1, size: 1,
+  });
 });
 

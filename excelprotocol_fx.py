@@ -138,7 +138,7 @@ def _validate_parameters(effect: str, value: Any) -> dict:
     if not isinstance(value, dict):
         raise FxValidationError("parameters must be an object")
     allowed = {
-        "ink_splatter": {"splatters", "drips", "opacity"},
+        "ink_splatter": {"splatters", "drips", "opacity", "size"},
         "crash": {"style"},
     }.get(effect, set())
     _require_exact_keys(value, allowed)
@@ -149,6 +149,8 @@ def _validate_parameters(effect: str, value: Any) -> dict:
         raise FxValidationError("drips must be a boolean")
     if "opacity" in result and (type(result["opacity"]) not in (int, float) or not 0.1 <= float(result["opacity"]) <= 1.0):
         raise FxValidationError("opacity must be from 0.1 through 1.0")
+    if "size" in result and (type(result["size"]) not in (int, float) or not 0.5 <= float(result["size"]) <= 1.5):
+        raise FxValidationError("size must be from 0.5 through 1.5")
     if "style" in result and (type(result["style"]) is not int or not 0 <= result["style"] <= 2):
         raise FxValidationError("style must be an integer from 0 through 2")
     return result

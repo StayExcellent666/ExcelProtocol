@@ -52,6 +52,41 @@ class TestDashboardSecurityHardening:
         assert ".env" in ignore
 
 
+class TestTwitchRewardManagement:
+    def test_public_reward_includes_native_cooldown_and_manageability(self):
+        reward = dashboard_server._public_twitch_reward({
+            "id": "reward-1", "title": "Ink me", "cost": 250,
+            "is_enabled": True, "background_color": "#00F5D4",
+            "global_cooldown_setting": {
+                "is_enabled": True, "global_cooldown_seconds": 300,
+            },
+            "cooldown_expires_at": "2026-10-21T12:05:00Z",
+        }, {"reward-1"})
+        assert reward["manageable"] is True
+        assert reward["is_global_cooldown_enabled"] is True
+        assert reward["global_cooldown_seconds"] == 300
+
+    def test_create_reward_payload_supports_twitch_native_cooldown(self):
+        payload = dashboard_server._twitch_reward_payload({
+            "title": "Ink me", "cost": 250, "is_enabled": True,
+            "is_global_cooldown_enabled": True,
+            "global_cooldown_seconds": 300,
+        }, creating=True)
+        assert payload == {
+            "title": "Ink me", "cost": 250, "is_enabled": True,
+            "is_global_cooldown_enabled": True,
+            "global_cooldown_seconds": 300,
+        }
+
+    def test_cooldown_rejects_values_twitch_will_not_show(self):
+        with pytest.raises(dashboard_server.web.HTTPBadRequest) as exc:
+            dashboard_server._twitch_reward_payload({
+                "is_global_cooldown_enabled": True,
+                "global_cooldown_seconds": 59,
+            }, creating=False)
+        assert "1 minute" in exc.value.reason
+
+
 class _FakeDashboardRequest(dict):
     @property
     def match_info(self):

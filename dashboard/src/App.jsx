@@ -9,7 +9,10 @@ import {
   useSortable, arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { FX_CAPABILITIES, buildFxTrigger, fxControlsState, fxDurationBounds, hasFxCapability } from "./fxProtocol.js";
+import {
+  FX_CAPABILITIES, buildFxTrigger, fxControlsState, fxDurationBounds, hasFxCapability,
+  fxParameterEntries, normalizeFxParameter, normalizeFxParameters,
+} from "./fxProtocol.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || "https://excelprotocol.fly.dev";
 
@@ -3380,7 +3383,7 @@ function ChannelRewardsTab({ guildId }) {
   const [triggerModal, setTriggerModal] = useState(null);
   const [rewardModal, setRewardModal]   = useState(null);
   const [triggerForm, setTriggerForm]   = useState({ trigger_type:"media", video_url:"", volume:1.0, hotkey:"", audio_only:false, start_seconds:0, end_seconds:"", fx_device_id:"", fx_effect_id:"", fx_duration_ms:8000, fx_intensity:.7, fx_parameters:{}, fx_queue:false });
-  const [rewardForm, setRewardForm]     = useState({ title:"", cost:100, is_enabled:true });
+  const [rewardForm, setRewardForm]     = useState({ title:"", cost:100, is_enabled:true, is_global_cooldown_enabled:false, global_cooldown_seconds:60 });
   const [saving, setSaving]       = useState(false);
   const [copied, setCopied]       = useState(false);
   const [overlayVolume, setOverlayVolume] = useState(100);
@@ -3452,6 +3455,8 @@ function ChannelRewardsTab({ guildId }) {
   const saveTrigger = async () => {
     setSaving(true);
     try {
+      const fxDevice = fxData?.devices?.find(device => device.id === triggerForm.fx_device_id);
+      const fxEffect = fxDevice?.effects?.find(effect => fxId(effect) === triggerForm.fx_effect_id);
       await apiFetch(`/api/guild/${guildId}/broadcaster/triggers`, { method:"POST", body: JSON.stringify({
           reward_id:    triggerModal.id,
           reward_title: triggerModal.title,
@@ -3466,7 +3471,9 @@ function ChannelRewardsTab({ guildId }) {
           fx_effect_id: triggerForm.fx_effect_id,
           fx_duration_ms:Number(triggerForm.fx_duration_ms),
           fx_intensity: Number(triggerForm.fx_intensity),
-          fx_parameters:triggerForm.fx_parameters,
+          fx_parameters:triggerForm.trigger_type === "fx"
+            ? (fxEffect ? normalizeFxParameters(fxEffect, triggerForm.fx_parameters) : triggerForm.fx_parameters)
+            : {},
           fx_queue:     triggerForm.fx_queue,
         })});
       setTriggerModal(null); load();
@@ -3485,9 +3492,14 @@ function ChannelRewardsTab({ guildId }) {
       alert("Reward cost must be at least 1 point.");
       return;
     }
+    const cooldownSeconds = Number(rewardForm.global_cooldown_seconds);
+    if (rewardForm.is_global_cooldown_enabled && (!Number.isInteger(cooldownSeconds) || cooldownSeconds < 60 || cooldownSeconds > 604800)) {
+      alert("Twitch cooldown must be between 1 minute and 7 days.");
+      return;
+    }
     setSaving(true);
     try {
-      const payload = { ...rewardForm, title, cost };
+      const payload = { ...rewardForm, title, cost, global_cooldown_seconds:cooldownSeconds };
       if (rewardModal === "add") {
         await apiFetch(`/api/guild/${guildId}/broadcaster/rewards`, { method:"POST", body: JSON.stringify(payload) });
       } else {
@@ -3658,10 +3670,10 @@ function ChannelRewardsTab({ guildId }) {
       <div style={{ ...C.card }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
           <div style={{ fontWeight:800, fontSize:14, fontFamily:"'Orbitron',sans-serif", color:"var(--cyan)", textShadow:"0 0 10px rgba(0,245,212,0.4)" }}>Channel Point Rewards</div>
-          <button onClick={() => { setRewardForm({ title:"", cost:100, is_enabled:true }); setRewardModal("add"); }} style={C.btnPrimary}>+ New Reward</button>
+          <button onClick={() => { setRewardForm({ title:"", cost:100, is_enabled:true, is_global_cooldown_enabled:false, global_cooldown_seconds:60 }); setRewardModal("add"); }} style={C.btnPrimary}>+ New Reward</button>
         </div>
         <div style={{ marginBottom:14, padding:"8px 12px", borderRadius:6, border:"1px solid var(--border2)", background:"rgba(8,11,15,0.6)", color:"var(--text3)", fontSize:11, fontFamily:"'JetBrains Mono',monospace" }}>
-          💡 Rewards created directly on Twitch can have video triggers added but cannot be edited or deleted here.
+          💡 ExcelProtocol-created rewards can be fully managed here. Rewards created directly on Twitch can still use triggers, but their reward settings stay managed by Twitch.
         </div>
 
         {bcast.rewards.length === 0 ? (
@@ -3681,6 +3693,7 @@ function ChannelRewardsTab({ guildId }) {
                       <span style={{ fontWeight:600, fontSize:13, color:reward.is_enabled?"var(--text)":"var(--text3)", fontFamily:"'Outfit',sans-serif" }}>{reward.title}</span>
                       <span style={{ fontSize:11, color:"var(--yellow)", fontFamily:"'JetBrains Mono',monospace" }}>{reward.cost.toLocaleString()} pts</span>
                       {!reward.is_enabled && <Badge text="disabled" color="var(--text3)" />}
+                      {reward.is_global_cooldown_enabled && <Badge text={`cooldown ${Math.round(reward.global_cooldown_seconds/60)}m`} color="var(--cyan2)" />}
                     </div>
                     <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginTop:2 }}>
                       {trigger?.video_url ? (
@@ -3698,7 +3711,8 @@ function ChannelRewardsTab({ guildId }) {
                     </div>
                   </div>
                   <button onClick={() => openTrigger(reward)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>{trigger ? "Edit Trigger" : "+ Add Trigger"}</button>
-                  {reward.manageable && <button onClick={() => { setRewardForm({ title:reward.title, cost:reward.cost, is_enabled:reward.is_enabled }); setRewardModal(reward); }} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>Edit</button>}
+                  {reward.manageable && <button onClick={() => { setRewardForm({ title:reward.title, cost:reward.cost, is_enabled:reward.is_enabled, is_global_cooldown_enabled:reward.is_global_cooldown_enabled, global_cooldown_seconds:Math.max(60,reward.global_cooldown_seconds||60) }); setRewardModal(reward); }} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>Edit Reward</button>}
+                  {!reward.manageable && <button onClick={() => window.open(`https://dashboard.twitch.tv/u/${encodeURIComponent(bcast.twitch_login)}/viewer-rewards/channel-points/rewards`,"_blank","noopener,noreferrer")} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>Edit on Twitch ↗</button>}
                   {reward.manageable && <button onClick={() => deleteReward(reward.id)} style={{ ...C.btnDanger, flexShrink:0 }}>Delete</button>}
                 </div>
               );
@@ -3716,7 +3730,7 @@ function ChannelRewardsTab({ guildId }) {
           <Field label="Trigger type">
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
               <button type="button" onClick={()=>setTriggerForm(p=>({...p,trigger_type:"media"}))} style={{...C.btnSecondary,padding:12,borderColor:triggerForm.trigger_type==="media"?"var(--cyan)":"var(--border)",color:triggerForm.trigger_type==="media"?"var(--cyan)":"var(--text2)"}}>🎬 Video / Audio</button>
-              <button type="button" onClick={()=>{const device=fxData?.devices?.find(d=>d.id===triggerForm.fx_device_id)||fxData?.devices?.[0],effect=device?.effects?.find(e=>fxId(e)===triggerForm.fx_effect_id)||device?.effects?.[0],range=fxDurationBounds(effect);setTriggerForm(p=>({...p,trigger_type:"fx",fx_device_id:device?.id||"",fx_effect_id:fxId(effect),fx_duration_ms:range.value,fx_intensity:Number(effect?.default_intensity??.7),fx_parameters:Object.fromEntries(fxParams(effect).map(([key,meta])=>[key,meta?.default??(meta?.type==="boolean"?false:meta?.min??0)]))}))}} style={{...C.btnSecondary,padding:12,borderColor:triggerForm.trigger_type==="fx"?"var(--cyan)":"var(--border)",color:triggerForm.trigger_type==="fx"?"var(--cyan)":"var(--text2)"}}>✨ ExcelProtocol FX Plugin</button>
+              <button type="button" onClick={()=>{const device=fxData?.devices?.find(d=>d.id===triggerForm.fx_device_id)||fxData?.devices?.[0],effect=device?.effects?.find(e=>fxId(e)===triggerForm.fx_effect_id)||device?.effects?.[0],range=fxDurationBounds(effect);setTriggerForm(p=>({...p,trigger_type:"fx",fx_device_id:device?.id||"",fx_effect_id:fxId(effect),fx_duration_ms:range.value,fx_intensity:Number(effect?.default_intensity??.7),fx_parameters:normalizeFxParameters(effect)}))}} style={{...C.btnSecondary,padding:12,borderColor:triggerForm.trigger_type==="fx"?"var(--cyan)":"var(--border)",color:triggerForm.trigger_type==="fx"?"var(--cyan)":"var(--text2)"}}>✨ ExcelProtocol FX Plugin</button>
             </div>
           </Field>
           {triggerForm.trigger_type === "media" ? <>
@@ -3775,6 +3789,16 @@ function ChannelRewardsTab({ guildId }) {
           </div>
           <Field label="Title"><CyanInput value={rewardForm.title} onChange={e=>setRewardForm(p=>({...p,title:e.target.value}))} placeholder="Reward name" /></Field>
           <Field label="Cost (points)"><CyanInput type="number" min={1} value={rewardForm.cost} onChange={e=>setRewardForm(p=>({...p,cost:parseInt(e.target.value)||100}))} /></Field>
+          <div style={{padding:"10px 0",borderTop:"1px solid var(--border)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
+              <div><div style={{fontSize:13,color:"var(--text)",fontFamily:"'Outfit',sans-serif"}}>Twitch cooldown</div><div style={{fontSize:10,color:"var(--text3)",marginTop:3}}>Twitch blocks new redemptions during this period.</div></div>
+              <button type="button" onClick={()=>setRewardForm(p=>({...p,is_global_cooldown_enabled:!p.is_global_cooldown_enabled}))}
+                style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",background:rewardForm.is_global_cooldown_enabled?"var(--cyan)":"var(--border2)",position:"relative",transition:"background 0.2s",boxShadow:rewardForm.is_global_cooldown_enabled?"0 0 10px rgba(0,245,212,0.4)":"none"}}>
+                <div style={{position:"absolute",top:3,left:rewardForm.is_global_cooldown_enabled?22:3,width:18,height:18,borderRadius:"50%",background:"#fff",transition:"left 0.2s"}}/>
+              </button>
+            </div>
+            {rewardForm.is_global_cooldown_enabled&&<Field label="Cooldown (minutes)"><CyanInput type="number" min={1} max={10080} step={1} value={Math.round(Number(rewardForm.global_cooldown_seconds)/60)} onChange={e=>setRewardForm(p=>({...p,global_cooldown_seconds:Math.max(60,Math.min(604800,(parseInt(e.target.value,10)||1)*60))}))}/><div style={{fontSize:10,color:"var(--text3)",marginTop:4}}>1 minute to 7 days · enforced natively by Twitch</div></Field>}
+          </div>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid var(--border)" }}>
             <span style={{ fontSize:13, color:"var(--text)", fontFamily:"'Outfit',sans-serif" }}>Enabled</span>
             <button onClick={() => setRewardForm(p=>({...p,is_enabled:!p.is_enabled}))}
@@ -3795,14 +3819,13 @@ function ChannelRewardsTab({ guildId }) {
 // ── ExcelProtocol FX ─────────────────────────────────────────────────────────
 const fxId = effect => effect?.id || effect?.effect || "";
 const fxName = effect => effect?.name || fxId(effect).split("_").map(part=>part.charAt(0).toUpperCase()+part.slice(1)).join(" ");
-const fxParams = effect => Array.isArray(effect?.parameters)
-  ? effect.parameters.map(item=>[item.id || item.name,item])
-  : Object.entries(effect?.parameters && typeof effect.parameters === "object" ? effect.parameters : {});
+const fxParams = fxParameterEntries;
 
 function FxParameterFields({ effect, values={}, onChange, disabled=false }) {
   return fxParams(effect).map(([key,raw])=>{
-    const meta=raw&&typeof raw==="object"?raw:{}, type=meta.type||(typeof meta.default==="boolean"?"boolean":"number"), value=values[key]??meta.default??(type==="boolean"?false:meta.min??0);
-    if(type==="boolean") return <label key={key} style={{display:"flex",gap:7,alignItems:"center",fontSize:11,color:"var(--text2)"}}><input disabled={disabled} type="checkbox" checked={!!value} onChange={e=>onChange({...values,[key]:e.target.checked})}/>{meta.label||key}</label>;
+    const meta=raw&&typeof raw==="object"?raw:{}, type=meta.type||(typeof meta.default==="boolean"?"boolean":"number"), value=normalizeFxParameter(meta,values[key]);
+    if(type==="boolean") return <label key={key} style={{display:"flex",gap:7,alignItems:"center",fontSize:11,color:"var(--text2)"}}><input disabled={disabled} type="checkbox" checked={value} onChange={e=>onChange({...values,[key]:e.target.checked})}/>{meta.label||key}</label>;
+    if(meta.control==="range") return <Field key={key} label={`${meta.label||key} ${Number(value).toFixed(type==="integer"?0:2)}`}><input disabled={disabled} type="range" min={meta.min} max={meta.max} step={meta.step||(type==="integer"?1:.05)} value={value} onChange={e=>onChange({...values,[key]:type==="integer"?parseInt(e.target.value,10):Number(e.target.value)})} style={{width:"100%",accentColor:"var(--cyan)"}}/></Field>;
     return <Field key={key} label={meta.label||key}><CyanInput disabled={disabled} type="number" min={meta.min} max={meta.max} step={meta.step||(type==="integer"?1:.05)} value={value} onChange={e=>onChange({...values,[key]:type==="integer"?parseInt(e.target.value,10):Number(e.target.value)})}/></Field>;
   });
 }
@@ -3823,8 +3846,8 @@ function FxRewardTriggerFields({ data, form, setForm }) {
   const devices=data?.devices||[],device=devices.find(item=>item.id===form.fx_device_id),reported=device?.effects||[];
   const effects=reported.length?reported:(form.fx_effect_id?[{id:form.fx_effect_id,name:fxName({id:form.fx_effect_id}),min_duration_ms:100,max_duration_ms:60000,default_duration_ms:form.fx_duration_ms}]:[]);
   const effect=effects.find(item=>fxId(item)===form.fx_effect_id),range=fxDurationBounds(effect);
-  const selectEffect=id=>{const next=effects.find(item=>fxId(item)===id),bounds=fxDurationBounds(next);setForm(current=>({...current,fx_effect_id:id,fx_duration_ms:bounds.value,fx_intensity:Number(next?.default_intensity??.7),fx_parameters:Object.fromEntries(fxParams(next).map(([key,meta])=>[key,meta?.default??(meta?.type==="boolean"?false:meta?.min??0)]))}))};
-  return <div><Field label="Paired OBS device"><CyanSelect value={form.fx_device_id} onChange={e=>{const next=devices.find(item=>item.id===e.target.value),first=next?.effects?.[0];setForm(current=>({...current,fx_device_id:e.target.value,fx_effect_id:fxId(first),fx_duration_ms:fxDurationBounds(first).value,fx_intensity:Number(first?.default_intensity??.7),fx_parameters:Object.fromEntries(fxParams(first).map(([key,meta])=>[key,meta?.default??(meta?.type==="boolean"?false:meta?.min??0)]))}))}}><option value="">Select an FX device…</option>{devices.map(item=><option key={item.id} value={item.id}>{item.name}{item.online?" · connected":" · offline"}</option>)}</CyanSelect></Field>
+  const selectEffect=id=>{const next=effects.find(item=>fxId(item)===id),bounds=fxDurationBounds(next);setForm(current=>({...current,fx_effect_id:id,fx_duration_ms:bounds.value,fx_intensity:Number(next?.default_intensity??.7),fx_parameters:normalizeFxParameters(next)}))};
+  return <div><Field label="Paired OBS device"><CyanSelect value={form.fx_device_id} onChange={e=>{const next=devices.find(item=>item.id===e.target.value),first=next?.effects?.[0];setForm(current=>({...current,fx_device_id:e.target.value,fx_effect_id:fxId(first),fx_duration_ms:fxDurationBounds(first).value,fx_intensity:Number(first?.default_intensity??.7),fx_parameters:normalizeFxParameters(first)}))}}><option value="">Select an FX device…</option>{devices.map(item=><option key={item.id} value={item.id}>{item.name}{item.online?" · connected":" · offline"}</option>)}</CyanSelect></Field>
     {!devices.length&&<div style={{padding:12,border:"1px solid var(--border)",borderRadius:8,color:"var(--yellow)",fontSize:11}}>Pair the ExcelProtocol FX plugin in the panel above before creating this trigger.</div>}
     {device&&!device.online&&<div style={{padding:10,border:"1px solid rgba(255,199,0,.3)",borderRadius:7,color:"var(--yellow)",fontSize:11,marginBottom:10}}>This device is offline. The reward stays configured, but redemptions are discarded while OBS is disconnected.</div>}
     {device&&device.online&&!hasFxCapability(device,FX_CAPABILITIES.listEffects)&&<div style={{padding:10,color:"var(--yellow)",fontSize:11}}>This plugin build does not report its effect list.</div>}
@@ -3841,7 +3864,7 @@ function FxTab({ guildId }) {
   // Reset forms only when the selected device's usable metadata changes; the
   // five-second status poll must not erase edits in progress.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(()=>{if(!device)return;const fresh={};for(const effect of effects){const id=fxId(effect),range=fxDurationBounds(effect);fresh[id]={duration_ms:range.value,intensity:Number(effect.default_intensity??.7),queue:false,parameters:Object.fromEntries(fxParams(effect).map(([key,meta])=>[key,meta?.default??(meta?.type==="boolean"?false:meta?.min??0)]))}}setValues(fresh);setSettings(data?.desired_settings?.settings||device.status?.settings||{enabled:true,desktop_enabled:true,stream_enabled:true,overall_intensity:1,max_simultaneous:2,effects:{},chaos:{min_effects:1,max_effects:3,duration_ms:8000,combined_intensity:1}})},[selectedId,device?.online,effects.length,data?.desired_settings?.revision]);
+  useEffect(()=>{if(!device)return;const fresh={};for(const effect of effects){const id=fxId(effect),range=fxDurationBounds(effect);fresh[id]={duration_ms:range.value,intensity:Number(effect.default_intensity??.7),queue:false,parameters:normalizeFxParameters(effect)}}setValues(fresh);setSettings(data?.desired_settings?.settings||device.status?.settings||{enabled:true,desktop_enabled:true,stream_enabled:true,overall_intensity:1,max_simultaneous:2,effects:{},chaos:{min_effects:1,max_effects:3,duration_ms:8000,combined_intensity:1}})},[selectedId,device?.online,effects.length,data?.desired_settings?.revision]);
   const createPair=async()=>{setBusy("pair");try{setPairing(await apiFetch(`/api/guild/${guildId}/fx/pairing-codes`,{method:"POST",body:JSON.stringify({device_name:pairName})}))}catch(e){setNotice({bad:true,text:e.message})}finally{setBusy("")}};
   const send=async(command,key)=>{setBusy(key);setNotice({text:"Waiting for the OBS plugin to acknowledge…"});try{const result=await apiFetch(`/api/guild/${guildId}/fx/commands`,{method:"POST",body:JSON.stringify({device_id:selectedId,...command})}),response=result.response;setNotice({bad:!response.ok,text:response.ok?`OBS acknowledged: ${response.status}`:`Plugin rejected the command: ${response.status}${response.error?` — ${response.error}`:""}`});await load(true)}catch(e){setNotice({bad:true,text:e.message})}finally{setBusy("")}};
   const rename=async()=>{const name=prompt("Device name",device?.name||"");if(!name)return;try{await apiFetch(`/api/guild/${guildId}/fx/devices/${selectedId}`,{method:"PATCH",body:JSON.stringify({name})});await load()}catch(e){setNotice({bad:true,text:e.message})}};

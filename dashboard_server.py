@@ -3584,6 +3584,60 @@ def _public_reward_trigger(row: dict) -> dict:
     return result
 
 
+def _public_twitch_reward(reward: dict, manageable_ids: set[str]) -> dict:
+    cooldown = reward.get("global_cooldown_setting") or {}
+    return {
+        "id": reward["id"],
+        "title": reward["title"],
+        "cost": reward["cost"],
+        "is_enabled": bool(reward.get("is_enabled", True)),
+        "background_color": reward.get("background_color", "#9146FF"),
+        "manageable": reward["id"] in manageable_ids,
+        "is_global_cooldown_enabled": bool(cooldown.get("is_enabled", False)),
+        "global_cooldown_seconds": int(cooldown.get("global_cooldown_seconds") or 0),
+        "cooldown_expires_at": reward.get("cooldown_expires_at"),
+    }
+
+
+def _twitch_reward_payload(body: dict, *, creating: bool) -> dict:
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(reason="Reward settings must be an object")
+    result = {}
+    if creating or "title" in body:
+        title = body.get("title")
+        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 45:
+            raise web.HTTPBadRequest(reason="Reward title must be 1 through 45 characters")
+        result["title"] = title.strip()
+    if creating or "cost" in body:
+        cost = body.get("cost")
+        if type(cost) is not int or cost < 1:
+            raise web.HTTPBadRequest(reason="Reward cost must be a positive integer")
+        result["cost"] = cost
+    if "is_enabled" in body:
+        if type(body["is_enabled"]) is not bool:
+            raise web.HTTPBadRequest(reason="is_enabled must be a boolean")
+        result["is_enabled"] = body["is_enabled"]
+    elif creating:
+        result["is_enabled"] = True
+
+    cooldown_key = "is_global_cooldown_enabled"
+    if cooldown_key in body:
+        enabled = body[cooldown_key]
+        if type(enabled) is not bool:
+            raise web.HTTPBadRequest(reason=f"{cooldown_key} must be a boolean")
+        result[cooldown_key] = enabled
+        if enabled:
+            seconds = body.get("global_cooldown_seconds")
+            if type(seconds) is not int or not 60 <= seconds <= 604800:
+                raise web.HTTPBadRequest(reason="Twitch cooldown must be from 1 minute through 7 days")
+            result["global_cooldown_seconds"] = seconds
+    elif "global_cooldown_seconds" in body:
+        raise web.HTTPBadRequest(reason=f"{cooldown_key} is required with global_cooldown_seconds")
+    elif creating:
+        result[cooldown_key] = False
+    return result
+
+
 async def get_broadcaster_info(request):
     """Return connection status and channel rewards for a guild."""
     guild_id = request.match_info["guild_id"]
@@ -3621,10 +3675,7 @@ async def get_broadcaster_info(request):
             if mgmt_resp.status == 200:
                 mgmt_data = await mgmt_resp.json()
                 manageable_ids = {r["id"] for r in mgmt_data.get("data", [])}
-            rewards = [{"id": r["id"], "title": r["title"], "cost": r["cost"],
-                        "is_enabled": r["is_enabled"], "background_color": r.get("background_color", "#9146FF"),
-                        "manageable": r["id"] in manageable_ids}
-                       for r in data.get("data", [])]
+            rewards = [_public_twitch_reward(r, manageable_ids) for r in data.get("data", [])]
         elif resp.status == 401:
             return web.json_response({"connected": False, "expired": True})
         elif resp.status == 403:
@@ -3757,6 +3808,7 @@ async def create_reward(request):
     """Create a new channel point reward on Twitch."""
     guild_id = request.match_info["guild_id"]
     body = await request.json()
+    payload = _twitch_reward_payload(body, creating=True)
     rows = await db_fetch("SELECT access_token, twitch_user_id FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
     if not rows:
         raise web.HTTPUnauthorized(reason="No Twitch account connected")
@@ -3767,29 +3819,27 @@ async def create_reward(request):
         f"{TWITCH_API}/channel_points/custom_rewards",
         headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
         params={"broadcaster_id": broadcaster_id},
-        json={"title": body.get("title", "New Reward"), "cost": int(body.get("cost", 100)),
-              "is_enabled": body.get("is_enabled", True)}
+        json=payload,
     )
     data = await resp.json()
     if resp.status not in (200, 201):
         raise web.HTTPBadRequest(reason=data.get("message", "Failed to create reward"))
     reward = data["data"][0]
-    return web.json_response({"ok": True, "reward": {"id": reward["id"], "title": reward["title"], "cost": reward["cost"]}})
+    return web.json_response({"ok": True, "reward": _public_twitch_reward(reward, {reward["id"]})})
 
 async def edit_reward(request):
     """Edit an existing channel point reward on Twitch."""
     guild_id  = request.match_info["guild_id"]
     reward_id = request.match_info["reward_id"]
     body = await request.json()
+    patch = _twitch_reward_payload(body, creating=False)
+    if not patch:
+        raise web.HTTPBadRequest(reason="No reward settings were provided")
     rows = await db_fetch("SELECT access_token, twitch_user_id FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
     if not rows:
         raise web.HTTPUnauthorized(reason="No Twitch account connected")
     access_token   = rows[0]["access_token"]
     broadcaster_id = rows[0]["twitch_user_id"]
-    patch = {}
-    if "title"      in body: patch["title"]      = body["title"]
-    if "cost"       in body: patch["cost"]        = int(body["cost"])
-    if "is_enabled" in body: patch["is_enabled"]  = body["is_enabled"]
     sess = get_http_session()
     resp = await sess.patch(
         f"{TWITCH_API}/channel_points/custom_rewards",

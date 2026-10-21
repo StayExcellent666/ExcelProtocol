@@ -49,7 +49,9 @@ class TestFxSecurityPrimitives:
             "type": "trigger_effect", "event_id": "event-1", "effect": "ink_splatter",
             "duration_ms": 8000, "intensity": 0.7,
         }
-        assert validate_command({**base, "parameters": {"splatters": 5, "drips": True, "opacity": 1}})["queue"] is False
+        result = validate_command({**base, "parameters": {"splatters": 12, "drips": True, "opacity": 1, "size": 1.5}})
+        assert result["queue"] is False
+        assert result["parameters"] == {"splatters": 12, "drips": True, "opacity": 1, "size": 1.5}
         with pytest.raises(FxValidationError, match="Unknown field"):
             validate_command({**base, "url": "https://example.test"})
         with pytest.raises(FxValidationError, match="Unknown field"):
