@@ -717,9 +717,15 @@ class Database:
                 twitch_login   TEXT NOT NULL,
                 access_token   TEXT NOT NULL,
                 refresh_token  TEXT NOT NULL,
-                expires_at     TEXT NOT NULL
+                expires_at     TEXT NOT NULL,
+                scopes_json    TEXT NOT NULL DEFAULT '[]'
             )
         ''')
+        cursor.execute('SELECT COUNT(*) FROM pragma_table_info("broadcaster_tokens") WHERE name="scopes_json"')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("ALTER TABLE broadcaster_tokens ADD COLUMN scopes_json TEXT NOT NULL DEFAULT '[]'")
+            conn.commit()
+            logger.info("Migration: added scopes_json to broadcaster_tokens")
 
         # Reward triggers link a Twitch reward to either the existing OBS media
         # overlay or a paired ExcelProtocol FX device.
@@ -3289,19 +3295,22 @@ class Database:
     # ── Broadcaster tokens ──────────────────────────────────────────────────────
 
     def set_broadcaster_token(self, guild_id: int, twitch_user_id: str, twitch_login: str,
-                               access_token: str, refresh_token: str, expires_at: str):
+                               access_token: str, refresh_token: str, expires_at: str,
+                               scopes=None):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO broadcaster_tokens (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO broadcaster_tokens (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at, scopes_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id) DO UPDATE SET
                 twitch_user_id = excluded.twitch_user_id,
                 twitch_login   = excluded.twitch_login,
                 access_token   = excluded.access_token,
                 refresh_token  = excluded.refresh_token,
-                expires_at     = excluded.expires_at
-        """, (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at))
+                expires_at     = excluded.expires_at,
+                scopes_json    = CASE WHEN ? IS NULL THEN broadcaster_tokens.scopes_json ELSE excluded.scopes_json END
+        """, (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at,
+              json.dumps(sorted(scopes or [])), None if scopes is None else 1))
         conn.commit()
         conn.close()
 
@@ -3314,7 +3323,8 @@ class Database:
         if not row:
             return None
         return {"guild_id": row[0], "twitch_user_id": row[1], "twitch_login": row[2],
-                "access_token": row[3], "refresh_token": row[4], "expires_at": row[5]}
+                "access_token": row[3], "refresh_token": row[4], "expires_at": row[5],
+                "scopes": json.loads(row[6] or "[]") if len(row) > 6 else []}
 
     def get_all_broadcaster_tokens(self) -> List[Dict]:
         conn = self.get_connection()
@@ -3323,7 +3333,8 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [{"guild_id": r[0], "twitch_user_id": r[1], "twitch_login": r[2],
-                 "access_token": r[3], "refresh_token": r[4], "expires_at": r[5]} for r in rows]
+                 "access_token": r[3], "refresh_token": r[4], "expires_at": r[5],
+                 "scopes": json.loads(r[6] or "[]") if len(r) > 6 else []} for r in rows]
 
     def delete_broadcaster_token(self, guild_id: int):
         conn = self.get_connection()

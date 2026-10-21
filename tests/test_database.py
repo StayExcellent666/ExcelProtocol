@@ -326,6 +326,7 @@ class TestSchema:
         first.set_broadcaster_token(
             123, "twitch-42", "stayexcellent666",
             "access-token", "refresh-token", "2099-01-01T00:00:00+00:00",
+            ["channel:bot", "channel:read:redemptions"],
         )
 
         restarted = Database(db_path=tmp_db_path)
@@ -334,6 +335,7 @@ class TestSchema:
         assert linked["twitch_user_id"] == "twitch-42"
         assert linked["twitch_login"] == "stayexcellent666"
         assert linked["refresh_token"] == "refresh-token"
+        assert linked["scopes"] == ["channel:bot", "channel:read:redemptions"]
 
     def test_fortuna_redemption_id_is_deduplicated(self, db):
         import sqlite3

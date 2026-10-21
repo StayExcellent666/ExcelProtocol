@@ -32,7 +32,7 @@
             "obs_version": {"type": "string", "maxLength": 64},
             "capabilities": {
               "type": "array", "maxItems": 32, "uniqueItems": true,
-              "items": {"enum": ["commands.v1", "effects.list.v1", "effects.status.v1", "settings.apply.v1", "chaos.trigger.v1"]}
+              "items": {"enum": ["commands.v1", "effects.list.v1", "effects.status.v1", "settings.apply.v1", "chaos.trigger.v1", "raid_battle.v1"]}
             }
           },
           "required": ["protocol", "protocol_version", "type", "device_id", "plugin_version", "obs_version", "capabilities"]
@@ -66,7 +66,8 @@
             "properties": {
               "splatters": {"type": "integer", "minimum": 1, "maximum": 12},
               "drips": {"type": "boolean"},
-              "opacity": {"type": "number", "minimum": 0.1, "maximum": 1.0}
+              "opacity": {"type": "number", "minimum": 0.1, "maximum": 1.0},
+              "size": {"type": "number", "minimum": 0.5, "maximum": 1.5}
             }
           }}}
         },
@@ -86,7 +87,7 @@
     "eventOnly": {
       "type": "object", "additionalProperties": false,
       "properties": {"type": {"enum": ["trigger_random", "clear_effects"]}, "event_id": {"$ref": "#/$defs/eventId"}},
-      "required": ["type", "event_id", "duration_ms", "intensity"]
+      "required": ["type", "event_id"]
     },
     "cancelEffect": {
       "type": "object", "additionalProperties": false,
@@ -95,7 +96,7 @@
     },
     "readCommand": {
       "type": "object", "additionalProperties": false,
-      "properties": {"type": {"enum": ["get_active_effects", "list_effects", "get_status"]}},
+      "properties": {"type": {"enum": ["get_active_effects", "list_effects", "get_status", "get_raid_status"]}},
       "required": ["type"]
     },
     "applySettings": {
@@ -133,7 +134,33 @@
       },
       "required": ["type", "event_id"]
     },
-    "command": {"oneOf": [{"$ref": "#/$defs/triggerEffect"}, {"$ref": "#/$defs/eventOnly"}, {"$ref": "#/$defs/cancelEffect"}, {"$ref": "#/$defs/readCommand"}, {"$ref": "#/$defs/applySettings"}, {"$ref": "#/$defs/triggerChaos"}]},
+    "raidStart": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "type": {"const": "raid_start"}, "event_id": {"$ref": "#/$defs/eventId"},
+        "viewers": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      },
+      "required": ["type", "event_id", "viewers"]
+    },
+    "raidChat": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "type": {"const": "raid_chat"}, "event_id": {"$ref": "#/$defs/eventId"},
+        "username": {"type": "string", "minLength": 1, "maxLength": 32},
+        "role": {"enum": ["mod", "vip", "sub", "subscriber", "default", "viewer"]},
+        "message": {"type": "string", "minLength": 1, "maxLength": 500}
+      },
+      "required": ["type", "event_id", "username", "role", "message"]
+    },
+    "raidEnd": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "type": {"const": "raid_end"}, "event_id": {"$ref": "#/$defs/eventId"},
+        "victory": {"type": "boolean"}
+      },
+      "required": ["type", "event_id", "victory"]
+    },
+    "command": {"oneOf": [{"$ref": "#/$defs/triggerEffect"}, {"$ref": "#/$defs/eventOnly"}, {"$ref": "#/$defs/cancelEffect"}, {"$ref": "#/$defs/readCommand"}, {"$ref": "#/$defs/applySettings"}, {"$ref": "#/$defs/triggerChaos"}, {"$ref": "#/$defs/raidStart"}, {"$ref": "#/$defs/raidChat"}, {"$ref": "#/$defs/raidEnd"}]},
     "commandEnvelope": {
       "type": "object", "additionalProperties": false,
       "properties": {
@@ -147,10 +174,11 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "ok": {"type": "boolean"},
-        "status": {"enum": ["triggered", "queued", "cleared", "cancelled", "cooldown", "busy", "conflict", "intensity_limit", "effect_disabled", "disabled", "duplicate_event", "invalid_event_id", "invalid_effect", "invalid_duration", "invalid_intensity", "invalid_parameters", "invalid_parameter", "unknown_effect", "no_available_effect", "unknown_command", "ok", "error"]},
+        "status": {"enum": ["triggered", "queued", "cleared", "cancelled", "cooldown", "busy", "conflict", "intensity_limit", "effect_disabled", "disabled", "duplicate_event", "invalid_event_id", "invalid_effect", "invalid_duration", "invalid_intensity", "invalid_parameters", "invalid_parameter", "unknown_effect", "no_available_effect", "unknown_command", "ok", "error", "raid_status", "raid_started", "raid_active", "invalid_raid_viewers", "invalid_raid_chat", "attack_queued", "attack_blocked", "roadblock_cleared", "invalid_raid_result", "no_active_raid", "raid_still_active", "raid_victory", "raid_failed"]},
         "event_id": {"$ref": "#/$defs/eventId"}, "error": {"type": "string", "maxLength": 1024},
         "effects": {"type": "array"}, "active_effects": {"type": "array"}, "settings": {"type": "object"},
-        "queue_size": {"type": "integer", "minimum": 0, "maximum": 16}, "enabled": {"type": "boolean"}
+        "queue_size": {"type": "integer", "minimum": 0, "maximum": 16}, "enabled": {"type": "boolean"},
+        "raid": {"type": "object"}
       },
       "required": ["ok", "status"]
     },

@@ -35,9 +35,10 @@ EFFECT_IDS = frozenset({
     "corruption", "darkness", "creepy_eyes", "fog", "mouse_invasion",
     "jumpscare_lite",
 })
-READ_COMMANDS = frozenset({"get_active_effects", "list_effects", "get_status"})
+READ_COMMANDS = frozenset({"get_active_effects", "list_effects", "get_status", "get_raid_status"})
 MUTATION_COMMANDS = frozenset({
     "trigger_effect", "trigger_random", "clear_effects", "cancel_effect",
+    "raid_start", "raid_chat", "raid_end",
 })
 FUTURE_COMMAND_CAPABILITIES = {
     "apply_settings": "settings.apply.v1",
@@ -49,7 +50,11 @@ RESPONSE_STATUSES = frozenset({
     "duplicate_event", "invalid_event_id", "invalid_effect",
     "invalid_duration", "invalid_intensity", "invalid_parameters",
     "invalid_parameter", "unknown_effect", "no_available_effect",
-    "unknown_command", "ok", "error",
+    "unknown_command", "ok", "error", "raid_status", "raid_started",
+    "raid_active", "invalid_raid_viewers", "invalid_raid_chat",
+    "attack_queued", "attack_blocked", "roadblock_cleared",
+    "invalid_raid_result", "no_active_raid", "raid_still_active",
+    "raid_victory", "raid_failed",
 })
 
 
@@ -186,6 +191,16 @@ def validate_command(command: Any, effects: list[dict] | None = None) -> dict:
             {"type", "event_id", "duration_ms", "intensity"},
             {"type", "event_id", "duration_ms", "intensity"},
         )
+    elif command_type == "raid_start":
+        _require_exact_keys(command, {"type", "event_id", "viewers"}, {"type", "event_id", "viewers"})
+    elif command_type == "raid_chat":
+        _require_exact_keys(
+            command,
+            {"type", "event_id", "username", "role", "message"},
+            {"type", "event_id", "username", "role", "message"},
+        )
+    elif command_type == "raid_end":
+        _require_exact_keys(command, {"type", "event_id", "victory"}, {"type", "event_id", "victory"})
     else:
         _require_exact_keys(command, {"type", "event_id"}, {"type", "event_id"})
 
@@ -194,6 +209,26 @@ def validate_command(command: Any, effects: list[dict] | None = None) -> dict:
         raise FxValidationError("event_id is required and must be at most 128 characters")
 
     result = {"type": command_type, "event_id": event_id}
+    if command_type == "raid_start":
+        viewers = command["viewers"]
+        if type(viewers) is not int or not 1 <= viewers <= 1_000_000:
+            raise FxValidationError("viewers must be an integer from 1 through 1000000")
+        result["viewers"] = viewers
+    elif command_type == "raid_chat":
+        username = command["username"]
+        role = command["role"]
+        message = command["message"]
+        if not isinstance(username, str) or not 1 <= len(username) <= 32 or any(ord(ch) < 32 for ch in username):
+            raise FxValidationError("username must be 1-32 printable characters")
+        if role not in {"mod", "vip", "sub", "subscriber", "default", "viewer"}:
+            raise FxValidationError("role is invalid")
+        if not isinstance(message, str) or not 1 <= len(message) <= 500:
+            raise FxValidationError("message must be 1-500 characters")
+        result.update({"username": username, "role": role, "message": message})
+    elif command_type == "raid_end":
+        if type(command["victory"]) is not bool:
+            raise FxValidationError("victory must be a boolean")
+        result["victory"] = command["victory"]
     if "effect" in command:
         effect = command["effect"]
         if effect not in EFFECT_IDS:
@@ -302,11 +337,18 @@ def validate_settings(value: Any) -> dict:
 def validate_plugin_response(value: Any) -> dict:
     if not isinstance(value, dict) or type(value.get("ok")) is not bool:
         raise FxValidationError("response must contain a boolean ok field")
+    value = dict(value)
+    if "status" not in value and isinstance(value.get("raid"), dict):
+        value["status"] = "raid_status"
     if not isinstance(value.get("status"), str) or value["status"] not in RESPONSE_STATUSES:
         raise FxValidationError("response status is invalid")
     # The plugin owns response metadata. Limit its shape and total size while
     # retaining list/status fields needed by the dashboard.
-    allowed = {"ok", "status", "event_id", "error", "effects", "active_effects", "settings", "queue_size", "enabled"}
+    allowed = {
+        "ok", "status", "event_id", "error", "effects", "active_effects", "active",
+        "settings", "queue_size", "enabled", "active_count", "queued_count",
+        "desktop", "stream", "source_count", "raid",
+    }
     _require_exact_keys(value, allowed, {"ok", "status"})
     if len(json.dumps(value, separators=(",", ":")).encode("utf-8")) > MAX_MESSAGE_BYTES:
         raise FxValidationError("response is too large")
@@ -316,6 +358,8 @@ def validate_plugin_response(value: Any) -> dict:
         raise FxValidationError("effects must be an array")
     if "active_effects" in value and not isinstance(value["active_effects"], list):
         raise FxValidationError("active_effects must be an array")
+    if "active" in value and not isinstance(value["active"], list):
+        raise FxValidationError("active must be an array")
     if "error" in value and (not isinstance(value["error"], str) or len(value["error"]) > 1024):
         raise FxValidationError("error detail is invalid")
     if "queue_size" in value and (type(value["queue_size"]) is not int or not 0 <= value["queue_size"] <= MAX_QUEUE_SIZE):
@@ -335,6 +379,21 @@ def validate_plugin_response(value: Any) -> dict:
             raise FxValidationError("active effect event_id is invalid")
     if "settings" in value:
         validate_settings(value["settings"])
+    if "raid" in value:
+        raid = value["raid"]
+        if not isinstance(raid, dict):
+            raise FxValidationError("raid must be an object")
+        allowed_raid = {
+            "phase", "viewers", "hp", "max_hp", "remaining_ms", "roadblock",
+            "ice_active", "firewall_active", "warrior_count",
+            "represented_viewers_per_warrior", "enemy_count", "enemies_defeated",
+            "victory", "interaction_count", "test_mode", "leaderboard",
+        }
+        _require_exact_keys(raid, allowed_raid)
+        if raid.get("phase") not in {"idle", "fighting", "results"}:
+            raise FxValidationError("raid phase is invalid")
+        if not isinstance(raid.get("leaderboard", []), list) or len(raid.get("leaderboard", [])) > 5:
+            raise FxValidationError("raid leaderboard is invalid")
     return value
 
 
@@ -423,8 +482,12 @@ class FxConnectionRegistry:
             "list_effects": "effects.list.v1",
             "get_status": "effects.status.v1",
             "get_active_effects": "effects.status.v1",
+            "get_raid_status": "raid_battle.v1",
+            "raid_start": "raid_battle.v1",
+            "raid_chat": "raid_battle.v1",
+            "raid_end": "raid_battle.v1",
         }.get(command.get("type"))
-        if command.get("type") in MUTATION_COMMANDS:
+        if command.get("type") in MUTATION_COMMANDS and not command.get("type", "").startswith("raid_"):
             required_capability = "commands.v1"
         if required_capability and required_capability not in session.capabilities:
             raise FxUnsupportedError(f"Device does not report {required_capability}")
@@ -472,8 +535,10 @@ class FxConnectionRegistry:
         if session:
             if pending.command_type == "list_effects" and isinstance(parsed.get("effects"), list):
                 session.effects = parsed["effects"]
-            elif pending.command_type == "get_active_effects" and isinstance(parsed.get("active_effects"), list):
-                session.active_effects = parsed["active_effects"]
+            elif pending.command_type == "get_active_effects":
+                active = parsed.get("active_effects", parsed.get("active"))
+                if isinstance(active, list):
+                    session.active_effects = active
             elif pending.command_type == "get_status":
                 session.status = {key: val for key, val in parsed.items() if key not in {"effects", "active_effects"}}
         if not pending.future.done():

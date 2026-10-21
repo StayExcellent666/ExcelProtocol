@@ -289,6 +289,64 @@ class TestFxPairingAndIsolation:
         assert finished == [(42, "triggered")]
 
 
+class TestFxRaidBattleIntegration:
+    def test_role_precedence_matches_twitch_badges(self):
+        base = {"chatter_user_id": "viewer", "broadcaster_user_id": "channel"}
+        assert dashboard_server._fx_chat_role({**base, "badges": []}) == "default"
+        assert dashboard_server._fx_chat_role({**base, "badges": [{"set_id": "subscriber"}]}) == "sub"
+        assert dashboard_server._fx_chat_role({**base, "badges": [{"set_id": "subscriber"}, {"set_id": "vip"}]}) == "vip"
+        assert dashboard_server._fx_chat_role({**base, "badges": [{"set_id": "vip"}, {"set_id": "moderator"}]}) == "mod"
+        assert dashboard_server._fx_chat_role({**base, "chatter_user_id": "channel"}) == "mod"
+
+    def test_chat_readiness_requires_both_cloud_bot_grants(self, monkeypatch):
+        monkeypatch.setattr(dashboard_server, "_bot_ref", SimpleNamespace(
+            _twitch_bot_scopes={"user:read:chat", "user:bot"},
+        ))
+        ready, reason = dashboard_server._fx_raid_chat_ready({"scopes_json": '["channel:bot"]'})
+        assert ready and reason is None
+        ready, reason = dashboard_server._fx_raid_chat_ready({"scopes_json": "[]"})
+        assert not ready and "channel:bot" in reason
+
+    @pytest.mark.asyncio
+    async def test_chat_is_not_forwarded_without_active_fight(self, monkeypatch):
+        sent = []
+
+        async def fetch(_query, _params=()):
+            return [{"guild_id": "guild-a"}]
+
+        async def send(*args):
+            sent.append(args)
+
+        monkeypatch.setattr(dashboard_server, "db_fetch", fetch)
+        monkeypatch.setattr(dashboard_server.FX_REGISTRY, "send_command", send)
+        monkeypatch.setattr(dashboard_server, "_bot_ref", SimpleNamespace(_twitch_bot_user_id="bot"))
+        dashboard_server._fx_raid_sessions.clear()
+        await dashboard_server._fx_handle_raid_chat({
+            "broadcaster_user_id": "channel", "message_id": "message-1",
+            "chatter_user_id": "viewer", "chatter_user_name": "Viewer",
+            "message": {"text": "hello"}, "badges": [],
+        })
+        assert sent == []
+
+    def test_eventsub_registration_and_callback_cover_raids_and_chat(self):
+        register = inspect.getsource(dashboard_server._register_eventsub)
+        callback = inspect.getsource(dashboard_server.eventsub_callback)
+        assert '"channel.raid"' in register
+        assert '"to_broadcaster_user_id"' in register
+        assert '"channel.chat.message"' in register
+        assert '"user_id": bot_user_id' in register
+        assert "_fx_handle_twitch_raid" in callback
+        assert "_fx_handle_raid_chat" in callback
+
+    def test_fx_page_is_a_real_menu_item_with_installer_and_live_test(self):
+        source = (Path(__file__).parent.parent / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+        assert 'id:"fx"' in source
+        assert 'activeTab==="fx"' in source
+        assert "Download Installer" in source
+        assert "Start Live Test" in source
+        assert '`/api/guild/${guildId}/fx/raid`' in source
+
+
 class TestWelcomePreview:
     @pytest.mark.asyncio
     async def test_renders_png_for_accessible_guild(self, monkeypatch):

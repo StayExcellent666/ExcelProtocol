@@ -82,6 +82,10 @@ FX_CREDENTIAL_PEPPER = _fx_configured_pepper or (
 FX_WSS_BASE_URL = os.getenv("FX_WSS_BASE_URL", "wss://excelprotocol.fly.dev").rstrip("/")
 if not FX_WSS_BASE_URL.startswith("wss://"):
     raise RuntimeError("FX_WSS_BASE_URL must use wss://")
+FX_INSTALLER_URL = os.getenv(
+    "FX_INSTALLER_URL",
+    "https://github.com/StayExcellent666/ExcelProtocol-FX/releases/download/v1.1.0-beta.8/ExcelProtocol-FX-1.1.0-beta.8-windows-x64-setup.exe",
+)
 
 # Stable for one deployed source revision. OBS overlays compare this value
 # after reconnecting so a plain process restart keeps the active player alive,
@@ -250,6 +254,9 @@ async def push_skip_to_overlay(twitch_channel: str):
 
 # EventSub message dedup: {message_id: received_at} — Twitch recommends deduping by message ID
 _eventsub_seen: dict = {}
+_fx_raid_sessions: dict[str, dict] = {}
+_fx_raid_tasks: dict[str, asyncio.Task] = {}
+_fx_stream_cache: dict[str, tuple[float, dict]] = {}
 
 # Bot reference — set by create_dashboard_app() so we can reload views
 _bot_ref = None
@@ -2681,7 +2688,7 @@ async def twitch_broadcaster_login(request):
         "client_id":    TWITCH_CLIENT_ID,
         "redirect_uri": TWITCH_REDIRECT_URI,
         "response_type": "code",
-        "scope":        "channel:read:redemptions channel:manage:redemptions moderator:manage:chat_messages user:write:chat clips:edit",
+        "scope":        "channel:read:redemptions channel:manage:redemptions moderator:manage:chat_messages user:write:chat clips:edit channel:bot",
         "state":        state,
         "force_verify": "true",
     })
@@ -2712,7 +2719,7 @@ async def twitch_bot_login(request):
         "response_type": "code",
         # Keep the IRC scopes while command intake remains on TwitchIO, and
         # add the grants required for badged messages and shoutout banners.
-        "scope": "chat:read chat:edit user:write:chat user:bot moderator:manage:announcements moderator:read:chatters",
+        "scope": "chat:read chat:edit user:read:chat user:write:chat user:bot moderator:manage:announcements moderator:read:chatters",
         "state": state,
         "force_verify": "true",
     })
@@ -2792,7 +2799,8 @@ async def twitch_broadcaster_callback(request):
     if _bot_ref:
         import asyncio as _asyncio
         await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_broadcaster_token(
-            int(guild_id), user["id"], user["login"], access_token, refresh_token, expires_at
+            int(guild_id), user["id"], user["login"], access_token, refresh_token, expires_at,
+            token_data.get("scope") or []
         ))
         # The authenticated broadcaster is the canonical Twitch account for
         # chat commands, rewards, and Fortuna on this Discord server.
@@ -2811,8 +2819,9 @@ async def twitch_broadcaster_callback(request):
                 logger.warning(f"OAuth: chat bot failed to join {twitch_login}: {e}")
     else:
         await db_execute(
-            "INSERT INTO broadcaster_tokens (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET twitch_user_id=excluded.twitch_user_id, twitch_login=excluded.twitch_login, access_token=excluded.access_token, refresh_token=excluded.refresh_token, expires_at=excluded.expires_at",
-            (guild_id, user["id"], user["login"], access_token, refresh_token, expires_at)
+            "INSERT INTO broadcaster_tokens (guild_id, twitch_user_id, twitch_login, access_token, refresh_token, expires_at, scopes_json) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET twitch_user_id=excluded.twitch_user_id, twitch_login=excluded.twitch_login, access_token=excluded.access_token, refresh_token=excluded.refresh_token, expires_at=excluded.expires_at, scopes_json=excluded.scopes_json",
+            (guild_id, user["id"], user["login"], access_token, refresh_token, expires_at,
+             json.dumps(sorted(token_data.get("scope") or [])))
         )
         await db_execute(
             """INSERT INTO twitch_channels (guild_id, twitch_channel)
@@ -2849,7 +2858,7 @@ async def _complete_twitch_bot_oauth(code: str):
     if not access_token or not refresh_token:
         raise web.HTTPBadGateway(reason="Twitch did not return a renewable token pair")
     required_scopes = {
-        "chat:read", "chat:edit", "user:write:chat", "user:bot",
+        "chat:read", "chat:edit", "user:read:chat", "user:write:chat", "user:bot",
         "moderator:manage:announcements", "moderator:read:chatters",
     }
     missing_scopes = sorted(required_scopes - scopes)
@@ -2901,6 +2910,9 @@ async def _complete_twitch_bot_oauth(code: str):
         _bot_ref.twitch_chat_bot.update_user_token(access_token)
         _bot_ref.twitch_chat_bot.reset_helix_delivery(str(user["id"]))
     logger.info("Owner connected Twitch chat bot account @%s and persisted renewable credentials", actual_login)
+    rows = await db_fetch("SELECT twitch_user_id FROM broadcaster_tokens")
+    for row in rows:
+        asyncio.create_task(_register_eventsub(str(row["twitch_user_id"])))
     raise web.HTTPFound("/app/?twitch_bot_connected=1")
 
 async def twitch_broadcaster_disconnect(request):
@@ -2914,10 +2926,15 @@ async def twitch_broadcaster_disconnect(request):
         await db_execute("DELETE FROM broadcaster_tokens WHERE guild_id = ?", (guild_id,))
     await _fortuna_revoke_guild_keys(guild_id)
     await db_execute("DELETE FROM twitch_channels WHERE guild_id = ?", (guild_id,))
+    _fx_raid_sessions.pop(str(guild_id), None)
+    _fx_stream_cache.pop(str(guild_id), None)
+    task = _fx_raid_tasks.pop(str(guild_id), None)
+    if task:
+        task.cancel()
     return web.json_response({"ok": True})
 
 async def _register_eventsub(broadcaster_user_id: str):
-    """Register EventSub subscription for channel point redeems."""
+    """Register the broadcaster's reward, inbound-raid, and FX raid-chat events."""
     callback_url = f"{os.getenv('DASHBOARD_BASE_URL', 'https://excelprotocol.fly.dev')}/api/eventsub/callback"
     secret = os.getenv("EVENTSUB_SECRET")
     if not secret:
@@ -2927,23 +2944,35 @@ async def _register_eventsub(broadcaster_user_id: str):
         sess = get_http_session()
         logger.info(f"Registering EventSub for broadcaster {broadcaster_user_id} with callback {callback_url}")
         app_token = await get_twitch_token()
-        resp = await sess.post(
-            f"{TWITCH_API}/eventsub/subscriptions",
-            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {app_token}", "Content-Type": "application/json"},
-            json={
-                "type": "channel.channel_points_custom_reward_redemption.add",
-                "version": "1",
-                "condition": {"broadcaster_user_id": broadcaster_user_id},
-                "transport": {"method": "webhook", "callback": callback_url, "secret": secret},
-            }
-        )
-        data = await resp.json()
-        if resp.status == 409:
-            logger.info(f"EventSub already subscribed for broadcaster {broadcaster_user_id}")
-        elif resp.status in (200, 202):
-            logger.info(f"EventSub registered for broadcaster {broadcaster_user_id}: {data}")
-        else:
-            logger.warning(f"EventSub registration failed for {broadcaster_user_id}: {resp.status} {data}")
+        subscriptions = [
+            ("channel.channel_points_custom_reward_redemption.add", {"broadcaster_user_id": broadcaster_user_id}),
+            ("channel.raid", {"to_broadcaster_user_id": broadcaster_user_id}),
+        ]
+        bot_user_id = str(getattr(_bot_ref, "_twitch_bot_user_id", "") or "")
+        bot_scopes = set(getattr(_bot_ref, "_twitch_bot_scopes", set()) or set())
+        if bot_user_id and {"user:read:chat", "user:bot"}.issubset(bot_scopes):
+            subscriptions.append(("channel.chat.message", {
+                "broadcaster_user_id": broadcaster_user_id,
+                "user_id": bot_user_id,
+            }))
+        for subscription_type, condition in subscriptions:
+            async with sess.post(
+                f"{TWITCH_API}/eventsub/subscriptions",
+                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {app_token}", "Content-Type": "application/json"},
+                json={
+                    "type": subscription_type,
+                    "version": "1",
+                    "condition": condition,
+                    "transport": {"method": "webhook", "callback": callback_url, "secret": secret},
+                },
+            ) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status == 409:
+                    logger.info("EventSub %s already subscribed for broadcaster %s", subscription_type, broadcaster_user_id)
+                elif resp.status in (200, 202):
+                    logger.info("EventSub %s registered for broadcaster %s", subscription_type, broadcaster_user_id)
+                else:
+                    logger.warning("EventSub %s registration failed for broadcaster %s: HTTP %s", subscription_type, broadcaster_user_id, resp.status)
     except Exception as e:
         logger.error(f"Error registering EventSub for {broadcaster_user_id}: {e}")
 
@@ -3000,6 +3029,15 @@ async def eventsub_callback(request):
             logger.info(f"EventSub stream.offline received for {user_login}")
             if _bot_ref:
                 asyncio.create_task(_bot_ref.handle_stream_offline(user_login))
+
+        elif sub_type == "channel.raid":
+            # Twitch's signed EventSub message ID is the stable mutation key.
+            asyncio.create_task(_fx_handle_twitch_raid(event, msg_id))
+
+        elif sub_type == "channel.chat.message":
+            # Chat text is forwarded only to an active Raid Battle and is
+            # intentionally never written to application logs.
+            asyncio.create_task(_fx_handle_raid_chat(event))
 
         elif sub_type == "channel.channel_points_custom_reward_redemption.add":
             reward_id         = event.get("reward", {}).get("id")
@@ -8577,7 +8615,7 @@ _fx_pair_rate = SlidingWindowRateLimiter()
 _fx_command_rate = SlidingWindowRateLimiter()
 _FX_HELLO_CAPABILITIES = frozenset({
     "commands.v1", "effects.list.v1", "effects.status.v1",
-    "settings.apply.v1", "chaos.trigger.v1",
+    "settings.apply.v1", "chaos.trigger.v1", "raid_battle.v1",
 })
 
 
@@ -8867,6 +8905,300 @@ async def _dispatch_fx_reward(guild_id: str, trigger: dict, redemption_id: str) 
         await _fx_finish_audit(audit_id, "invalid")
 
 
+def _fx_raid_chat_ready(token_row: dict | None) -> tuple[bool, str | None]:
+    try:
+        broadcaster_scopes = set(json.loads((token_row or {}).get("scopes_json") or "[]"))
+    except (TypeError, json.JSONDecodeError):
+        broadcaster_scopes = set()
+    bot_scopes = set(getattr(_bot_ref, "_twitch_bot_scopes", set()) or set())
+    if "channel:bot" not in broadcaster_scopes:
+        return False, "Reconnect the broadcaster's Twitch account once to grant channel:bot."
+    if not {"user:read:chat", "user:bot"}.issubset(bot_scopes):
+        return False, "The bot owner must reconnect the Twitch bot once to grant user:read:chat."
+    return True, None
+
+
+async def _fx_find_raid_device(guild_id: str, preferred_id: str | None = None) -> DeviceSession | None:
+    rows = await db_fetch(
+        "SELECT id FROM fx_devices WHERE guild_id = ? AND revoked_at IS NULL ORDER BY created_at",
+        (guild_id,),
+    )
+    ids = [str(row["id"]) for row in rows]
+    if preferred_id:
+        ids = [preferred_id] if preferred_id in ids else []
+    for device_id in ids:
+        live = FX_REGISTRY.get(device_id)
+        if live and "raid_battle.v1" in live.capabilities and not getattr(live.ws, "closed", False):
+            return live
+    return None
+
+
+async def _fx_stream_status(guild_id: str, *, force: bool = False) -> tuple[dict, dict | None]:
+    now = time.monotonic()
+    cached = _fx_stream_cache.get(guild_id)
+    token_rows = await db_fetch(
+        "SELECT twitch_user_id, twitch_login, access_token, scopes_json FROM broadcaster_tokens WHERE guild_id = ? LIMIT 1",
+        (guild_id,),
+    )
+    token_row = token_rows[0] if token_rows else None
+    if not token_row:
+        return {"connected": False, "live": False, "viewer_count": 0}, None
+    if cached and not force and now - cached[0] < 15:
+        return dict(cached[1]), token_row
+    result = {
+        "connected": True,
+        "login": token_row.get("twitch_login"),
+        "user_id": str(token_row.get("twitch_user_id") or ""),
+        "live": False,
+        "viewer_count": 0,
+    }
+    try:
+        session = get_http_session()
+        async with session.get(
+            f"{TWITCH_API}/streams",
+            params={"user_id": token_row["twitch_user_id"]},
+            headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token_row['access_token']}"},
+        ) as response:
+            payload = await response.json(content_type=None)
+            if response.status != 200:
+                result["error"] = "Twitch stream status is unavailable; reconnect Twitch if this persists."
+            else:
+                stream = (payload.get("data") or [None])[0]
+                if stream:
+                    result.update({"live": True, "viewer_count": max(1, int(stream.get("viewer_count") or 1))})
+    except (http_client.ClientError, asyncio.TimeoutError, TypeError, ValueError):
+        result["error"] = "Twitch stream status is temporarily unavailable."
+    _fx_stream_cache[guild_id] = (now, dict(result))
+    return result, token_row
+
+
+def _fx_raid_public(session: dict | None) -> dict | None:
+    if not session:
+        return None
+    return {
+        key: value for key, value in session.items()
+        if key not in {"started_monotonic"}
+    }
+
+
+async def _fx_raid_poll(guild_id: str) -> None:
+    try:
+        while True:
+            session = _fx_raid_sessions.get(guild_id)
+            if not session or session.get("stale"):
+                return
+            try:
+                response = await FX_REGISTRY.send_command(
+                    session["device_id"], {"type": "get_raid_status"},
+                    timeout_seconds=4, ttl_seconds=5,
+                )
+                raid = response.get("raid") if isinstance(response.get("raid"), dict) else None
+                if raid:
+                    session.update({"raid": raid, "phase": raid.get("phase", "idle"), "error": None})
+                    if raid.get("phase") != "fighting":
+                        session.update({"active": False, "stale": True})
+                        return
+            except FxOfflineError:
+                session["error"] = "The paired OBS device is offline; waiting for it to reconnect."
+            except (FxTimeoutError, FxUnsupportedError, FxValidationError) as exc:
+                session["error"] = str(exc)
+            if time.monotonic() - session["started_monotonic"] >= 180:
+                session.update({"active": False, "stale": True, "error": session.get("error") or "Raid Battle status expired."})
+                return
+            await asyncio.sleep(2)
+    finally:
+        _fx_raid_tasks.pop(guild_id, None)
+
+
+def _fx_start_raid_poll(guild_id: str) -> None:
+    task = _fx_raid_tasks.get(guild_id)
+    if not task or task.done():
+        _fx_raid_tasks[guild_id] = asyncio.create_task(_fx_raid_poll(guild_id))
+
+
+async def _fx_start_raid(guild_id: str, device: DeviceSession, viewers: int,
+                         event_id: str, source: str, user_id: str) -> dict:
+    current = _fx_raid_sessions.get(guild_id)
+    if current and current.get("active") and current.get("phase") == "fighting":
+        raise web.HTTPConflict(reason="A Raid Battle is already active for this server")
+    command = {"type": "raid_start", "event_id": event_id[:128], "viewers": viewers}
+    audit_id = await _fx_reserve_audit(guild_id, device.device_id, user_id, command)
+    if audit_id is None:
+        raise web.HTTPConflict(reason="This raid event was already processed")
+    try:
+        response = await FX_REGISTRY.send_command(device.device_id, command)
+    except FxOfflineError as exc:
+        await _fx_finish_audit(audit_id, "offline")
+        raise web.HTTPConflict(reason=str(exc))
+    except FxUnsupportedError as exc:
+        await _fx_finish_audit(audit_id, "unsupported")
+        raise web.HTTPBadRequest(reason=str(exc))
+    except FxTimeoutError as exc:
+        await _fx_finish_audit(audit_id, "timeout")
+        raise web.HTTPGatewayTimeout(reason=str(exc))
+    status = str(response.get("status") or "error")
+    await _fx_finish_audit(audit_id, status)
+    if response.get("ok") is not True or status != "raid_started":
+        raise web.HTTPConflict(reason=f"Plugin rejected Raid Battle start: {status}")
+    raid = response.get("raid") if isinstance(response.get("raid"), dict) else {}
+    _fx_raid_sessions[guild_id] = {
+        "active": True, "stale": False, "source": source, "event_id": event_id[:128],
+        "device_id": device.device_id, "viewers": viewers, "phase": raid.get("phase", "fighting"),
+        "raid": raid, "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "started_monotonic": time.monotonic(), "error": None,
+    }
+    _fx_start_raid_poll(guild_id)
+    return response
+
+
+async def _fx_handle_twitch_raid(event: dict, eventsub_message_id: str) -> None:
+    broadcaster_id = str(event.get("to_broadcaster_user_id") or "")
+    viewers = event.get("viewers")
+    if not broadcaster_id or type(viewers) is not int or not 1 <= viewers <= 1_000_000:
+        return
+    rows = await db_fetch("SELECT guild_id FROM broadcaster_tokens WHERE twitch_user_id = ?", (broadcaster_id,))
+    for row in rows:
+        guild_id = str(row["guild_id"])
+        device = await _fx_find_raid_device(guild_id)
+        if not device:
+            current = _fx_raid_sessions.get(guild_id)
+            if not current or not current.get("active"):
+                _fx_raid_sessions[guild_id] = {
+                    "active": False, "stale": True, "source": "twitch_raid",
+                    "event_id": f"twitch-raid:{eventsub_message_id}"[:128],
+                    "viewers": viewers, "phase": "idle", "raid": {},
+                    "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "error": "Raid received, but no connected Raid Battle-capable OBS device was available.",
+                }
+            continue
+        try:
+            await _fx_start_raid(
+                guild_id, device, viewers,
+                f"twitch-raid:{eventsub_message_id}", "twitch_raid", "eventsub",
+            )
+        except web.HTTPException as exc:
+            current = _fx_raid_sessions.get(guild_id)
+            if not current or not current.get("active"):
+                _fx_raid_sessions[guild_id] = {
+                    "active": False, "stale": True, "source": "twitch_raid",
+                    "event_id": f"twitch-raid:{eventsub_message_id}"[:128],
+                    "viewers": viewers, "phase": "idle", "raid": {},
+                    "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "error": exc.reason or "Raid Battle could not start.",
+                }
+
+
+def _fx_chat_role(event: dict) -> str:
+    badge_ids = {str(item.get("set_id") or "") for item in (event.get("badges") or []) if isinstance(item, dict)}
+    if event.get("chatter_user_id") == event.get("broadcaster_user_id") or "broadcaster" in badge_ids or "moderator" in badge_ids:
+        return "mod"
+    if "vip" in badge_ids:
+        return "vip"
+    if "subscriber" in badge_ids:
+        return "sub"
+    return "default"
+
+
+async def _fx_handle_raid_chat(event: dict) -> None:
+    broadcaster_id = str(event.get("broadcaster_user_id") or "")
+    message_id = str(event.get("message_id") or "")
+    chatter_id = str(event.get("chatter_user_id") or "")
+    bot_user_id = str(getattr(_bot_ref, "_twitch_bot_user_id", "") or "")
+    text = (event.get("message") or {}).get("text")
+    if not broadcaster_id or not message_id or chatter_id == bot_user_id or not isinstance(text, str) or not text.strip():
+        return
+    username = "".join(ch for ch in str(event.get("chatter_user_name") or event.get("chatter_user_login") or "") if ord(ch) >= 32)[:32]
+    if not username:
+        return
+    rows = await db_fetch("SELECT guild_id FROM broadcaster_tokens WHERE twitch_user_id = ?", (broadcaster_id,))
+    for row in rows:
+        guild_id = str(row["guild_id"])
+        session = _fx_raid_sessions.get(guild_id)
+        if not session or not session.get("active") or session.get("phase") != "fighting":
+            continue
+        if not _fx_command_rate.allow(f"raid-chat:{guild_id}", 600, 60):
+            continue
+        command = {
+            "type": "raid_chat", "event_id": f"twitch-chat:{message_id}"[:128],
+            "username": username, "role": _fx_chat_role(event), "message": text[:500],
+        }
+        audit_id = await _fx_reserve_audit(guild_id, session["device_id"], "eventsub", command)
+        if audit_id is None:
+            continue
+        try:
+            response = await FX_REGISTRY.send_command(session["device_id"], command)
+            status = str(response.get("status") or "error")
+            await _fx_finish_audit(audit_id, status)
+            raid = response.get("raid") if isinstance(response.get("raid"), dict) else None
+            if raid:
+                session.update({"raid": raid, "phase": raid.get("phase", session["phase"])})
+            if status not in {"attack_queued", "attack_blocked", "roadblock_cleared"} and session.get("phase") != "fighting":
+                session.update({"active": False, "stale": True})
+        except FxOfflineError:
+            await _fx_finish_audit(audit_id, "offline")
+        except FxUnsupportedError:
+            await _fx_finish_audit(audit_id, "unsupported")
+        except FxTimeoutError:
+            await _fx_finish_audit(audit_id, "timeout")
+        except FxValidationError:
+            await _fx_finish_audit(audit_id, "invalid")
+
+
+async def get_fx_raid_status(request: web.Request) -> web.Response:
+    guild_id = _fx_require_manager(request)
+    stream, token_row = await _fx_stream_status(guild_id)
+    ready, reason = _fx_raid_chat_ready(token_row)
+    devices = await db_fetch(
+        "SELECT id, name FROM fx_devices WHERE guild_id = ? AND revoked_at IS NULL ORDER BY created_at",
+        (guild_id,),
+    )
+    public_devices = []
+    for row in devices:
+        live = FX_REGISTRY.get(str(row["id"]))
+        public_devices.append({
+            "id": str(row["id"]), "name": row["name"],
+            "online": bool(live and not getattr(live.ws, "closed", False)),
+            "raid_capable": bool(live and "raid_battle.v1" in live.capabilities),
+        })
+    return web.json_response({
+        "installer_url": FX_INSTALLER_URL,
+        "devices": public_devices,
+        "twitch": stream,
+        "chat_ready": ready,
+        "chat_ready_reason": reason,
+        "session": _fx_raid_public(_fx_raid_sessions.get(guild_id)),
+    }, headers={"Cache-Control": "no-store"})
+
+
+async def start_fx_live_raid_test(request: web.Request) -> web.Response:
+    guild_id = _fx_require_manager(request)
+    user_id = str(request["session"].get("user_id") or "system")
+    if not _fx_command_rate.allow(f"raid-test:{guild_id}:{user_id}", 5, 60):
+        raise web.HTTPTooManyRequests(reason="Raid Battle test rate limit reached")
+    body = await _fx_json_body(request)
+    if set(body) != {"device_id"}:
+        raise web.HTTPBadRequest(reason="Exactly one device_id field is required")
+    device = await _fx_find_raid_device(guild_id, str(body["device_id"]))
+    if not device:
+        raise web.HTTPConflict(reason="Select a connected device with Raid Battle support")
+    stream, token_row = await _fx_stream_status(guild_id, force=True)
+    if not stream.get("connected"):
+        raise web.HTTPConflict(reason="Connect the broadcaster's Twitch account first")
+    if stream.get("error"):
+        raise web.HTTPBadGateway(reason=stream["error"])
+    if not stream.get("live"):
+        raise web.HTTPConflict(reason="The connected Twitch channel must be live for a Live Test")
+    ready, reason = _fx_raid_chat_ready(token_row)
+    if not ready:
+        raise web.HTTPConflict(reason=reason)
+    event_id = f"live-raid-test:{uuid.uuid4()}"
+    response = await _fx_start_raid(
+        guild_id, device, min(1_000_000, max(1, int(stream["viewer_count"]))),
+        event_id, "live_test", user_id,
+    )
+    return web.json_response({"acknowledged": True, "response": response, "session": _fx_raid_public(_fx_raid_sessions[guild_id])})
+
+
 async def command_fx_device(request: web.Request) -> web.Response:
     guild_id = _fx_require_manager(request)
     user_id = str(request["session"].get("user_id") or "system")
@@ -9081,6 +9413,13 @@ async def fx_device_ws(request: web.Request) -> web.StreamResponse:
                  capabilities_json = ?, last_seen_at = CURRENT_TIMESTAMP WHERE id = ?""",
             (plugin_version, obs_version, json.dumps(sorted(capabilities)), device_id),
         )
+        if "raid_battle.v1" in capabilities:
+            broadcaster_rows = await db_fetch(
+                "SELECT twitch_user_id FROM broadcaster_tokens WHERE guild_id = ? LIMIT 1",
+                (guild_id,),
+            )
+            if broadcaster_rows:
+                asyncio.create_task(_register_eventsub(str(broadcaster_rows[0]["twitch_user_id"])))
         await ws.send_str(json.dumps({
             "protocol": PROTOCOL, "protocol_version": PROTOCOL_VERSION,
             "type": "welcome", "device_id": device_id,
@@ -9093,7 +9432,7 @@ async def fx_device_ws(request: web.Request) -> web.StreamResponse:
                 if message.type in {web.WSMsgType.ERROR, web.WSMsgType.CLOSE, web.WSMsgType.CLOSED}:
                     break
                 continue
-            if not _fx_command_rate.allow(f"ws-in:{device_id}", 120, 60):
+            if not _fx_command_rate.allow(f"ws-in:{device_id}", 720, 60):
                 await ws.close(code=1008, message=b"Message rate exceeded")
                 break
             try:
@@ -9233,6 +9572,8 @@ def create_dashboard_app(bot=None):
     app.router.add_delete("/api/guild/{guild_id}/fx/devices/{device_id}",     revoke_fx_device)
     app.router.add_post  ("/api/guild/{guild_id}/fx/commands",                command_fx_device)
     app.router.add_put   ("/api/guild/{guild_id}/fx/settings",                save_fx_settings)
+    app.router.add_get   ("/api/guild/{guild_id}/fx/raid",                    get_fx_raid_status)
+    app.router.add_post  ("/api/guild/{guild_id}/fx/raid/live-test",          start_fx_live_raid_test)
 
     app.router.add_get   ("/api/guild/{guild_id}/streamers",              get_streamers)
     app.router.add_post  ("/api/guild/{guild_id}/streamers",              add_streamer)
@@ -9329,6 +9670,11 @@ def create_dashboard_app(bot=None):
 
     async def on_cleanup(app):
         global _http_session
+        for task in list(_fx_raid_tasks.values()):
+            task.cancel()
+        if _fx_raid_tasks:
+            await asyncio.gather(*list(_fx_raid_tasks.values()), return_exceptions=True)
+        _fx_raid_tasks.clear()
         for live in list(FX_REGISTRY.connections.values()):
             await live.ws.close(code=1001, message=b"Server shutdown")
         if _http_session and not _http_session.closed:

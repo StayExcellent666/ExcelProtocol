@@ -82,6 +82,31 @@ class TestFxSecurityPrimitives:
         with pytest.raises(FxValidationError):
             FxConnectionRegistry().receive_response("device", "unknown", {"ok": "not-a-boolean"})
 
+    def test_raid_commands_are_strict_and_preserve_unicode_chat(self):
+        assert validate_command({
+            "type": "raid_start", "event_id": "twitch-raid:1", "viewers": 42,
+        })["viewers"] == 42
+        chat = validate_command({
+            "type": "raid_chat", "event_id": "twitch-chat:1",
+            "username": "Coder", "role": "vip", "message": "ship it 🔥",
+        })
+        assert chat["message"] == "ship it 🔥"
+        with pytest.raises(FxValidationError, match="viewers"):
+            validate_command({"type": "raid_start", "event_id": "x", "viewers": 0})
+        with pytest.raises(FxValidationError, match="role"):
+            validate_command({
+                "type": "raid_chat", "event_id": "x", "username": "Coder",
+                "role": "admin", "message": "hello",
+            })
+
+    def test_raid_status_response_accepts_plugin_read_shape(self):
+        response = validate_plugin_response({
+            "ok": True,
+            "raid": {"phase": "fighting", "leaderboard": []},
+        })
+        assert response["status"] == "raid_status"
+        assert response["raid"]["phase"] == "fighting"
+
     def test_sliding_rate_limit(self):
         limiter = SlidingWindowRateLimiter()
         assert limiter.allow("device", 2, 60, now=10)
@@ -137,5 +162,24 @@ class TestFxConnectionRegistry:
             await registry.register(DeviceSession("a", "guild", FakeWebSocket(), frozenset(), "1", "31"))
             with pytest.raises(FxUnsupportedError):
                 await registry.send_command("a", {"type": "trigger_random", "event_id": "event"})
+        asyncio.run(scenario())
+
+    def test_raid_capability_gates_and_correlates_start(self):
+        async def scenario():
+            registry = FxConnectionRegistry()
+            unsupported = FakeWebSocket()
+            await registry.register(DeviceSession("a", "guild", unsupported, frozenset({"commands.v1"}), "1", "31"))
+            with pytest.raises(FxUnsupportedError, match="raid_battle.v1"):
+                await registry.send_command("a", {"type": "raid_start", "event_id": "raid-1", "viewers": 5})
+
+            ws = FakeWebSocket()
+            await registry.register(DeviceSession("a", "guild", ws, frozenset({"raid_battle.v1"}), "1", "31"))
+            task = asyncio.create_task(registry.send_command("a", {"type": "raid_start", "event_id": "raid-2", "viewers": 5}))
+            await asyncio.sleep(0)
+            request_id = ws.messages[0]["request_id"]
+            assert registry.receive_response("a", request_id, {
+                "ok": True, "status": "raid_started", "raid": {"phase": "fighting", "leaderboard": []},
+            })
+            assert (await task)["status"] == "raid_started"
         asyncio.run(scenario())
 

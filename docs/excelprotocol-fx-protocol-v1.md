@@ -33,6 +33,7 @@ Recognized capabilities are:
 - `effects.status.v1`: `get_status` and `get_active_effects`.
 - `settings.apply.v1`: future persistent `apply_settings` command.
 - `chaos.trigger.v1`: future `trigger_chaos` command.
+- `raid_battle.v1`: Twitch Raid Battle start, chat participation, and status commands.
 
 The server replies with `welcome`, including `heartbeat_seconds` and `max_message_bytes`. Send an application heartbeat about every 30 seconds:
 
@@ -126,4 +127,18 @@ Advertise `chaos.trigger.v1` only after implementing:
 It uses the saved Chaos eligibility and limits. It has the same expiry, acknowledgement, cooldown, conflict, intensity, and deduplication behavior as other mutations.
 
 No protocol version permits arbitrary script execution, filesystem access, shell commands, user-provided URLs, or mouse/keyboard control.
+
+## Twitch Raid Battle
+
+Devices advertising `raid_battle.v1` accept the following strict commands through the same authenticated, expiring envelope:
+
+```json
+{"type":"raid_start","event_id":"twitch-raid:<eventsub-message-id>","viewers":42}
+{"type":"raid_chat","event_id":"twitch-chat:<message-id>","username":"DisplayName","role":"vip","message":"ship it 🔥"}
+{"type":"get_raid_status"}
+```
+
+`viewers` is an integer from 1 through 1,000,000. Usernames and messages are capped at 32 and 500 characters. Chat roles are `mod`, `vip`, `sub`, or `default`; broadcaster/moderator takes precedence over VIP, which takes precedence over subscriber. The bot forwards chat only while server-side state says the battle is fighting, polls one status loop per guild about every two seconds, and treats the state as stale after results or the three-minute battle window.
+
+The dashboard uses Twitch's signed EventSub message ID and chat message ID as mutation deduplication keys. It starts Live Test only while the authorized broadcaster is live and only after the plugin acknowledges `raid_started`. Twitch credentials remain server-side, and neither chat text nor viewer identity is written to application logs.
 

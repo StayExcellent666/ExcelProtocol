@@ -4,6 +4,7 @@ export const FX_CAPABILITIES = Object.freeze({
   status: "effects.status.v1",
   settings: "settings.apply.v1",
   chaos: "chaos.trigger.v1",
+  raidBattle: "raid_battle.v1",
 });
 
 export function hasFxCapability(device, capability) {
