@@ -84,7 +84,7 @@ if not FX_WSS_BASE_URL.startswith("wss://"):
     raise RuntimeError("FX_WSS_BASE_URL must use wss://")
 FX_INSTALLER_URL = os.getenv(
     "FX_INSTALLER_URL",
-    "https://github.com/StayExcellent666/ExcelProtocol-FX/releases/download/v1.1.0-beta.9/ExcelProtocol-FX-1.1.0-beta.9-windows-x64-setup.exe",
+    "https://github.com/StayExcellent666/ExcelProtocol-FX/releases/download/v1.1.0-beta.10/ExcelProtocol-FX-1.1.0-beta.10-windows-x64-setup.exe",
 )
 
 # Stable for one deployed source revision. OBS overlays compare this value
