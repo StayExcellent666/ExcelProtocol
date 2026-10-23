@@ -65,6 +65,17 @@ class TestFxSecurityPrimitives:
         with pytest.raises(FxValidationError, match="1000 through 5000"):
             validate_command(command, effects)
 
+    @pytest.mark.parametrize("effect", ["neon_lightning", "data_storm", "security_lockdown", "gravity_well"])
+    def test_new_effect_ids_are_accepted(self, effect):
+        command = {"type": "trigger_effect", "event_id": f"new-{effect}", "effect": effect, "duration_ms": 5000, "intensity": .7}
+        assert validate_command(command)["effect"] == effect
+
+    @pytest.mark.parametrize("effect", ["screen_cracks", "creepy_eyes"])
+    def test_removed_effect_ids_are_rejected(self, effect):
+        command = {"type": "trigger_effect", "event_id": f"old-{effect}", "effect": effect, "duration_ms": 5000, "intensity": .7}
+        with pytest.raises(FxValidationError, match="Unknown effect"):
+            validate_command(command)
+
     def test_settings_are_strict_and_safe(self):
         assert validate_settings({"enabled": True, "max_simultaneous": 4})["enabled"] is True
         with pytest.raises(FxValidationError):

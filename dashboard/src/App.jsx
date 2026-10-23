@@ -3779,6 +3779,14 @@ function ChannelRewardsTab({ guildId }) {
     } catch(e) { alert("Test failed — is OBS browser source open? " + e.message); }
   };
 
+  const selectedFxDevice = fxData?.devices?.find(device => device.id === triggerForm.fx_device_id);
+  const selectedFxUnavailable = triggerForm.trigger_type === "fx" && (
+    !selectedFxDevice || (
+      (selectedFxDevice.effects?.length || 0) > 0 &&
+      !selectedFxDevice.effects.some(effect => fxId(effect) === triggerForm.fx_effect_id)
+    )
+  );
+
   if (loading) return <div style={{ display:"flex", justifyContent:"center", padding:60 }}><Spinner /></div>;
 
   if (!bcast?.connected) return (
@@ -3895,8 +3903,9 @@ function ChannelRewardsTab({ guildId }) {
           <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
             {bcast.rewards.map(reward => {
               const trigger = bcast.triggers?.find(t => t.reward_id === reward.id);
+              const fxAvailability = fxTriggerAvailability(trigger, fxData);
               return (
-                <div key={reward.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 14px", borderRadius:8, background:"rgba(8,11,15,0.6)", border:"1px solid var(--border)" }}>
+                <div key={reward.id} style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 14px", borderRadius:8, background:fxAvailability.unavailable?"rgba(255,199,0,.055)":"rgba(8,11,15,0.6)", border:`1px solid ${fxAvailability.unavailable?"rgba(255,199,0,.48)":"var(--border)"}` }}>
                   <div style={{ width:14, height:14, borderRadius:"50%", background:reward.background_color, flexShrink:0, boxShadow:`0 0 6px ${reward.background_color}88` }} />
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:2 }}>
@@ -3913,14 +3922,15 @@ function ChannelRewardsTab({ guildId }) {
                         <span style={{ fontSize:11, color:"var(--cyan)", fontFamily:"'JetBrains Mono',monospace", background:"rgba(0,245,212,0.08)", padding:"1px 6px", borderRadius:4, border:"1px solid rgba(0,245,212,0.2)" }}>⌨ {trigger.hotkey}</span>
                       ) : null}
                       {trigger?.trigger_type === "fx" ? (
-                        <span style={{ fontSize:11, color:"var(--cyan)", fontFamily:"'JetBrains Mono',monospace", background:"rgba(0,245,212,.08)", padding:"1px 6px", borderRadius:4, border:"1px solid rgba(0,245,212,.2)" }}>✨ FX · {fxName({id:trigger.fx_effect_id})}</span>
+                        <span style={{ fontSize:11, color:fxAvailability.unavailable?"var(--yellow)":"var(--cyan)", fontFamily:"'JetBrains Mono',monospace", background:fxAvailability.unavailable?"rgba(255,199,0,.09)":"rgba(0,245,212,.08)", padding:"1px 6px", borderRadius:4, border:`1px solid ${fxAvailability.unavailable?"rgba(255,199,0,.38)":"rgba(0,245,212,.2)"}` }}>✨ FX · {fxName({id:trigger.fx_effect_id})}{fxAvailability.unavailable?" · CHANGE REQUIRED":""}</span>
                       ) : null}
+                      {fxAvailability.unavailable&&<span style={{fontSize:10,color:"var(--yellow)"}}>{fxAvailability.reason}</span>}
                       {!trigger?.video_url && !trigger?.hotkey && trigger?.trigger_type !== "fx" ? (
                         <span style={{ fontSize:11, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>No triggers set</span>
                       ) : null}
                     </div>
                   </div>
-                  <button onClick={() => openTrigger(reward)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>{trigger ? "Edit Trigger" : "+ Add Trigger"}</button>
+                  <button onClick={() => openTrigger(reward)} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0, borderColor:fxAvailability.unavailable?"var(--yellow)":C.btnSecondary.borderColor, color:fxAvailability.unavailable?"var(--yellow)":C.btnSecondary.color }}>{fxAvailability.unavailable?"Fix Trigger":trigger?"Edit Trigger":"+ Add Trigger"}</button>
                   {reward.manageable && <button onClick={() => { setRewardForm({ title:reward.title, cost:reward.cost, is_enabled:reward.is_enabled, is_global_cooldown_enabled:reward.is_global_cooldown_enabled, global_cooldown_seconds:Math.max(60,reward.global_cooldown_seconds||60) }); setRewardModal(reward); }} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>Edit Reward</button>}
                   {!reward.manageable && <button onClick={() => window.open(`https://dashboard.twitch.tv/u/${encodeURIComponent(bcast.twitch_login)}/viewer-rewards/channel-points/rewards`,"_blank","noopener,noreferrer")} style={{ ...C.btnSecondary, padding:"5px 12px", fontSize:12, flexShrink:0 }}>Edit on Twitch ↗</button>}
                   {reward.manageable && <button onClick={() => deleteReward(reward.id)} style={{ ...C.btnDanger, flexShrink:0 }}>Delete</button>}
@@ -3986,7 +3996,7 @@ function ChannelRewardsTab({ guildId }) {
           </> : <FxRewardTriggerFields data={fxData} form={triggerForm} setForm={setTriggerForm} />}
           <div style={{ display:"flex", justifyContent:"flex-end", gap:10 }}>
             <button onClick={() => setTriggerModal(null)} style={C.btnSecondary}>Cancel</button>
-            <button onClick={saveTrigger} disabled={saving||(triggerForm.trigger_type==="media"?!triggerForm.video_url.trim():!triggerForm.fx_device_id||!triggerForm.fx_effect_id)} style={{ ...C.btnPrimary, opacity:saving?0.4:1 }}>{saving?"Saving...":"Save"}</button>
+            <button onClick={saveTrigger} disabled={saving||(triggerForm.trigger_type==="media"?!triggerForm.video_url.trim():!triggerForm.fx_device_id||!triggerForm.fx_effect_id||selectedFxUnavailable)} style={{ ...C.btnPrimary, opacity:saving||selectedFxUnavailable?0.4:1 }}>{saving?"Saving...":"Save"}</button>
           </div>
         </Modal>
       )}
@@ -4030,6 +4040,16 @@ function ChannelRewardsTab({ guildId }) {
 const fxId = effect => effect?.id || effect?.effect || "";
 const fxName = effect => effect?.name || fxId(effect).split("_").map(part=>part.charAt(0).toUpperCase()+part.slice(1)).join(" ");
 const fxParams = fxParameterEntries;
+const fxTriggerAvailability = (trigger, data) => {
+  if (trigger?.trigger_type !== "fx") return {unavailable:false,reason:""};
+  const device=(data?.devices||[]).find(item=>item.id===trigger.fx_device_id);
+  if (!device) return {unavailable:true,reason:"The paired OBS device is no longer available."};
+  const effects=device.effects||[];
+  if (effects.length&&trigger.fx_effect_id&&!effects.some(effect=>fxId(effect)===trigger.fx_effect_id)) {
+    return {unavailable:true,reason:"This effect was removed or is not supported by the connected plugin."};
+  }
+  return {unavailable:false,reason:""};
+};
 
 function FxParameterFields({ effect, values={}, onChange, disabled=false }) {
   return fxParams(effect).map(([key,raw])=>{
@@ -4054,12 +4074,14 @@ function FxDevicePanel({ guildId, data, onChange }) {
 
 function FxRewardTriggerFields({ data, form, setForm }) {
   const devices=data?.devices||[],device=devices.find(item=>item.id===form.fx_device_id),reported=device?.effects||[];
+  const unavailable=!!form.fx_effect_id&&reported.length>0&&!reported.some(item=>fxId(item)===form.fx_effect_id);
   const effects=reported.length?reported:(form.fx_effect_id?[{id:form.fx_effect_id,name:fxName({id:form.fx_effect_id}),min_duration_ms:100,max_duration_ms:60000,default_duration_ms:form.fx_duration_ms}]:[]);
   const effect=effects.find(item=>fxId(item)===form.fx_effect_id),range=fxDurationBounds(effect);
   const selectEffect=id=>{const next=effects.find(item=>fxId(item)===id),bounds=fxDurationBounds(next);setForm(current=>({...current,fx_effect_id:id,fx_duration_ms:bounds.value,fx_intensity:Number(next?.default_intensity??.7),fx_parameters:normalizeFxParameters(next)}))};
   return <div><Field label="Paired OBS device"><CyanSelect value={form.fx_device_id} onChange={e=>{const next=devices.find(item=>item.id===e.target.value),first=next?.effects?.[0];setForm(current=>({...current,fx_device_id:e.target.value,fx_effect_id:fxId(first),fx_duration_ms:fxDurationBounds(first).value,fx_intensity:Number(first?.default_intensity??.7),fx_parameters:normalizeFxParameters(first)}))}}><option value="">Select an FX device…</option>{devices.map(item=><option key={item.id} value={item.id}>{item.name}{item.online?" · connected":" · offline"}</option>)}</CyanSelect></Field>
     {!devices.length&&<div style={{padding:12,border:"1px solid var(--border)",borderRadius:8,color:"var(--yellow)",fontSize:11}}>Pair the ExcelProtocol FX plugin in the panel above before creating this trigger.</div>}
     {device&&!device.online&&<div style={{padding:10,border:"1px solid rgba(255,199,0,.3)",borderRadius:7,color:"var(--yellow)",fontSize:11,marginBottom:10}}>This device is offline. The reward stays configured, but redemptions are discarded while OBS is disconnected.</div>}
+    {unavailable&&<div style={{padding:10,border:"1px solid rgba(255,199,0,.42)",background:"rgba(255,199,0,.07)",borderRadius:7,color:"var(--yellow)",fontSize:11,marginBottom:10}}>⚠ {fxName({id:form.fx_effect_id})} is no longer available. Choose a replacement effect before saving.</div>}
     {device&&device.online&&!hasFxCapability(device,FX_CAPABILITIES.listEffects)&&<div style={{padding:10,color:"var(--yellow)",fontSize:11}}>This plugin build does not report its effect list.</div>}
     {device&&hasFxCapability(device,FX_CAPABILITIES.listEffects)&&!reported.length&&<div style={{display:"flex",gap:8,alignItems:"center",fontSize:11,color:"var(--text3)",padding:10}}><Spinner size={15}/>Waiting for the plugin effect list…</div>}
     {!!effects.length&&<><Field label="Effect overlay"><CyanSelect value={form.fx_effect_id} onChange={e=>selectEffect(e.target.value)}><option value="">Select an effect…</option>{effects.map(item=><option key={fxId(item)} value={fxId(item)}>{fxName(item)}</option>)}</CyanSelect></Field>{effect&&<div style={{border:"1px solid var(--border)",borderRadius:8,padding:12,background:"rgba(8,11,15,.55)"}}><div style={{fontSize:11,color:"var(--text3)",marginBottom:9}}>{effect.description||`Trigger the ${fxName(effect)} overlay in OBS.`}</div><Field label={`Duration ${(Number(form.fx_duration_ms)/1000).toFixed(1)}s`}><input type="range" min={range.min} max={range.max} step={100} value={form.fx_duration_ms} onChange={e=>setForm(p=>({...p,fx_duration_ms:Number(e.target.value)}))} style={{width:"100%",accentColor:"var(--cyan)"}}/></Field><Field label={`Intensity ${Number(form.fx_intensity).toFixed(2)}`}><input type="range" min={.05} max={1} step={.05} value={form.fx_intensity} onChange={e=>setForm(p=>({...p,fx_intensity:Number(e.target.value)}))} style={{width:"100%",accentColor:"var(--cyan)"}}/></Field><FxParameterFields effect={effect} values={form.fx_parameters} onChange={fx_parameters=>setForm(p=>({...p,fx_parameters}))}/><label style={{display:"flex",gap:7,alignItems:"center",fontSize:11,color:"var(--text2)",marginTop:8}}><input type="checkbox" checked={!!form.fx_queue} onChange={e=>setForm(p=>({...p,fx_queue:e.target.checked}))}/>Queue if another effect is active</label></div>}</>}

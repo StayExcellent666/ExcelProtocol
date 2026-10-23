@@ -7079,7 +7079,7 @@ async def landing_page(request):
   <meta property="og:description" content="Connect Discord, Twitch chat, channel rewards, OBS overlays, and giveaways without juggling separate tools.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://excelprotocol.fly.dev/">
-  <link rel="icon" href="/app/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/app/protocol.png?v=2" type="image/png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800;900&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
   <script>if(new URLSearchParams(location.search).has('preview'))document.documentElement.classList.add('motion-preview');</script>

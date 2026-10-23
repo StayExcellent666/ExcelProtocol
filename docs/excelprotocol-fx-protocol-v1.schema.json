@@ -48,7 +48,7 @@
       "required": ["protocol", "protocol_version", "type"]
     },
     "eventId": {"type": "string", "minLength": 1, "maxLength": 128},
-    "effectId": {"enum": ["crash", "ink_splatter", "screen_cracks", "error_invasion", "corruption", "darkness", "creepy_eyes", "fog", "mouse_invasion", "jumpscare_lite"]},
+    "effectId": {"enum": ["crash", "ink_splatter", "error_invasion", "corruption", "darkness", "fog", "mouse_invasion", "neon_lightning", "data_storm", "security_lockdown", "gravity_well", "jumpscare_lite"]},
     "triggerEffect": {
       "type": "object", "additionalProperties": false,
       "properties": {

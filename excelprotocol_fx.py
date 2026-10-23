@@ -31,9 +31,9 @@ PAIRING_TTL_SECONDS = 10 * 60
 MAX_QUEUE_SIZE = 16
 
 EFFECT_IDS = frozenset({
-    "crash", "ink_splatter", "screen_cracks", "error_invasion",
-    "corruption", "darkness", "creepy_eyes", "fog", "mouse_invasion",
-    "jumpscare_lite",
+    "crash", "ink_splatter", "error_invasion", "corruption", "darkness",
+    "fog", "mouse_invasion", "neon_lightning", "data_storm",
+    "security_lockdown", "gravity_well", "jumpscare_lite",
 })
 READ_COMMANDS = frozenset({"get_active_effects", "list_effects", "get_status", "get_raid_status"})
 MUTATION_COMMANDS = frozenset({
