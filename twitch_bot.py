@@ -4,6 +4,7 @@ from datetime import datetime
 from twitchio.ext import commands 
 import logging
 import re
+import time
 from database import Database
 from twitch_api import TwitchAPI
 from utils import utcnow, parse_twitch_iso
@@ -210,21 +211,25 @@ class TwitchChatBot(commands.Bot):
                 await self._send_chat(channel, text)
         else:
             await self._send_chat(channel, text)
-        await asyncio.to_thread(
-            self.db.mark_twitch_timed_message_sent, int(timer["id"]),
-        )
         logger.info(
-            "Sent timed Twitch %s in @%s (timer %s)",
-            timer.get("delivery_mode", "chat"), channel_name, timer.get("id"),
+            "Sent Twitch timeline %s in @%s (slot +%sm)",
+            timer.get("delivery_mode", "chat"), channel_name,
+            (int(timer.get("slot_index", 0)) + 1) * 5,
         )
         return True
 
     async def _run_timed_messages(self):
-        """Deliver persisted timers without blocking ordinary chat handling."""
+        """Evaluate every channel once on the shared five-minute heartbeat."""
         try:
             while True:
-                await asyncio.sleep(15)
-                due = await asyncio.to_thread(self.db.get_due_twitch_timed_messages)
+                now = time.time()
+                next_heartbeat = (int(now // 300) + 1) * 300
+                await asyncio.sleep(max(0.1, next_heartbeat - now))
+                heartbeat_tick = int(time.time() // 300)
+                due = await asyncio.to_thread(
+                    self.db.get_twitch_timeline_messages_for_tick,
+                    heartbeat_tick,
+                )
                 for timer in due:
                     try:
                         if await self._deliver_timed_message(timer):

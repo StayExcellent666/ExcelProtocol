@@ -2662,15 +2662,18 @@ function TwitchTab({ guildId, isDev }) {
   const [loading, setLoading]     = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing]     = useState(null);
-  const [showTimerModal, setShowTimerModal] = useState(false);
-  const [editingTimer, setEditingTimer] = useState(null);
+  const [showTimelineSlotModal, setShowTimelineSlotModal] = useState(false);
+  const [editingTimelineSlot, setEditingTimelineSlot] = useState(null);
   const [editLimit, setEditLimit] = useState(false);
   const [newLimit, setNewLimit]   = useState(50);
   const [savingLimit, setSavingLimit] = useState(false);
   const [form, setForm] = useState({ command_name:"", response:"", permission:"everyone", cooldown_seconds:0 });
   const [saving, setSaving]       = useState(false);
-  const [savingTimer, setSavingTimer] = useState(false);
-  const [timerForm, setTimerForm] = useState({ message:"", interval_minutes:15, delivery_mode:"chat", enabled:true, only_while_live:true });
+  const [savingTimeline, setSavingTimeline] = useState(false);
+  const [timelineDirty, setTimelineDirty] = useState(false);
+  const [timelineErr, setTimelineErr] = useState(null);
+  const [timeline, setTimeline] = useState({ duration_minutes:60, enabled:true, only_while_live:true, next_slot_index:0, slots:[] });
+  const [timelineSlotForm, setTimelineSlotForm] = useState({ message:"", delivery_mode:"chat" });
   const [savingPlay, setSavingPlay] = useState(false);
   const [savingClip, setSavingClip] = useState(false);
   const [savingBuiltin, setSavingBuiltin] = useState(null);
@@ -2699,6 +2702,8 @@ function TwitchTab({ guildId, isDev }) {
     try {
       const data = await apiFetch(`/api/guild/${guildId}/twitch`);
       setInfo(data);
+      setTimeline(data.timed_message_timeline || { duration_minutes:60, enabled:true, only_while_live:true, next_slot_index:0, slots:[] });
+      setTimelineDirty(false);
       setNewLimit(data.limit || 50);
       setClipForm({
         enabled: !!data.clip_enabled,
@@ -2747,49 +2752,73 @@ function TwitchTab({ guildId, isDev }) {
     catch(e) { alert("Failed: " + e.message); }
   };
 
-  const openAddTimer = () => {
-    setEditingTimer(null);
-    setTimerForm({ message:"", interval_minutes:15, delivery_mode:"chat", enabled:true, only_while_live:true });
-    setErr(null);
-    setShowTimerModal(true);
+  const updateTimeline = (changes) => {
+    setTimeline(current=>({...current,...changes}));
+    setTimelineDirty(true);
+    setTimelineErr(null);
   };
 
-  const openEditTimer = (timer) => {
-    setEditingTimer(timer);
-    setTimerForm({
-      message:timer.message, interval_minutes:timer.interval_minutes,
-      delivery_mode:timer.delivery_mode, enabled:timer.enabled,
-      only_while_live:timer.only_while_live,
+  const setTimelineDuration = (durationMinutes) => {
+    setTimeline(current=>({
+      ...current,
+      duration_minutes:durationMinutes,
+      slots:(current.slots||[]).filter(slot=>slot.slot_index<durationMinutes/5),
+      next_slot_index:0,
+    }));
+    setTimelineDirty(true);
+    setTimelineErr(null);
+  };
+
+  const openTimelineSlot = (slotIndex) => {
+    const existing=(timeline.slots||[]).find(slot=>slot.slot_index===slotIndex);
+    setEditingTimelineSlot(slotIndex);
+    setTimelineSlotForm({
+      message:existing?.message||"",
+      delivery_mode:existing?.delivery_mode||"chat",
     });
-    setErr(null);
-    setShowTimerModal(true);
+    setTimelineErr(null);
+    setShowTimelineSlotModal(true);
   };
 
-  const saveTimer = async (overrides={}) => {
-    setSavingTimer(true); setErr(null);
-    try {
-      const payload={ ...timerForm, ...overrides, interval_minutes:Number(timerForm.interval_minutes) };
-      if (editingTimer) payload.id=editingTimer.id;
-      const saved=await apiFetch(`/api/guild/${guildId}/twitch/timed-messages`, { method:"POST", body:JSON.stringify(payload) });
-      setInfo(current=>({...current,timed_messages:saved.timed_messages}));
-      setShowTimerModal(false);
-    } catch(e) { setErr(e.message); }
-    setSavingTimer(false);
+  const applyTimelineSlot = () => {
+    const message=timelineSlotForm.message.trim();
+    setTimeline(current=>{
+      const slots=(current.slots||[]).filter(slot=>slot.slot_index!==editingTimelineSlot);
+      if(message) slots.push({
+        slot_index:editingTimelineSlot,
+        offset_minutes:(editingTimelineSlot+1)*5,
+        message,
+        delivery_mode:timelineSlotForm.delivery_mode,
+      });
+      slots.sort((a,b)=>a.slot_index-b.slot_index);
+      return {...current,slots};
+    });
+    setTimelineDirty(true);
+    setShowTimelineSlotModal(false);
   };
 
-  const toggleTimer = async (timer) => {
-    try {
-      const saved=await apiFetch(`/api/guild/${guildId}/twitch/timed-messages`, { method:"POST", body:JSON.stringify({...timer,enabled:!timer.enabled}) });
-      setInfo(current=>({...current,timed_messages:saved.timed_messages}));
-    } catch(e) { alert("Failed: "+e.message); }
+  const clearTimelineSlot = () => {
+    setTimeline(current=>({...current,slots:(current.slots||[]).filter(slot=>slot.slot_index!==editingTimelineSlot)}));
+    setTimelineDirty(true);
+    setShowTimelineSlotModal(false);
   };
 
-  const deleteTimer = async (timer) => {
-    if (!confirm("Remove this timed message?")) return;
+  const saveTimeline = async () => {
+    setSavingTimeline(true); setTimelineErr(null);
     try {
-      await apiFetch(`/api/guild/${guildId}/twitch/timed-messages/${timer.id}`, {method:"DELETE"});
-      setInfo(current=>({...current,timed_messages:(current.timed_messages||[]).filter(item=>item.id!==timer.id)}));
-    } catch(e) { alert("Failed: "+e.message); }
+      const saved=await apiFetch(`/api/guild/${guildId}/twitch/timed-message-timeline`, {
+        method:"POST",
+        body:JSON.stringify({
+          duration_minutes:timeline.duration_minutes,
+          enabled:timeline.enabled,
+          only_while_live:timeline.only_while_live,
+          slots:timeline.slots,
+        }),
+      });
+      setTimeline(saved.timed_message_timeline);
+      setTimelineDirty(false);
+    } catch(e) { setTimelineErr(e.message); }
+    setSavingTimeline(false);
   };
 
   const saveLimit = async () => {
@@ -2937,29 +2966,47 @@ function TwitchTab({ guildId, isDev }) {
       {atLimit && !isDev && <div style={{ marginBottom:12, padding:"10px 14px", borderRadius:8, border:"1px solid rgba(255,77,109,0.3)", background:"var(--red-dim)", color:"var(--red)", fontSize:12, fontFamily:"'Outfit',sans-serif" }}>⚠️ Command limit reached ({info.count}/{info.limit}). Contact the bot owner to increase your limit.</div>}
       <div style={{ marginBottom:12, padding:"10px 14px", borderRadius:8, border:"1px solid var(--border2)", background:"rgba(8,11,15,0.6)", color:"var(--text3)", fontSize:12, fontFamily:"'Outfit',sans-serif", display:"flex", alignItems:"center", gap:8 }}>💡 Make sure ExcelProtocol is modded in your Twitch chat — type <code style={{ fontFamily:"'JetBrains Mono',monospace", color:"var(--cyan)", background:"rgba(0,0,0,0.3)", padding:"1px 5px", borderRadius:3 }}>/mod ExcelTwitch</code> if you haven't already.</div>
 
-      {/* Timed messages */}
+      {/* Timed message timeline */}
       <div style={{ ...C.card, marginBottom:16 }}>
-        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:16,flexWrap:"wrap"}}>
           <div>
-            <div style={{fontWeight:800,fontSize:14,fontFamily:"'Orbitron',sans-serif",color:"var(--cyan)",textShadow:"0 0 10px rgba(0,245,212,.4)"}}>Timed Messages</div>
-            <div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>Automatically share Discord links, socials, reminders, or any custom message.</div>
+            <div style={{fontWeight:800,fontSize:14,fontFamily:"'Orbitron',sans-serif",color:"var(--cyan)",textShadow:"0 0 10px rgba(0,245,212,.4)"}}>Timed Message Timeline</div>
+            <div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>One shared bot heartbeat checks every channel at five-minute marks. Blank slots stay silent.</div>
           </div>
-          <button onClick={openAddTimer} disabled={(info.timed_messages||[]).length>=10} style={{...C.btnPrimary,padding:"7px 11px",fontSize:11,opacity:(info.timed_messages||[]).length>=10 ? .45 : 1}}>+ Add Timed Message</button>
+          <button type="button" onClick={()=>updateTimeline({enabled:!timeline.enabled})} aria-label={`${timeline.enabled?"Disable":"Enable"} timed message timeline`} style={{width:44,height:24,borderRadius:12,border:"none",cursor:"pointer",background:timeline.enabled?"var(--cyan)":"var(--border2)",position:"relative",flexShrink:0,boxShadow:timeline.enabled?"0 0 10px rgba(0,245,212,.35)":"none"}}><span style={{position:"absolute",top:3,left:timeline.enabled?22:3,width:18,height:18,borderRadius:"50%",background:"#fff",transition:"left .2s"}} /></button>
         </div>
-        {(info.timed_messages||[]).length===0 ? <div style={{padding:"20px 0",textAlign:"center",color:"var(--text3)",fontSize:12}}>No timed messages configured.</div> :
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>{info.timed_messages.map(timer=><div key={timer.id} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 13px",borderRadius:8,background:"rgba(8,11,15,.6)",border:"1px solid var(--border)"}}>
-            <button type="button" onClick={()=>toggleTimer(timer)} aria-label={`${timer.enabled?"Disable":"Enable"} timed message`} style={{width:42,height:23,borderRadius:12,border:"none",cursor:"pointer",background:timer.enabled?"var(--cyan)":"var(--border2)",position:"relative",flexShrink:0}}><span style={{position:"absolute",top:3,left:timer.enabled?21:3,width:17,height:17,borderRadius:"50%",background:"#fff",transition:"left .2s"}} /></button>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{fontSize:12,color:timer.enabled?"var(--text2)":"var(--text3)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{timer.message}</div>
-              <div style={{display:"flex",gap:7,alignItems:"center",marginTop:5,flexWrap:"wrap"}}>
-                <Badge text={`Every ${timer.interval_minutes}m`} color="var(--cyan2)" />
-                <Badge text={timer.delivery_mode==="announcement"?"Announcement":"Regular message"} color={timer.delivery_mode==="announcement"?"#b58cff":"var(--green)"} />
-                {timer.only_while_live&&<span style={{fontSize:10,color:"var(--text3)"}}>Live only</span>}
+
+        <div style={{display:"flex",gap:10,alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",marginBottom:14,padding:"11px 12px",borderRadius:8,border:"1px solid var(--border)",background:"rgba(8,11,15,.48)"}}>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <span style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace",marginRight:3}}>LOOP LENGTH</span>
+            {[60,120].map(duration=><button key={duration} type="button" onClick={()=>setTimelineDuration(duration)} style={{...C.btnSecondary,padding:"6px 10px",fontSize:10,borderColor:timeline.duration_minutes===duration?"var(--cyan)":"var(--border2)",color:timeline.duration_minutes===duration?"var(--cyan)":"var(--text3)",background:timeline.duration_minutes===duration?"rgba(0,245,212,.08)":"transparent"}}>{duration===60?"1 Hour":"2 Hours"}</button>)}
+          </div>
+          <button type="button" onClick={()=>updateTimeline({only_while_live:!timeline.only_while_live})} style={{display:"flex",alignItems:"center",gap:8,border:"none",background:"transparent",color:"var(--text3)",fontSize:11,cursor:"pointer"}}>
+            <span>Only while live</span>
+            <span style={{width:38,height:21,borderRadius:11,background:timeline.only_while_live?"var(--cyan)":"var(--border2)",position:"relative"}}><span style={{position:"absolute",top:3,left:timeline.only_while_live?20:3,width:15,height:15,borderRadius:"50%",background:"#fff",transition:"left .2s"}} /></span>
+          </button>
+        </div>
+
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(155px,1fr))",gap:8}}>
+          {Array.from({length:timeline.duration_minutes/5},(_,slotIndex)=>{
+            const slot=(timeline.slots||[]).find(item=>item.slot_index===slotIndex);
+            const isNext=timeline.next_slot_index===slotIndex&&!timelineDirty;
+            return <button key={slotIndex} type="button" onClick={()=>openTimelineSlot(slotIndex)} style={{minHeight:82,padding:"10px 11px",borderRadius:8,textAlign:"left",cursor:"pointer",border:`1px solid ${isNext?"var(--cyan)":slot?"rgba(181,140,255,.45)":"var(--border)"}`,background:isNext?"rgba(0,245,212,.07)":slot?"rgba(181,140,255,.055)":"rgba(8,11,15,.45)",boxShadow:isNext?"0 0 14px rgba(0,245,212,.13)":"none",overflow:"hidden"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:6,marginBottom:7}}>
+                <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,color:isNext?"var(--cyan)":"var(--text3)"}}>+{(slotIndex+1)*5}m</span>
+                {isNext&&<span style={{fontSize:8,color:"var(--cyan)",fontFamily:"'JetBrains Mono',monospace"}}>NEXT</span>}
+                {slot&&<Badge text={slot.delivery_mode==="announcement"?"ANNOUNCE":"CHAT"} color={slot.delivery_mode==="announcement"?"#b58cff":"var(--green)"} />}
               </div>
-            </div>
-            <button onClick={()=>openEditTimer(timer)} style={{...C.btnSecondary,padding:"5px 12px",fontSize:11}}>Edit</button>
-            <button onClick={()=>deleteTimer(timer)} style={{...C.btnDanger,padding:"5px 10px",fontSize:11}}>Remove</button>
-          </div>)}</div>}
+              <div style={{fontSize:11,lineHeight:1.35,color:slot?"var(--text2)":"var(--text3)",overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{slot?.message||"＋ Add message"}</div>
+            </button>;
+          })}
+        </div>
+
+        {timelineErr&&<div style={{fontSize:12,color:"var(--red)",padding:"8px 12px",borderRadius:6,background:"var(--red-dim)",marginTop:12}}>⚠️ {timelineErr}</div>}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginTop:14,flexWrap:"wrap"}}>
+          <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace"}}>{(timeline.slots||[]).length}/{timeline.duration_minutes/5} slots configured · loops every {timeline.duration_minutes===60?"hour":"2 hours"}</div>
+          <button type="button" onClick={saveTimeline} disabled={savingTimeline||!timelineDirty} style={{...C.btnPrimary,opacity:savingTimeline||!timelineDirty ? .45 : 1}}>{savingTimeline?"Saving...":timelineDirty?"Save Timeline":"Timeline Saved ✓"}</button>
+        </div>
       </div>
 
       {/* Custom commands */}
@@ -3224,39 +3271,30 @@ function TwitchTab({ guildId, isDev }) {
         </Modal>
       )}
 
-      {showTimerModal && (
-        <Modal onClose={()=>setShowTimerModal(false)} width={500}>
-          <div style={{fontWeight:800,fontSize:16,fontFamily:"'Orbitron',sans-serif",color:"var(--cyan)"}}>{editingTimer?"Edit Timed Message":"Add Timed Message"}</div>
+      {showTimelineSlotModal && (
+        <Modal onClose={()=>setShowTimelineSlotModal(false)} width={500}>
+          <div style={{fontWeight:800,fontSize:16,fontFamily:"'Orbitron',sans-serif",color:"var(--cyan)"}}>Timeline Slot · +{(editingTimelineSlot+1)*5} minutes</div>
           <Field label="Message">
-            <textarea value={timerForm.message} maxLength={500} rows={4} onChange={e=>setTimerForm(current=>({...current,message:e.target.value.replace(/[\r\n]+/g," ")}))} placeholder="Join the community Discord: https://discord.gg/your-server" style={{...C.input,lineHeight:1.5}} />
-            <div style={{fontSize:9,color:"var(--text3)",textAlign:"right",marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{timerForm.message.length}/500</div>
+            <textarea value={timelineSlotForm.message} maxLength={500} rows={4} onChange={e=>setTimelineSlotForm(current=>({...current,message:e.target.value.replace(/[\r\n]+/g," ")}))} placeholder="Join the community Discord: https://discord.gg/your-server" style={{...C.input,lineHeight:1.5}} />
+            <div style={{fontSize:9,color:"var(--text3)",textAlign:"right",marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{timelineSlotForm.message.length}/500</div>
           </Field>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-            <Field label="Send Every">
-              <CyanSelect value={timerForm.interval_minutes} onChange={e=>setTimerForm(current=>({...current,interval_minutes:Number(e.target.value)}))}>
-                {[5,10,15,20,30,45,60,90,120,180,240,360,720,1440].map(minutes=><option key={minutes} value={minutes}>{minutes<60?`${minutes} minutes`:minutes===60?"1 hour":minutes%60===0?`${minutes/60} hours`:`${minutes} minutes`}</option>)}
-              </CyanSelect>
-            </Field>
-            <Field label="Delivery">
-              <CyanSelect value={timerForm.delivery_mode} onChange={e=>setTimerForm(current=>({...current,delivery_mode:e.target.value}))}>
-                <option value="chat">Regular message</option>
-                <option value="announcement">Announcement</option>
-              </CyanSelect>
-            </Field>
-          </div>
-          <button type="button" onClick={()=>setTimerForm(current=>({...current,only_while_live:!current.only_while_live}))} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:14,padding:"11px 12px",borderRadius:8,border:"1px solid var(--border)",background:"rgba(8,11,15,.55)",cursor:"pointer",textAlign:"left"}}>
-            <span><span style={{display:"block",fontSize:12,color:"var(--text2)",fontWeight:700}}>Only send while live</span><span style={{display:"block",fontSize:10,color:"var(--text3)",marginTop:3}}>Prevents promotional messages in an offline Twitch chat.</span></span>
-            <span style={{width:42,height:23,borderRadius:12,background:timerForm.only_while_live?"var(--cyan)":"var(--border2)",position:"relative",flexShrink:0}}><span style={{position:"absolute",top:3,left:timerForm.only_while_live?21:3,width:17,height:17,borderRadius:"50%",background:"#fff",transition:"left .2s"}} /></span>
-          </button>
+          <Field label="Delivery">
+            <CyanSelect value={timelineSlotForm.delivery_mode} onChange={e=>setTimelineSlotForm(current=>({...current,delivery_mode:e.target.value}))}>
+              <option value="chat">Regular message</option>
+              <option value="announcement">Announcement</option>
+            </CyanSelect>
+          </Field>
           <div style={{padding:"10px 12px",borderRadius:8,border:"1px solid var(--border)",background:"rgba(8,11,15,.7)",fontSize:11,color:"var(--text3)",lineHeight:1.45}}>
-            <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:9,marginBottom:5}}>PREVIEW · {timerForm.delivery_mode==="announcement"?"PURPLE ANNOUNCEMENT":"REGULAR CHAT"}</div>
-            <div style={{color:timerForm.message?"var(--text2)":"var(--text3)",wordBreak:"break-word"}}>{timerForm.message||"Your timed message will appear here."}</div>
+            <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:9,marginBottom:5}}>PREVIEW · {timelineSlotForm.delivery_mode==="announcement"?"PURPLE ANNOUNCEMENT":"REGULAR CHAT"}</div>
+            <div style={{color:timelineSlotForm.message?"var(--text2)":"var(--text3)",wordBreak:"break-word"}}>{timelineSlotForm.message||"Enter a message, or leave this timeline slot blank."}</div>
           </div>
-          {timerForm.delivery_mode==="announcement"&&<div style={{fontSize:10,color:"var(--yellow)"}}>If Twitch rejects an announcement, the bot automatically sends it as a regular message.</div>}
-          {err&&<div style={{fontSize:12,color:"var(--red)",padding:"8px 12px",borderRadius:6,background:"var(--red-dim)"}}>⚠️ {err}</div>}
-          <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
-            <button onClick={()=>setShowTimerModal(false)} style={C.btnSecondary}>Cancel</button>
-            <button onClick={()=>saveTimer()} disabled={savingTimer||!timerForm.message.trim()} style={{...C.btnPrimary,opacity:savingTimer||!timerForm.message.trim() ? .45 : 1}}>{savingTimer?"Saving...":editingTimer?"Save Changes":"Add Timer"}</button>
+          {timelineSlotForm.delivery_mode==="announcement"&&<div style={{fontSize:10,color:"var(--yellow)"}}>If Twitch rejects an announcement, the bot automatically sends it as a regular message.</div>}
+          <div style={{display:"flex",justifyContent:"space-between",gap:10}}>
+            <div>{(timeline.slots||[]).some(slot=>slot.slot_index===editingTimelineSlot)&&<button onClick={clearTimelineSlot} style={C.btnDanger}>Clear Slot</button>}</div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setShowTimelineSlotModal(false)} style={C.btnSecondary}>Cancel</button>
+              <button onClick={applyTimelineSlot} disabled={!timelineSlotForm.message.trim()} style={{...C.btnPrimary,opacity:!timelineSlotForm.message.trim() ? .45 : 1}}>Apply to Timeline</button>
+            </div>
           </div>
         </Modal>
       )}

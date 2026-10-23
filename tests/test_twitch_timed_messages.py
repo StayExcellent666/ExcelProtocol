@@ -1,4 +1,3 @@
-import asyncio
 from types import SimpleNamespace
 
 from database import Database
@@ -14,46 +13,76 @@ def run_immediate(coroutine):
     raise AssertionError("Coroutine unexpectedly yielded")
 
 
-def test_timed_message_database_lifecycle(tmp_path):
-    db = Database(str(tmp_path / "timers.db"))
-    timer_id = db.save_twitch_timed_message(
-        "Streamer", "Join the Discord!", 5, "announcement", True, True,
+def test_timeline_database_lifecycle_and_loop(tmp_path):
+    db = Database(str(tmp_path / "timeline.db"))
+    saved = db.save_twitch_timed_message_timeline(
+        "Streamer", 60, True, True, [
+            {"slot_index": 0, "message": "Join the Discord!", "delivery_mode": "announcement"},
+            {"slot_index": 2, "message": "Try !commands", "delivery_mode": "chat"},
+        ],
     )
 
-    assert db.get_twitch_timed_messages("streamer") == [{
-        "id": timer_id,
-        "message": "Join the Discord!",
-        "interval_minutes": 5,
-        "delivery_mode": "announcement",
-        "enabled": True,
-        "only_while_live": True,
-        "last_sent_at": db.get_twitch_timed_messages("streamer")[0]["last_sent_at"],
-    }]
+    assert saved["duration_minutes"] == 60
+    assert saved["enabled"] is True
+    assert saved["only_while_live"] is True
+    assert [(slot["slot_index"], slot["offset_minutes"]) for slot in saved["slots"]] == [
+        (0, 5), (2, 15),
+    ]
 
-    conn = db.get_connection()
-    conn.execute(
-        "UPDATE twitch_timed_messages SET last_sent_at = datetime('now', '-6 minutes') WHERE id = ?",
-        (timer_id,),
+    anchor = saved["anchor_tick"]
+    first = db.get_twitch_timeline_messages_for_tick(anchor)
+    assert len(first) == 1
+    assert first[0]["message"] == "Join the Discord!"
+    assert first[0]["delivery_mode"] == "announcement"
+    assert db.get_twitch_timeline_messages_for_tick(anchor + 1) == []
+    assert db.get_twitch_timeline_messages_for_tick(anchor + 2)[0]["message"] == "Try !commands"
+    assert db.get_twitch_timeline_messages_for_tick(anchor + 12)[0]["message"] == "Join the Discord!"
+
+    disabled = db.save_twitch_timed_message_timeline(
+        "streamer", 60, False, False, saved["slots"],
     )
-    conn.commit()
-    conn.close()
-    assert [item["id"] for item in db.get_due_twitch_timed_messages()] == [timer_id]
+    assert disabled["enabled"] is False
+    assert db.get_twitch_timeline_messages_for_tick(anchor + 12) == []
 
-    db.mark_twitch_timed_message_sent(timer_id)
-    assert db.get_due_twitch_timed_messages() == []
 
+def test_channels_share_the_same_five_minute_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setattr("database.time.time", lambda: 3_000)
+    db = Database(str(tmp_path / "shared-heartbeat.db"))
+    for channel in ("alpha", "beta"):
+        db.save_twitch_timed_message_timeline(
+            channel, 60, True, False,
+            [{"slot_index": 0, "message": channel, "delivery_mode": "chat"}],
+        )
+
+    alpha = db.get_twitch_timed_message_timeline("alpha")
+    beta = db.get_twitch_timed_message_timeline("beta")
+    assert alpha["anchor_tick"] == beta["anchor_tick"] == 11
+    assert [item["twitch_channel"] for item in db.get_twitch_timeline_messages_for_tick(11)] == [
+        "alpha", "beta",
+    ]
+
+
+def test_legacy_timers_migrate_into_consecutive_timeline_slots(tmp_path):
+    path = tmp_path / "migration.db"
+    db = Database(str(path))
     db.save_twitch_timed_message(
-        "streamer", "Updated", 30, "chat", False, False, timer_id,
+        "Streamer", "First message", 5, "chat", True, True,
     )
-    updated = db.get_twitch_timed_messages("streamer")[0]
-    assert updated["message"] == "Updated"
-    assert updated["enabled"] is False
-    assert updated["only_while_live"] is False
-    assert db.remove_twitch_timed_message("streamer", timer_id) is True
-    assert db.get_twitch_timed_messages("streamer") == []
+    db.save_twitch_timed_message(
+        "Streamer", "Second message", 10, "announcement", True, True,
+    )
+    db.save_twitch_timed_message(
+        "Streamer", "Disabled message", 15, "chat", False, True,
+    )
+
+    migrated = Database(str(path)).get_twitch_timed_message_timeline("streamer")
+    assert [slot["message"] for slot in migrated["slots"]] == [
+        "First message", "Second message",
+    ]
+    assert [slot["slot_index"] for slot in migrated["slots"]] == [0, 1]
 
 
-def test_guild_cleanup_preserves_shared_channel_timers_until_last_link(tmp_path):
+def test_guild_cleanup_preserves_shared_timeline_until_last_link(tmp_path):
     db = Database(str(tmp_path / "cleanup.db"))
     conn = db.get_connection()
     conn.execute(
@@ -66,26 +95,22 @@ def test_guild_cleanup_preserves_shared_channel_timers_until_last_link(tmp_path)
     )
     conn.commit()
     conn.close()
-    db.save_twitch_timed_message(
-        "streamer", "Still shared", 15, "chat", True, True,
+    db.save_twitch_timed_message_timeline(
+        "streamer", 60, True, True,
+        [{"slot_index": 0, "message": "Still shared", "delivery_mode": "chat"}],
     )
 
     db.cleanup_guild(101)
-    assert len(db.get_twitch_timed_messages("streamer")) == 1
+    assert len(db.get_twitch_timed_message_timeline("streamer")["slots"]) == 1
 
     db.cleanup_guild(202)
-    assert db.get_twitch_timed_messages("streamer") == []
+    assert db.get_twitch_timed_message_timeline("streamer")["slots"] == []
 
 
-def test_timed_announcement_falls_back_to_regular_chat(monkeypatch):
-    async def immediate_to_thread(function, *args):
-        return function(*args)
-    monkeypatch.setattr(asyncio, "to_thread", immediate_to_thread)
-    marked = []
+def test_timeline_announcement_falls_back_to_regular_chat():
     sent = []
     channel = SimpleNamespace(name="streamer")
     bot = object.__new__(TwitchChatBot)
-    bot.db = SimpleNamespace(mark_twitch_timed_message_sent=marked.append)
     bot._channel_live_checker = lambda _channel: True
     bot._connected_channel_for = lambda _channel: channel
 
@@ -98,27 +123,22 @@ def test_timed_announcement_falls_back_to_regular_chat(monkeypatch):
     bot._send_announcement = announcement
     bot._send_chat = chat
     delivered = run_immediate(TwitchChatBot._deliver_timed_message(bot, {
-        "id": 7, "twitch_channel": "streamer", "message": "Community link",
+        "twitch_channel": "streamer", "slot_index": 3, "message": "Community link",
         "delivery_mode": "announcement", "only_while_live": True,
     }))
 
     assert delivered is True
     assert sent == ["Community link"]
-    assert marked == [7]
 
 
-def test_live_only_timer_waits_until_stream_is_live(monkeypatch):
-    async def immediate_to_thread(function, *args):
-        return function(*args)
-    monkeypatch.setattr(asyncio, "to_thread", immediate_to_thread)
+def test_live_only_timeline_slot_is_skipped_while_offline():
     channel = SimpleNamespace(name="streamer")
     bot = object.__new__(TwitchChatBot)
-    bot.db = SimpleNamespace(mark_twitch_timed_message_sent=lambda _timer_id: None)
     bot._channel_live_checker = lambda _channel: False
     bot._connected_channel_for = lambda _channel: channel
 
     delivered = run_immediate(TwitchChatBot._deliver_timed_message(bot, {
-        "id": 8, "twitch_channel": "streamer", "message": "Community link",
+        "twitch_channel": "streamer", "slot_index": 0, "message": "Community link",
         "delivery_mode": "chat", "only_while_live": True,
     }))
 

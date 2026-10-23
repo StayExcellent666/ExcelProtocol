@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -604,6 +605,80 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_twitch_timed_messages_due
             ON twitch_timed_messages(enabled, twitch_channel, last_sent_at)
         ''')
+
+        # A channel-wide visual timeline replaces independent repeating timers.
+        # Every channel is evaluated on the bot's shared five-minute heartbeat,
+        # while anchor_tick keeps the chosen one- or two-hour loop stable across
+        # reconnects and deploys.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS twitch_timed_message_schedules (
+                twitch_channel TEXT PRIMARY KEY,
+                duration_minutes INTEGER NOT NULL DEFAULT 60,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                only_while_live INTEGER NOT NULL DEFAULT 1,
+                anchor_tick INTEGER NOT NULL,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS twitch_timed_message_slots (
+                twitch_channel TEXT NOT NULL,
+                slot_index INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                delivery_mode TEXT NOT NULL DEFAULT 'chat',
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (twitch_channel, slot_index)
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_twitch_timed_message_slots_channel
+            ON twitch_timed_message_slots(twitch_channel)
+        ''')
+
+        # One-time, lossless-text migration from the short-lived independent
+        # timer UI. Existing messages are placed into consecutive five-minute
+        # slots in creation order so users can rearrange them visually.
+        next_heartbeat = int(time.time() // 300) + 1
+        legacy_channels = cursor.execute('''
+            SELECT DISTINCT lower(twitch_channel)
+            FROM twitch_timed_messages
+            WHERE lower(twitch_channel) NOT IN (
+                SELECT lower(twitch_channel) FROM twitch_timed_message_schedules
+            )
+        ''').fetchall()
+        for (legacy_channel,) in legacy_channels:
+            all_legacy_rows = cursor.execute('''
+                SELECT message, delivery_mode, enabled, only_while_live
+                FROM twitch_timed_messages
+                WHERE lower(twitch_channel) = ?
+                ORDER BY id
+                LIMIT 24
+            ''', (legacy_channel,)).fetchall()
+            if not all_legacy_rows:
+                continue
+            enabled_legacy_rows = [row for row in all_legacy_rows if bool(row[2])]
+            legacy_rows = enabled_legacy_rows or all_legacy_rows
+            duration_minutes = 60 if len(legacy_rows) <= 12 else 120
+            cursor.execute('''
+                INSERT INTO twitch_timed_message_schedules
+                    (twitch_channel, duration_minutes, enabled,
+                     only_while_live, anchor_tick)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (
+                legacy_channel,
+                duration_minutes,
+                int(bool(enabled_legacy_rows)),
+                int(all(bool(row[3]) for row in legacy_rows)),
+                next_heartbeat,
+            ))
+            for slot_index, legacy_row in enumerate(legacy_rows):
+                cursor.execute('''
+                    INSERT INTO twitch_timed_message_slots
+                        (twitch_channel, slot_index, message, delivery_mode)
+                    VALUES (?, ?, ?, ?)
+                ''', (
+                    legacy_channel, slot_index, legacy_row[0], legacy_row[1],
+                ))
 
         # Notification log (30 day retention)
         cursor.execute('''
@@ -3175,6 +3250,145 @@ class Database:
         conn.commit()
         conn.close()
 
+    def get_twitch_timed_message_timeline(self, twitch_channel: str,
+                                          current_tick: int = None) -> Dict:
+        """Return a channel's visual five-minute timeline."""
+        channel = str(twitch_channel or '').strip().lstrip('#').lower()
+        tick = int(current_tick if current_tick is not None else time.time() // 300)
+        conn = self.get_connection()
+        schedule = conn.execute(
+            '''SELECT duration_minutes, enabled, only_while_live, anchor_tick
+               FROM twitch_timed_message_schedules
+               WHERE lower(twitch_channel) = ?''',
+            (channel,),
+        ).fetchone()
+        rows = conn.execute(
+            '''SELECT slot_index, message, delivery_mode
+               FROM twitch_timed_message_slots
+               WHERE lower(twitch_channel) = ?
+               ORDER BY slot_index''',
+            (channel,),
+        ).fetchall()
+        conn.close()
+
+        if schedule:
+            duration_minutes = int(schedule[0])
+            enabled = bool(schedule[1])
+            only_while_live = bool(schedule[2])
+            anchor_tick = int(schedule[3])
+        else:
+            duration_minutes = 60
+            enabled = True
+            only_while_live = True
+            anchor_tick = tick + 1
+        slot_count = duration_minutes // 5
+        next_tick = tick + 1
+        next_slot_index = (
+            0 if next_tick < anchor_tick
+            else (next_tick - anchor_tick) % slot_count
+        )
+        return {
+            'duration_minutes': duration_minutes,
+            'enabled': enabled,
+            'only_while_live': only_while_live,
+            'anchor_tick': anchor_tick,
+            'next_slot_index': next_slot_index,
+            'slots': [
+                {
+                    'slot_index': int(row[0]),
+                    'offset_minutes': (int(row[0]) + 1) * 5,
+                    'message': row[1],
+                    'delivery_mode': row[2],
+                }
+                for row in rows if 0 <= int(row[0]) < slot_count
+            ],
+        }
+
+    def save_twitch_timed_message_timeline(self, twitch_channel: str,
+                                           duration_minutes: int, enabled: bool,
+                                           only_while_live: bool,
+                                           slots: List[Dict]) -> Dict:
+        """Replace a channel's timeline while preserving its current playhead."""
+        channel = str(twitch_channel or '').strip().lstrip('#').lower()
+        duration = int(duration_minutes)
+        if duration not in (60, 120):
+            raise ValueError("Timeline duration must be 60 or 120 minutes")
+        slot_count = duration // 5
+        next_heartbeat = int(time.time() // 300) + 1
+        conn = self.get_connection()
+        existing = conn.execute(
+            '''SELECT duration_minutes, enabled, anchor_tick
+               FROM twitch_timed_message_schedules
+               WHERE lower(twitch_channel) = ?''',
+            (channel,),
+        ).fetchone()
+        anchor_tick = int(existing[2]) if existing else next_heartbeat
+        if existing and (int(existing[0]) != duration or (not bool(existing[1]) and enabled)):
+            anchor_tick = next_heartbeat
+
+        conn.execute('''
+            INSERT INTO twitch_timed_message_schedules
+                (twitch_channel, duration_minutes, enabled, only_while_live,
+                 anchor_tick, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(twitch_channel) DO UPDATE SET
+                duration_minutes = excluded.duration_minutes,
+                enabled = excluded.enabled,
+                only_while_live = excluded.only_while_live,
+                anchor_tick = excluded.anchor_tick,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (channel, duration, int(enabled), int(only_while_live), anchor_tick))
+        conn.execute(
+            'DELETE FROM twitch_timed_message_slots WHERE lower(twitch_channel) = ?',
+            (channel,),
+        )
+        for slot in slots:
+            slot_index = int(slot['slot_index'])
+            message = str(slot.get('message') or '').strip()
+            delivery_mode = str(slot.get('delivery_mode') or 'chat').lower()
+            if not 0 <= slot_index < slot_count or not message:
+                continue
+            if delivery_mode not in ('chat', 'announcement'):
+                delivery_mode = 'chat'
+            conn.execute('''
+                INSERT INTO twitch_timed_message_slots
+                    (twitch_channel, slot_index, message, delivery_mode,
+                     updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (channel, slot_index, message[:500], delivery_mode))
+        conn.commit()
+        conn.close()
+        return self.get_twitch_timed_message_timeline(channel)
+
+    def get_twitch_timeline_messages_for_tick(self, current_tick: int = None) -> List[Dict]:
+        """Return the one configured slot due for each channel on a heartbeat."""
+        tick = int(current_tick if current_tick is not None else time.time() // 300)
+        conn = self.get_connection()
+        rows = conn.execute('''
+            SELECT schedules.twitch_channel, schedules.only_while_live,
+                   slots.slot_index, slots.message, slots.delivery_mode
+            FROM twitch_timed_message_schedules AS schedules
+            JOIN twitch_timed_message_slots AS slots
+              ON slots.twitch_channel = schedules.twitch_channel
+             AND slots.slot_index = (
+                 (? - schedules.anchor_tick) % (schedules.duration_minutes / 5)
+             )
+            WHERE schedules.enabled = 1
+              AND schedules.anchor_tick <= ?
+            ORDER BY lower(schedules.twitch_channel)
+        ''', (tick, tick)).fetchall()
+        conn.close()
+        return [
+            {
+                'twitch_channel': row[0],
+                'only_while_live': bool(row[1]),
+                'slot_index': int(row[2]),
+                'message': row[3],
+                'delivery_mode': row[4],
+            }
+            for row in rows
+        ]
+
     TWITCH_BUILTIN_COMMANDS = ("!uptime", "!game", "!title", "!viewers", "!so", "!mso", "!commands")
 
     def get_builtin_command_settings(self, twitch_channel: str) -> Dict[str, bool]:
@@ -3733,6 +3947,8 @@ class Database:
                 cursor.execute('DELETE FROM twitch_command_user_usage WHERE twitch_channel = ?', (twitch_channel,))
                 cursor.execute('DELETE FROM twitch_commands WHERE twitch_channel = ?', (twitch_channel,))
                 cursor.execute('DELETE FROM twitch_timed_messages WHERE twitch_channel = ?', (twitch_channel,))
+                cursor.execute('DELETE FROM twitch_timed_message_slots WHERE twitch_channel = ?', (twitch_channel,))
+                cursor.execute('DELETE FROM twitch_timed_message_schedules WHERE twitch_channel = ?', (twitch_channel,))
                 cursor.execute('DELETE FROM twitch_builtin_command_settings WHERE twitch_channel = ?', (twitch_channel,))
 
         if broadcaster_id:
