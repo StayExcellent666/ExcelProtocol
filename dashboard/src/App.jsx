@@ -2674,6 +2674,7 @@ function TwitchTab({ guildId, isDev }) {
   const [timelineErr, setTimelineErr] = useState(null);
   const [timeline, setTimeline] = useState({ duration_minutes:60, enabled:true, only_while_live:true, next_slot_index:0, slots:[] });
   const [timelineSlotForm, setTimelineSlotForm] = useState({ message:"", delivery_mode:"chat" });
+  const [draggingTimelineSlot, setDraggingTimelineSlot] = useState(null);
   const [savingPlay, setSavingPlay] = useState(false);
   const [savingClip, setSavingClip] = useState(false);
   const [savingBuiltin, setSavingBuiltin] = useState(null);
@@ -2720,6 +2721,20 @@ function TwitchTab({ guildId, isDev }) {
   }, [guildId]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const advancePlayhead = () => setTimeline(current => {
+      const anchorTick=Number(current.anchor_tick);
+      if(!anchorTick) return current;
+      const slotCount=Number(current.duration_minutes||60)/5;
+      const nextTick=Math.floor(Date.now()/300000)+1;
+      const nextSlotIndex=nextTick<anchorTick ? 0 : (nextTick-anchorTick)%slotCount;
+      return nextSlotIndex===current.next_slot_index ? current : {...current,next_slot_index:nextSlotIndex};
+    });
+    advancePlayhead();
+    const timer=window.setInterval(advancePlayhead,15000);
+    return ()=>window.clearInterval(timer);
+  }, []);
 
   const openAdd = () => {
     setEditing(null);
@@ -2801,6 +2816,22 @@ function TwitchTab({ guildId, isDev }) {
     setTimeline(current=>({...current,slots:(current.slots||[]).filter(slot=>slot.slot_index!==editingTimelineSlot)}));
     setTimelineDirty(true);
     setShowTimelineSlotModal(false);
+  };
+
+  const moveTimelineSlot = (sourceIndex, targetIndex) => {
+    if(sourceIndex===targetIndex) return;
+    setTimeline(current=>{
+      const source=(current.slots||[]).find(slot=>slot.slot_index===sourceIndex);
+      if(!source) return current;
+      const target=(current.slots||[]).find(slot=>slot.slot_index===targetIndex);
+      const slots=(current.slots||[]).filter(slot=>slot.slot_index!==sourceIndex&&slot.slot_index!==targetIndex);
+      slots.push({...source,slot_index:targetIndex,offset_minutes:(targetIndex+1)*5});
+      if(target) slots.push({...target,slot_index:sourceIndex,offset_minutes:(sourceIndex+1)*5});
+      slots.sort((a,b)=>a.slot_index-b.slot_index);
+      return {...current,slots};
+    });
+    setTimelineDirty(true);
+    setTimelineErr(null);
   };
 
   const saveTimeline = async () => {
@@ -2987,19 +3018,49 @@ function TwitchTab({ guildId, isDev }) {
           </button>
         </div>
 
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(155px,1fr))",gap:8}}>
-          {Array.from({length:timeline.duration_minutes/5},(_,slotIndex)=>{
-            const slot=(timeline.slots||[]).find(item=>item.slot_index===slotIndex);
-            const isNext=timeline.next_slot_index===slotIndex&&!timelineDirty;
-            return <button key={slotIndex} type="button" onClick={()=>openTimelineSlot(slotIndex)} style={{minHeight:82,padding:"10px 11px",borderRadius:8,textAlign:"left",cursor:"pointer",border:`1px solid ${isNext?"var(--cyan)":slot?"rgba(181,140,255,.45)":"var(--border)"}`,background:isNext?"rgba(0,245,212,.07)":slot?"rgba(181,140,255,.055)":"rgba(8,11,15,.45)",boxShadow:isNext?"0 0 14px rgba(0,245,212,.13)":"none",overflow:"hidden"}}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:6,marginBottom:7}}>
-                <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,color:isNext?"var(--cyan)":"var(--text3)"}}>+{(slotIndex+1)*5}m</span>
-                {isNext&&<span style={{fontSize:8,color:"var(--cyan)",fontFamily:"'JetBrains Mono',monospace"}}>NEXT</span>}
-                {slot&&<Badge text={slot.delivery_mode==="announcement"?"ANNOUNCE":"CHAT"} color={slot.delivery_mode==="announcement"?"#b58cff":"var(--green)"} />}
-              </div>
-              <div style={{fontSize:11,lineHeight:1.35,color:slot?"var(--text2)":"var(--text3)",overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{slot?.message||"＋ Add message"}</div>
-            </button>;
-          })}
+        <div style={{padding:"9px 12px",borderRadius:8,border:"1px solid rgba(0,245,212,.16)",background:"rgba(0,245,212,.035)",fontSize:10,color:"var(--text3)",marginBottom:10,display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:15,color:"var(--cyan)"}}>⠿</span>
+          Drag a configured message onto any slot to move it. Dropping it onto another message swaps their positions.
+        </div>
+
+        <div style={{maxHeight:timeline.duration_minutes===120?620:"none",overflowY:timeline.duration_minutes===120?"auto":"visible",paddingRight:timeline.duration_minutes===120?6:0}}>
+          <div style={{position:"relative",display:"flex",flexDirection:"column",gap:8,padding:"2px 0"}}>
+            <div style={{position:"absolute",left:70,top:22,bottom:22,width:1,background:"linear-gradient(to bottom,var(--cyan),rgba(0,245,212,.12))",boxShadow:"0 0 8px rgba(0,245,212,.25)"}} />
+            {Array.from({length:timeline.duration_minutes/5},(_,slotIndex)=>{
+              const slot=(timeline.slots||[]).find(item=>item.slot_index===slotIndex);
+              const isNext=timeline.next_slot_index===slotIndex;
+              const isAnnouncement=slot?.delivery_mode==="announcement";
+              const typeColor=isAnnouncement?"#b58cff":"var(--green)";
+              const isDragging=draggingTimelineSlot===slotIndex;
+              return <div key={slotIndex} style={{display:"grid",gridTemplateColumns:"52px 28px minmax(0,1fr)",alignItems:"center",position:"relative"}}>
+                <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,textAlign:"right",paddingRight:10,color:isNext?"var(--cyan)":"var(--text3)"}}>+{(slotIndex+1)*5}m</div>
+                <div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",position:"relative",zIndex:1}}>
+                  <span style={{width:isNext?12:8,height:isNext?12:8,borderRadius:"50%",background:isNext?"var(--cyan)":slot?typeColor:"var(--bg2)",border:`2px solid ${isNext?"var(--cyan)":slot?typeColor:"var(--border2)"}`,boxShadow:isNext?"0 0 13px var(--cyan)":slot?`0 0 8px ${typeColor}`:"none"}} />
+                </div>
+                <button type="button" draggable={!!slot}
+                  onDragStart={e=>{if(!slot)return;e.dataTransfer.effectAllowed="move";e.dataTransfer.setData("text/plain",String(slotIndex));setDraggingTimelineSlot(slotIndex);}}
+                  onDragEnd={()=>setDraggingTimelineSlot(null)}
+                  onDragOver={e=>{if(draggingTimelineSlot!==null){e.preventDefault();e.dataTransfer.dropEffect="move";}}}
+                  onDrop={e=>{e.preventDefault();const source=Number(e.dataTransfer.getData("text/plain"));if(Number.isInteger(source))moveTimelineSlot(source,slotIndex);setDraggingTimelineSlot(null);}}
+                  onClick={()=>{if(draggingTimelineSlot===null)openTimelineSlot(slotIndex);}}
+                  style={{minHeight:64,padding:"10px 12px",borderRadius:8,textAlign:"left",cursor:slot?"grab":"pointer",border:slot?`1px solid ${isNext?"var(--cyan)":typeColor}`:"1px dashed var(--border2)",background:slot?(isAnnouncement?"rgba(181,140,255,.07)":"rgba(52,211,153,.06)"):isNext?"rgba(0,245,212,.035)":"rgba(8,11,15,.32)",boxShadow:isNext?"0 0 15px rgba(0,245,212,.12)":"none",opacity:isDragging ? .42 : 1,transition:"border-color .18s,background .18s,opacity .18s",overflow:"hidden"}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:slot?5:0}}>
+                    {slot?<span style={{fontSize:9,fontWeight:800,fontFamily:"'JetBrains Mono',monospace",letterSpacing:1,color:typeColor}}>{isAnnouncement?"ANNOUNCEMENT":"REGULAR CHAT"}</span>:<span style={{fontSize:11,color:"var(--text3)"}}>＋ Add message</span>}
+                    <span style={{display:"flex",alignItems:"center",gap:8}}>
+                      {isNext&&<span style={{fontSize:8,color:"var(--cyan)",fontFamily:"'JetBrains Mono',monospace",letterSpacing:1}}>NEXT</span>}
+                      {slot&&<span title="Drag to move" style={{fontSize:17,lineHeight:1,color:"var(--text3)",cursor:"grab"}}>⠿</span>}
+                    </span>
+                  </div>
+                  {slot&&<div style={{fontSize:11,lineHeight:1.35,color:"var(--text2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{slot.message}</div>}
+                </button>
+              </div>;
+            })}
+            <div style={{display:"grid",gridTemplateColumns:"52px 28px minmax(0,1fr)",alignItems:"center",marginTop:2}}>
+              <div />
+              <div style={{display:"flex",justifyContent:"center",position:"relative",zIndex:1}}><span style={{width:10,height:10,borderRadius:"50%",background:"var(--bg2)",border:"2px solid var(--cyan)"}} /></div>
+              <div style={{padding:"7px 12px",fontSize:9,color:"var(--cyan)",fontFamily:"'JetBrains Mono',monospace",letterSpacing:1}}>↻ LOOP TO +5m</div>
+            </div>
+          </div>
         </div>
 
         {timelineErr&&<div style={{fontSize:12,color:"var(--red)",padding:"8px 12px",borderRadius:6,background:"var(--red-dim)",marginTop:12}}>⚠️ {timelineErr}</div>}
