@@ -174,7 +174,7 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "ok": {"type": "boolean"},
-        "status": {"enum": ["triggered", "queued", "cleared", "cancelled", "cooldown", "busy", "conflict", "intensity_limit", "effect_disabled", "disabled", "duplicate_event", "invalid_event_id", "invalid_effect", "invalid_duration", "invalid_intensity", "invalid_parameters", "invalid_parameter", "unknown_effect", "no_available_effect", "unknown_command", "ok", "error", "raid_status", "raid_started", "raid_active", "invalid_raid_viewers", "invalid_raid_chat", "attack_queued", "attack_blocked", "roadblock_cleared", "invalid_raid_result", "no_active_raid", "raid_still_active", "raid_victory", "raid_failed"]},
+        "status": {"enum": ["triggered", "queued", "cleared", "cancelled", "cooldown", "busy", "conflict", "intensity_limit", "effect_disabled", "disabled", "duplicate_event", "invalid_event_id", "invalid_effect", "invalid_duration", "invalid_intensity", "invalid_parameters", "invalid_parameter", "unknown_effect", "no_available_effect", "unknown_command", "ok", "error", "raid_status", "raid_started", "raid_active", "invalid_raid_viewers", "invalid_raid_chat", "attack_queued", "attack_blocked", "attack_cooldown", "roadblock_cleared", "invalid_raid_result", "no_active_raid", "raid_still_active", "raid_victory", "raid_failed"]},
         "event_id": {"$ref": "#/$defs/eventId"}, "error": {"type": "string", "maxLength": 1024},
         "effects": {"type": "array"}, "active_effects": {"type": "array"}, "settings": {"type": "object"},
         "queue_size": {"type": "integer", "minimum": 0, "maximum": 16}, "enabled": {"type": "boolean"},

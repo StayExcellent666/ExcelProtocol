@@ -52,7 +52,7 @@ RESPONSE_STATUSES = frozenset({
     "invalid_parameter", "unknown_effect", "no_available_effect",
     "unknown_command", "ok", "error", "raid_status", "raid_started",
     "raid_active", "invalid_raid_viewers", "invalid_raid_chat",
-    "attack_queued", "attack_blocked", "roadblock_cleared",
+    "attack_queued", "attack_blocked", "attack_cooldown", "roadblock_cleared",
     "invalid_raid_result", "no_active_raid", "raid_still_active",
     "raid_victory", "raid_failed",
 })

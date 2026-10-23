@@ -9132,7 +9132,7 @@ async def _fx_handle_raid_chat(event: dict) -> None:
             raid = response.get("raid") if isinstance(response.get("raid"), dict) else None
             if raid:
                 session.update({"raid": raid, "phase": raid.get("phase", session["phase"])})
-            if status not in {"attack_queued", "attack_blocked", "roadblock_cleared"} and session.get("phase") != "fighting":
+            if status not in {"attack_queued", "attack_blocked", "attack_cooldown", "roadblock_cleared"} and session.get("phase") != "fighting":
                 session.update({"active": False, "stale": True})
         except FxOfflineError:
             await _fx_finish_audit(audit_id, "offline")

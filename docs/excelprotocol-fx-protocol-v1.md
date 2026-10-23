@@ -142,3 +142,5 @@ Devices advertising `raid_battle.v1` accept the following strict commands throug
 
 The dashboard uses Twitch's signed EventSub message ID and chat message ID as mutation deduplication keys. It starts Live Test only while the authorized broadcaster is live and only after the plugin acknowledges `raid_started`. Twitch credentials remain server-side, and neither chat text nor viewer identity is written to application logs.
 
+The plugin may acknowledge a valid message with `attack_cooldown` when that viewer has attacked within the previous 900 ms. This is an accepted, non-error response: it limits projectile spam without delaying `break;` or `!git push --force` roadblock commands.
+

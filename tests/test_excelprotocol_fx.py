@@ -107,6 +107,13 @@ class TestFxSecurityPrimitives:
         assert response["status"] == "raid_status"
         assert response["raid"]["phase"] == "fighting"
 
+    def test_raid_attack_cooldown_is_an_allowed_plugin_response(self):
+        response = validate_plugin_response({
+            "ok": True, "status": "attack_cooldown",
+            "raid": {"phase": "fighting", "interaction_count": 1},
+        })
+        assert response["status"] == "attack_cooldown"
+
     def test_sliding_rate_limit(self):
         limiter = SlidingWindowRateLimiter()
         assert limiter.allow("device", 2, 60, now=10)
