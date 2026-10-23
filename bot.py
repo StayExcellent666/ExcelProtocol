@@ -319,6 +319,10 @@ class TwitchNotifierBot(discord.Client):
             bot_id=self._twitch_bot_user_id,
             token_refresher=self._refresh_twitch_chat_credentials,
             lifecycle_callback=self._on_twitch_chat_lifecycle,
+            channel_live_checker=lambda channel: (
+                str(channel or "").strip().lstrip("#").lower()
+                in self.live_streamers
+            ),
         )
 
     @staticmethod

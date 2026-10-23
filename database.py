@@ -583,6 +583,28 @@ class Database:
             ON twitch_command_user_usage(twitch_channel, command_name)
         ''')
 
+        # Repeating promotional or informational Twitch chat messages. Timers
+        # are channel-scoped like custom commands so one broadcaster linked in
+        # multiple Discord servers cannot accidentally receive duplicates.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS twitch_timed_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                twitch_channel TEXT NOT NULL,
+                message TEXT NOT NULL,
+                interval_minutes INTEGER NOT NULL DEFAULT 15,
+                delivery_mode TEXT NOT NULL DEFAULT 'chat',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                only_while_live INTEGER NOT NULL DEFAULT 1,
+                last_sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_twitch_timed_messages_due
+            ON twitch_timed_messages(enabled, twitch_channel, last_sent_at)
+        ''')
+
         # Notification log (30 day retention)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS notification_log (
@@ -3048,6 +3070,111 @@ class Database:
     # Twitch custom commands
     # ------------------------------------------------------------------
 
+    def get_twitch_timed_messages(self, twitch_channel: str) -> List[Dict]:
+        """Return every saved timer for a Twitch channel."""
+        conn = self.get_connection()
+        rows = conn.execute(
+            '''SELECT id, message, interval_minutes, delivery_mode, enabled,
+                      only_while_live, last_sent_at
+               FROM twitch_timed_messages
+               WHERE lower(twitch_channel) = ?
+               ORDER BY id''',
+            (str(twitch_channel or '').strip().lstrip('#').lower(),),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                'id': row[0], 'message': row[1],
+                'interval_minutes': int(row[2]), 'delivery_mode': row[3],
+                'enabled': bool(row[4]), 'only_while_live': bool(row[5]),
+                'last_sent_at': row[6],
+            }
+            for row in rows
+        ]
+
+    def save_twitch_timed_message(self, twitch_channel: str, message: str,
+                                  interval_minutes: int, delivery_mode: str,
+                                  enabled: bool, only_while_live: bool,
+                                  timer_id: int = None) -> int:
+        """Create or update a timer and restart its interval from now."""
+        channel = str(twitch_channel or '').strip().lstrip('#').lower()
+        conn = self.get_connection()
+        if timer_id is None:
+            cursor = conn.execute(
+                '''INSERT INTO twitch_timed_messages
+                       (twitch_channel, message, interval_minutes, delivery_mode,
+                        enabled, only_while_live, last_sent_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)''',
+                (channel, message, interval_minutes, delivery_mode,
+                 int(enabled), int(only_while_live)),
+            )
+            timer_id = int(cursor.lastrowid)
+        else:
+            cursor = conn.execute(
+                '''UPDATE twitch_timed_messages
+                   SET message = ?, interval_minutes = ?, delivery_mode = ?,
+                       enabled = ?, only_while_live = ?,
+                       last_sent_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND lower(twitch_channel) = ?''',
+                (message, interval_minutes, delivery_mode, int(enabled),
+                 int(only_while_live), int(timer_id), channel),
+            )
+            if cursor.rowcount < 1:
+                conn.close()
+                raise ValueError("Timed message not found")
+        conn.commit()
+        conn.close()
+        return int(timer_id)
+
+    def remove_twitch_timed_message(self, twitch_channel: str, timer_id: int) -> bool:
+        """Delete one timer owned by the Twitch channel."""
+        conn = self.get_connection()
+        cursor = conn.execute(
+            '''DELETE FROM twitch_timed_messages
+               WHERE id = ? AND lower(twitch_channel) = ?''',
+            (int(timer_id), str(twitch_channel or '').strip().lstrip('#').lower()),
+        )
+        conn.commit()
+        removed = cursor.rowcount > 0
+        conn.close()
+        return removed
+
+    def get_due_twitch_timed_messages(self) -> List[Dict]:
+        """Return enabled timers whose persisted interval has elapsed."""
+        conn = self.get_connection()
+        rows = conn.execute(
+            '''SELECT id, twitch_channel, message, interval_minutes,
+                      delivery_mode, only_while_live
+               FROM twitch_timed_messages
+               WHERE enabled = 1
+                 AND datetime(last_sent_at, '+' || interval_minutes || ' minutes')
+                     <= CURRENT_TIMESTAMP
+               ORDER BY last_sent_at, id
+               LIMIT 100'''
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                'id': row[0], 'twitch_channel': row[1], 'message': row[2],
+                'interval_minutes': int(row[3]), 'delivery_mode': row[4],
+                'only_while_live': bool(row[5]),
+            }
+            for row in rows
+        ]
+
+    def mark_twitch_timed_message_sent(self, timer_id: int):
+        """Start one timer's next interval after successful delivery."""
+        conn = self.get_connection()
+        conn.execute(
+            '''UPDATE twitch_timed_messages
+               SET last_sent_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?''',
+            (int(timer_id),),
+        )
+        conn.commit()
+        conn.close()
+
     TWITCH_BUILTIN_COMMANDS = ("!uptime", "!game", "!title", "!viewers", "!so", "!mso", "!commands")
 
     def get_builtin_command_settings(self, twitch_channel: str) -> Dict[str, bool]:
@@ -3538,9 +3665,9 @@ class Database:
     def cleanup_guild(self, guild_id: int):
         """Remove guild-scoped data after the seven-day re-invite grace period.
 
-        Twitch chat commands and Fortuna history are keyed by Twitch account,
-        not by Discord guild. Preserve those shared records while another guild
-        is still linked to the same channel or broadcaster.
+        Twitch chat commands, timed messages, and Fortuna history are keyed by
+        Twitch account, not by Discord guild. Preserve those shared records
+        while another guild is still linked to the same channel or broadcaster.
         """
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -3605,6 +3732,7 @@ class Database:
             if not still_linked:
                 cursor.execute('DELETE FROM twitch_command_user_usage WHERE twitch_channel = ?', (twitch_channel,))
                 cursor.execute('DELETE FROM twitch_commands WHERE twitch_channel = ?', (twitch_channel,))
+                cursor.execute('DELETE FROM twitch_timed_messages WHERE twitch_channel = ?', (twitch_channel,))
                 cursor.execute('DELETE FROM twitch_builtin_command_settings WHERE twitch_channel = ?', (twitch_channel,))
 
         if broadcaster_id:

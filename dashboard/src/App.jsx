@@ -2662,11 +2662,15 @@ function TwitchTab({ guildId, isDev }) {
   const [loading, setLoading]     = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing]     = useState(null);
+  const [showTimerModal, setShowTimerModal] = useState(false);
+  const [editingTimer, setEditingTimer] = useState(null);
   const [editLimit, setEditLimit] = useState(false);
   const [newLimit, setNewLimit]   = useState(50);
   const [savingLimit, setSavingLimit] = useState(false);
   const [form, setForm] = useState({ command_name:"", response:"", permission:"everyone", cooldown_seconds:0 });
   const [saving, setSaving]       = useState(false);
+  const [savingTimer, setSavingTimer] = useState(false);
+  const [timerForm, setTimerForm] = useState({ message:"", interval_minutes:15, delivery_mode:"chat", enabled:true, only_while_live:true });
   const [savingPlay, setSavingPlay] = useState(false);
   const [savingClip, setSavingClip] = useState(false);
   const [savingBuiltin, setSavingBuiltin] = useState(null);
@@ -2741,6 +2745,51 @@ function TwitchTab({ guildId, isDev }) {
     if (!confirm(`Remove ${name}?`)) return;
     try { await apiFetch(`/api/guild/${guildId}/twitch/commands/${encodeURIComponent(name)}`, { method:"DELETE" }); load(); }
     catch(e) { alert("Failed: " + e.message); }
+  };
+
+  const openAddTimer = () => {
+    setEditingTimer(null);
+    setTimerForm({ message:"", interval_minutes:15, delivery_mode:"chat", enabled:true, only_while_live:true });
+    setErr(null);
+    setShowTimerModal(true);
+  };
+
+  const openEditTimer = (timer) => {
+    setEditingTimer(timer);
+    setTimerForm({
+      message:timer.message, interval_minutes:timer.interval_minutes,
+      delivery_mode:timer.delivery_mode, enabled:timer.enabled,
+      only_while_live:timer.only_while_live,
+    });
+    setErr(null);
+    setShowTimerModal(true);
+  };
+
+  const saveTimer = async (overrides={}) => {
+    setSavingTimer(true); setErr(null);
+    try {
+      const payload={ ...timerForm, ...overrides, interval_minutes:Number(timerForm.interval_minutes) };
+      if (editingTimer) payload.id=editingTimer.id;
+      const saved=await apiFetch(`/api/guild/${guildId}/twitch/timed-messages`, { method:"POST", body:JSON.stringify(payload) });
+      setInfo(current=>({...current,timed_messages:saved.timed_messages}));
+      setShowTimerModal(false);
+    } catch(e) { setErr(e.message); }
+    setSavingTimer(false);
+  };
+
+  const toggleTimer = async (timer) => {
+    try {
+      const saved=await apiFetch(`/api/guild/${guildId}/twitch/timed-messages`, { method:"POST", body:JSON.stringify({...timer,enabled:!timer.enabled}) });
+      setInfo(current=>({...current,timed_messages:saved.timed_messages}));
+    } catch(e) { alert("Failed: "+e.message); }
+  };
+
+  const deleteTimer = async (timer) => {
+    if (!confirm("Remove this timed message?")) return;
+    try {
+      await apiFetch(`/api/guild/${guildId}/twitch/timed-messages/${timer.id}`, {method:"DELETE"});
+      setInfo(current=>({...current,timed_messages:(current.timed_messages||[]).filter(item=>item.id!==timer.id)}));
+    } catch(e) { alert("Failed: "+e.message); }
   };
 
   const saveLimit = async () => {
@@ -2887,6 +2936,31 @@ function TwitchTab({ guildId, isDev }) {
 
       {atLimit && !isDev && <div style={{ marginBottom:12, padding:"10px 14px", borderRadius:8, border:"1px solid rgba(255,77,109,0.3)", background:"var(--red-dim)", color:"var(--red)", fontSize:12, fontFamily:"'Outfit',sans-serif" }}>⚠️ Command limit reached ({info.count}/{info.limit}). Contact the bot owner to increase your limit.</div>}
       <div style={{ marginBottom:12, padding:"10px 14px", borderRadius:8, border:"1px solid var(--border2)", background:"rgba(8,11,15,0.6)", color:"var(--text3)", fontSize:12, fontFamily:"'Outfit',sans-serif", display:"flex", alignItems:"center", gap:8 }}>💡 Make sure ExcelProtocol is modded in your Twitch chat — type <code style={{ fontFamily:"'JetBrains Mono',monospace", color:"var(--cyan)", background:"rgba(0,0,0,0.3)", padding:"1px 5px", borderRadius:3 }}>/mod ExcelTwitch</code> if you haven't already.</div>
+
+      {/* Timed messages */}
+      <div style={{ ...C.card, marginBottom:16 }}>
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14}}>
+          <div>
+            <div style={{fontWeight:800,fontSize:14,fontFamily:"'Orbitron',sans-serif",color:"var(--cyan)",textShadow:"0 0 10px rgba(0,245,212,.4)"}}>Timed Messages</div>
+            <div style={{fontSize:11,color:"var(--text3)",marginTop:4}}>Automatically share Discord links, socials, reminders, or any custom message.</div>
+          </div>
+          <button onClick={openAddTimer} disabled={(info.timed_messages||[]).length>=10} style={{...C.btnPrimary,padding:"7px 11px",fontSize:11,opacity:(info.timed_messages||[]).length>=10 ? .45 : 1}}>+ Add Timed Message</button>
+        </div>
+        {(info.timed_messages||[]).length===0 ? <div style={{padding:"20px 0",textAlign:"center",color:"var(--text3)",fontSize:12}}>No timed messages configured.</div> :
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>{info.timed_messages.map(timer=><div key={timer.id} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 13px",borderRadius:8,background:"rgba(8,11,15,.6)",border:"1px solid var(--border)"}}>
+            <button type="button" onClick={()=>toggleTimer(timer)} aria-label={`${timer.enabled?"Disable":"Enable"} timed message`} style={{width:42,height:23,borderRadius:12,border:"none",cursor:"pointer",background:timer.enabled?"var(--cyan)":"var(--border2)",position:"relative",flexShrink:0}}><span style={{position:"absolute",top:3,left:timer.enabled?21:3,width:17,height:17,borderRadius:"50%",background:"#fff",transition:"left .2s"}} /></button>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,color:timer.enabled?"var(--text2)":"var(--text3)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{timer.message}</div>
+              <div style={{display:"flex",gap:7,alignItems:"center",marginTop:5,flexWrap:"wrap"}}>
+                <Badge text={`Every ${timer.interval_minutes}m`} color="var(--cyan2)" />
+                <Badge text={timer.delivery_mode==="announcement"?"Announcement":"Regular message"} color={timer.delivery_mode==="announcement"?"#b58cff":"var(--green)"} />
+                {timer.only_while_live&&<span style={{fontSize:10,color:"var(--text3)"}}>Live only</span>}
+              </div>
+            </div>
+            <button onClick={()=>openEditTimer(timer)} style={{...C.btnSecondary,padding:"5px 12px",fontSize:11}}>Edit</button>
+            <button onClick={()=>deleteTimer(timer)} style={{...C.btnDanger,padding:"5px 10px",fontSize:11}}>Remove</button>
+          </div>)}</div>}
+      </div>
 
       {/* Custom commands */}
       <div style={{ ...C.card, marginBottom:16 }}>
@@ -3146,6 +3220,43 @@ function TwitchTab({ guildId, isDev }) {
           <div style={{ display:"flex", justifyContent:"flex-end", gap:10 }}>
             <button onClick={()=>setShowModal(false)} style={C.btnSecondary}>Cancel</button>
             <button onClick={saveCmd} disabled={saving||!form.command_name||!form.response} style={{ ...C.btnPrimary, opacity:saving||!form.command_name||!form.response?0.4:1 }}>{saving?"Saving...":editing?"Save Changes":"Add Command"}</button>
+          </div>
+        </Modal>
+      )}
+
+      {showTimerModal && (
+        <Modal onClose={()=>setShowTimerModal(false)} width={500}>
+          <div style={{fontWeight:800,fontSize:16,fontFamily:"'Orbitron',sans-serif",color:"var(--cyan)"}}>{editingTimer?"Edit Timed Message":"Add Timed Message"}</div>
+          <Field label="Message">
+            <textarea value={timerForm.message} maxLength={500} rows={4} onChange={e=>setTimerForm(current=>({...current,message:e.target.value.replace(/[\r\n]+/g," ")}))} placeholder="Join the community Discord: https://discord.gg/your-server" style={{...C.input,lineHeight:1.5}} />
+            <div style={{fontSize:9,color:"var(--text3)",textAlign:"right",marginTop:3,fontFamily:"'JetBrains Mono',monospace"}}>{timerForm.message.length}/500</div>
+          </Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <Field label="Send Every">
+              <CyanSelect value={timerForm.interval_minutes} onChange={e=>setTimerForm(current=>({...current,interval_minutes:Number(e.target.value)}))}>
+                {[5,10,15,20,30,45,60,90,120,180,240,360,720,1440].map(minutes=><option key={minutes} value={minutes}>{minutes<60?`${minutes} minutes`:minutes===60?"1 hour":minutes%60===0?`${minutes/60} hours`:`${minutes} minutes`}</option>)}
+              </CyanSelect>
+            </Field>
+            <Field label="Delivery">
+              <CyanSelect value={timerForm.delivery_mode} onChange={e=>setTimerForm(current=>({...current,delivery_mode:e.target.value}))}>
+                <option value="chat">Regular message</option>
+                <option value="announcement">Announcement</option>
+              </CyanSelect>
+            </Field>
+          </div>
+          <button type="button" onClick={()=>setTimerForm(current=>({...current,only_while_live:!current.only_while_live}))} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:14,padding:"11px 12px",borderRadius:8,border:"1px solid var(--border)",background:"rgba(8,11,15,.55)",cursor:"pointer",textAlign:"left"}}>
+            <span><span style={{display:"block",fontSize:12,color:"var(--text2)",fontWeight:700}}>Only send while live</span><span style={{display:"block",fontSize:10,color:"var(--text3)",marginTop:3}}>Prevents promotional messages in an offline Twitch chat.</span></span>
+            <span style={{width:42,height:23,borderRadius:12,background:timerForm.only_while_live?"var(--cyan)":"var(--border2)",position:"relative",flexShrink:0}}><span style={{position:"absolute",top:3,left:timerForm.only_while_live?21:3,width:17,height:17,borderRadius:"50%",background:"#fff",transition:"left .2s"}} /></span>
+          </button>
+          <div style={{padding:"10px 12px",borderRadius:8,border:"1px solid var(--border)",background:"rgba(8,11,15,.7)",fontSize:11,color:"var(--text3)",lineHeight:1.45}}>
+            <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:9,marginBottom:5}}>PREVIEW · {timerForm.delivery_mode==="announcement"?"PURPLE ANNOUNCEMENT":"REGULAR CHAT"}</div>
+            <div style={{color:timerForm.message?"var(--text2)":"var(--text3)",wordBreak:"break-word"}}>{timerForm.message||"Your timed message will appear here."}</div>
+          </div>
+          {timerForm.delivery_mode==="announcement"&&<div style={{fontSize:10,color:"var(--yellow)"}}>If Twitch rejects an announcement, the bot automatically sends it as a regular message.</div>}
+          {err&&<div style={{fontSize:12,color:"var(--red)",padding:"8px 12px",borderRadius:6,background:"var(--red-dim)"}}>⚠️ {err}</div>}
+          <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
+            <button onClick={()=>setShowTimerModal(false)} style={C.btnSecondary}>Cancel</button>
+            <button onClick={()=>saveTimer()} disabled={savingTimer||!timerForm.message.trim()} style={{...C.btnPrimary,opacity:savingTimer||!timerForm.message.trim() ? .45 : 1}}>{savingTimer?"Saving...":editingTimer?"Save Changes":"Add Timer"}</button>
           </div>
         </Modal>
       )}

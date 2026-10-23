@@ -25,7 +25,8 @@ MASS_SHOUTOUT_EXCLUDED_LOGINS = {
 class TwitchChatBot(commands.Bot):
     def __init__(self, token: str, initial_channels: list, db: Database,
                  twitch_api: TwitchAPI, bot_id: str = None,
-                 token_refresher=None, lifecycle_callback=None):
+                 token_refresher=None, lifecycle_callback=None,
+                 channel_live_checker=None):
         super().__init__(
             token=token,
             prefix="!",
@@ -37,11 +38,13 @@ class TwitchChatBot(commands.Bot):
         self._user_access_token = self._normalise_user_token(token)
         self._token_refresher = token_refresher
         self._lifecycle_callback = lifecycle_callback
+        self._channel_live_checker = channel_live_checker
         self._cooldowns: dict[str, dict[str, datetime]] = {}
         self._broadcaster_ids: dict[str, str] = {}
         self._helix_send_failures = 0
         self._helix_send_disabled_until = 0.0
         self._mass_shoutout_tasks: dict[str, asyncio.Task] = {}
+        self._timed_message_task: asyncio.Task | None = None
 
     def _report_lifecycle(self, event: str, detail: str | None = None):
         callback = self._lifecycle_callback
@@ -174,10 +177,78 @@ class TwitchChatBot(commands.Bot):
             sent, reason = False, f"{type(exc).__name__}: {exc}"
         if not sent:
             logger.warning(
-                "Twitch shoutout announcement failed in @%s; using normal chat: %s",
+                "Twitch announcement failed in @%s; using normal chat: %s",
                 channel_name, reason,
             )
         return sent
+
+    def _connected_channel_for(self, channel_name: str):
+        wanted = str(channel_name or "").strip().lstrip("#").lower()
+        return next(
+            (
+                channel for channel in (self.connected_channels or [])
+                if str(getattr(channel, "name", "") or "").lower() == wanted
+            ),
+            None,
+        )
+
+    async def _deliver_timed_message(self, timer: dict) -> bool:
+        channel_name = str(timer.get("twitch_channel") or "").strip().lower()
+        channel = self._connected_channel_for(channel_name)
+        if channel is None:
+            return False
+        if timer.get("only_while_live"):
+            checker = self._channel_live_checker
+            if checker is None or not checker(channel_name):
+                return False
+
+        text = str(timer.get("message") or "").strip()[:500]
+        if not text:
+            return False
+        if timer.get("delivery_mode") == "announcement":
+            if not await self._send_announcement(channel, text, color="purple"):
+                await self._send_chat(channel, text)
+        else:
+            await self._send_chat(channel, text)
+        await asyncio.to_thread(
+            self.db.mark_twitch_timed_message_sent, int(timer["id"]),
+        )
+        logger.info(
+            "Sent timed Twitch %s in @%s (timer %s)",
+            timer.get("delivery_mode", "chat"), channel_name, timer.get("id"),
+        )
+        return True
+
+    async def _run_timed_messages(self):
+        """Deliver persisted timers without blocking ordinary chat handling."""
+        try:
+            while True:
+                await asyncio.sleep(15)
+                due = await asyncio.to_thread(self.db.get_due_twitch_timed_messages)
+                for timer in due:
+                    try:
+                        if await self._deliver_timed_message(timer):
+                            await asyncio.sleep(1.2)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "Timed Twitch message %s failed: %s",
+                            timer.get("id"), exc,
+                        )
+        except asyncio.CancelledError:
+            raise
+
+    async def close(self):
+        task = self._timed_message_task
+        self._timed_message_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        await super().close()
 
     def _connected_channel_names(self) -> set[str]:
         """Return usable joined-channel names, ignoring TwitchIO reconnect gaps."""
@@ -233,6 +304,10 @@ class TwitchChatBot(commands.Bot):
                         else:
                             logger.error(f"Failed to join {channel_name} after 3 attempts: {e}")
                 await asyncio.sleep(0.5)
+        if self._timed_message_task is None or self._timed_message_task.done():
+            self._timed_message_task = asyncio.create_task(
+                self._run_timed_messages(), name="twitch-timed-messages",
+            )
 
     async def event_raw_data(self, data: str):
         # Twitch sends periodic PING frames even in quiet channels. Recording

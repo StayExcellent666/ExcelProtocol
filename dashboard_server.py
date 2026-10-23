@@ -2209,7 +2209,7 @@ async def get_twitch_info(request):
     guild_id = request.match_info["guild_id"]
     import asyncio as _asyncio
     if not _bot_ref:
-        return web.json_response({"linked": False, "channel": None, "commands": [], "count": 0, "limit": 50})
+        return web.json_response({"linked": False, "channel": None, "commands": [], "timed_messages": [], "count": 0, "limit": 50})
 
     row = await asyncio.get_event_loop().run_in_executor(
         None, lambda: _bot_ref.db.get_twitch_channel(int(guild_id))
@@ -2237,6 +2237,9 @@ async def get_twitch_info(request):
 
     channel = row["twitch_channel"]
     commands = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.get_twitch_commands(channel))
+    timed_messages = await _asyncio.get_event_loop().run_in_executor(
+        None, lambda: _bot_ref.db.get_twitch_timed_messages(channel)
+    )
     builtin_commands = await _asyncio.get_event_loop().run_in_executor(
         None, lambda: _bot_ref.db.get_builtin_command_settings(channel)
     )
@@ -2303,6 +2306,7 @@ async def get_twitch_info(request):
         "linked": True,
         "channel": channel,
         "commands": commands,
+        "timed_messages": timed_messages,
         "builtin_commands": builtin_commands,
         "count": len(commands),
         "limit": limit,
@@ -2628,6 +2632,87 @@ async def add_twitch_command(request):
     success = await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.add_twitch_command(channel, command_name, response, permission, cooldown))
     if not success:
         raise web.HTTPInternalServerError(reason="Failed to save command")
+    return web.json_response({"ok": True})
+
+
+async def save_twitch_timed_message(request):
+    """Create or edit one repeating message for a linked Twitch channel."""
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    guild_id = int(request.match_info["guild_id"])
+    row = await asyncio.to_thread(_bot_ref.db.get_twitch_channel, guild_id)
+    if not row:
+        raise web.HTTPNotFound(reason="No Twitch channel linked")
+
+    body = await request.json()
+    message = str(body.get("message") or "").strip()
+    if not message:
+        raise web.HTTPBadRequest(reason="message is required")
+    if len(message) > 500:
+        raise web.HTTPBadRequest(reason="message must be 500 characters or fewer")
+    if "\n" in message or "\r" in message:
+        raise web.HTTPBadRequest(reason="message must stay on one line")
+    if message.startswith("/"):
+        raise web.HTTPBadRequest(reason="slash commands cannot be scheduled")
+    try:
+        interval_minutes = int(body.get("interval_minutes", 15))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="interval_minutes must be a number")
+    if not 5 <= interval_minutes <= 1440:
+        raise web.HTTPBadRequest(reason="interval_minutes must be between 5 and 1440")
+    delivery_mode = str(body.get("delivery_mode") or "chat").strip().lower()
+    if delivery_mode not in {"chat", "announcement"}:
+        raise web.HTTPBadRequest(reason="delivery_mode must be chat or announcement")
+    enabled = body.get("enabled", True)
+    only_while_live = body.get("only_while_live", True)
+    if not isinstance(enabled, bool) or not isinstance(only_while_live, bool):
+        raise web.HTTPBadRequest(reason="enabled and only_while_live must be booleans")
+
+    timer_id = body.get("id")
+    if timer_id is not None:
+        try:
+            timer_id = int(timer_id)
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(reason="id must be a number")
+    else:
+        existing = await asyncio.to_thread(
+            _bot_ref.db.get_twitch_timed_messages, row["twitch_channel"],
+        )
+        if len(existing) >= 10:
+            raise web.HTTPForbidden(reason="A Twitch channel can have up to 10 timed messages")
+
+    try:
+        saved_id = await asyncio.to_thread(
+            _bot_ref.db.save_twitch_timed_message,
+            row["twitch_channel"], message, interval_minutes, delivery_mode,
+            enabled, only_while_live, timer_id,
+        )
+    except ValueError as exc:
+        raise web.HTTPNotFound(reason=str(exc))
+    timers = await asyncio.to_thread(
+        _bot_ref.db.get_twitch_timed_messages, row["twitch_channel"],
+    )
+    return web.json_response({"ok": True, "id": saved_id, "timed_messages": timers})
+
+
+async def delete_twitch_timed_message(request):
+    """Delete one repeating message owned by a linked Twitch channel."""
+    if not _bot_ref:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    guild_id = int(request.match_info["guild_id"])
+    row = await asyncio.to_thread(_bot_ref.db.get_twitch_channel, guild_id)
+    if not row:
+        raise web.HTTPNotFound(reason="No Twitch channel linked")
+    try:
+        timer_id = int(request.match_info["timer_id"])
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="Invalid timer ID")
+    removed = await asyncio.to_thread(
+        _bot_ref.db.remove_twitch_timed_message,
+        row["twitch_channel"], timer_id,
+    )
+    if not removed:
+        raise web.HTTPNotFound(reason="Timed message not found")
     return web.json_response({"ok": True})
 
 async def delete_twitch_command(request):
@@ -9536,6 +9621,8 @@ def create_dashboard_app(bot=None):
     app.router.add_patch ("/api/guild/{guild_id}/streamers/{streamer}/discord", patch_streamer_discord_user)
     app.router.add_post  ("/api/guild/{guild_id}/twitch/commands",           add_twitch_command)
     app.router.add_delete("/api/guild/{guild_id}/twitch/commands/{command_name}", delete_twitch_command)
+    app.router.add_post  ("/api/guild/{guild_id}/twitch/timed-messages",      save_twitch_timed_message)
+    app.router.add_delete("/api/guild/{guild_id}/twitch/timed-messages/{timer_id}", delete_twitch_timed_message)
     app.router.add_patch ("/api/guild/{guild_id}/command-limit",             set_command_limit)
     app.router.add_get("/api/me",        auth_me)
     app.router.add_get("/api/admin/audit-log", admin_audit_log)
