@@ -652,38 +652,101 @@ async def add_security_headers(request: web.Request, response: web.StreamRespons
     """aiohttp response-prepare hook for the synchronous header policy."""
     _apply_security_headers(request, response)
 
+_AUDITED_METHODS = {"POST", "PATCH", "DELETE", "PUT"}
+_DASHBOARD_CHANGE_LOG_LIMIT = 50_000
+
+
+def _dashboard_audit_action(request: web.Request) -> str:
+    """Return a compact human-readable label without inspecting request data."""
+    explicit = request.get("audit_action")
+    if explicit:
+        return str(explicit)[:160]
+    guild_id = str(request.match_info.get("guild_id") or "")
+    parts = [part for part in request.path.split("/") if part]
+    if guild_id in parts:
+        parts = parts[parts.index(guild_id) + 1:]
+    resource = " / ".join(part.replace("-", " ") for part in parts) or "server settings"
+    verb = {
+        "POST": "Changed",
+        "PATCH": "Updated",
+        "PUT": "Updated",
+        "DELETE": "Deleted",
+    }.get(request.method, "Changed")
+    return f"{verb} {resource}"[:160]
+
+
 @web.middleware
 async def admin_audit_middleware(request: web.Request, handler):
-    """Log mutating actions taken by admins on guilds they don't own."""
+    """Record every successful authenticated, guild-scoped dashboard mutation.
+
+    Only metadata and handler-supplied safe details are stored.  Raw request
+    bodies are intentionally never captured because they may contain tokens,
+    private URLs, or other secrets.
+    """
     response = await handler(request)
     try:
-        if request.method in ("POST", "PATCH", "DELETE", "PUT"):
-            session = request.get("session")
-            if session and session.get("admin"):
-                guild_id = request.match_info.get("guild_id")
-                if guild_id:
-                    own_ids = {str(g["id"]) for g in session.get("guilds", [])}
-                    if guild_id not in own_ids:
-                        await db_execute(
-                            """INSERT INTO admin_audit_log
-                               (admin_id, admin_username, guild_id, method, endpoint, detail)
-                               VALUES (?, ?, ?, ?, ?, ?)""",
-                            (
-                                session.get("user_id", ""),
-                                session.get("username", ""),
-                                guild_id,
-                                request.method,
-                                request.path,
-                                None,
-                            )
-                        )
-                        # Keep only last 100 rows
-                        await db_execute(
-                            """DELETE FROM admin_audit_log WHERE id NOT IN (
-                               SELECT id FROM admin_audit_log ORDER BY id DESC LIMIT 100)"""
-                        )
+        guild_id = str(request.match_info.get("guild_id") or "")
+        session = request.get("session")
+        if (
+            request.method in _AUDITED_METHODS
+            and session
+            and guild_id
+            and response.status < 400
+        ):
+            if session.get("dev"):
+                actor_role = "bot_owner"
+            elif session.get("admin"):
+                actor_role = "dashboard_admin"
+            else:
+                actor_role = "server_manager"
+            guild_name = next(
+                (str(guild.get("name") or "") for guild in session.get("guilds", [])
+                 if str(guild.get("id")) == guild_id),
+                "",
+            )
+            if _bot_ref:
+                try:
+                    guild = _bot_ref.get_guild(int(guild_id))
+                    if guild:
+                        guild_name = str(guild.name)
+                except (TypeError, ValueError):
+                    pass
+            detail = request.get("audit_detail")
+            if isinstance(detail, (dict, list)):
+                detail = json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
+            elif detail is not None:
+                detail = str(detail)
+            audit_id = await db_insert(
+                """INSERT INTO dashboard_change_log
+                   (actor_id, actor_username, actor_role, guild_id, guild_name, method,
+                    endpoint, action, detail)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(session.get("user_id") or BOT_OWNER_ID or "internal"),
+                    str(session.get("username") or "Bot owner"),
+                    actor_role,
+                    guild_id,
+                    guild_name,
+                    request.method,
+                    request.path[:500],
+                    _dashboard_audit_action(request),
+                    detail[:2000] if detail else None,
+                ),
+            )
+            # A bounded rolling history prevents indefinite growth. Cleanup is
+            # amortized so a normal settings save only performs one small write.
+            if audit_id % 250 == 0:
+                await db_execute(
+                    """DELETE FROM dashboard_change_log
+                       WHERE id < (
+                           SELECT id FROM dashboard_change_log
+                           ORDER BY id DESC LIMIT 1 OFFSET ?
+                       )""",
+                    (_DASHBOARD_CHANGE_LOG_LIMIT - 1,),
+                )
     except Exception as e:
-        logger.warning(f"Admin audit log failed: {e}")
+        # Auditing must never turn a successful settings change into a failure.
+        logger.warning(f"Dashboard change audit failed: {e}")
     return response
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -871,15 +934,59 @@ async def auth_me(request):
     })
 
 async def admin_audit_log(request):
-    """Owner-only: return last 100 admin audit log entries."""
-    session = request["session"]
-    if not session.get("dev"):
-        raise web.HTTPForbidden(reason="Owner only")
-    rows = await db_fetch(
-        "SELECT id, admin_id, admin_username, guild_id, method, endpoint, detail, timestamp "
-        "FROM admin_audit_log ORDER BY id DESC LIMIT 100"
+    """Private, filterable history of successful server dashboard changes."""
+    _require_dev_or_admin(request)
+    query = request.rel_url.query
+    guild_id = str(query.get("guild_id") or "").strip()
+    method = str(query.get("method") or "").strip().upper()
+    search = str(query.get("q") or "").strip().lower()[:120]
+    try:
+        limit = min(250, max(25, int(query.get("limit", 100))))
+        offset = max(0, int(query.get("offset", 0)))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="Invalid audit pagination")
+    if method and method not in _AUDITED_METHODS:
+        raise web.HTTPBadRequest(reason="Invalid audit method")
+
+    where = []
+    params = []
+    if guild_id:
+        where.append("guild_id = ?")
+        params.append(guild_id)
+    if method:
+        where.append("method = ?")
+        params.append(method)
+    if search:
+        where.append(
+            "(LOWER(actor_username) LIKE ? OR actor_id LIKE ? OR guild_id LIKE ? OR "
+            "LOWER(guild_name) LIKE ? OR LOWER(action) LIKE ? OR LOWER(endpoint) LIKE ? "
+            "OR LOWER(COALESCE(detail, '')) LIKE ?)"
+        )
+        needle = f"%{search}%"
+        params.extend([needle] * 7)
+    where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+    count_rows = await db_fetch(
+        f"SELECT COUNT(*) AS count FROM dashboard_change_log{where_sql}",
+        tuple(params),
     )
-    return web.json_response([dict(r) for r in rows])
+    rows = await db_fetch(
+        "SELECT id, actor_id, actor_username, actor_role, guild_id, guild_name, method, "
+        "endpoint, action, detail, created_at FROM dashboard_change_log"
+        f"{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    )
+
+    entries = []
+    for row in rows:
+        entry = dict(row)
+        entry["guild_name"] = entry.get("guild_name") or str(row["guild_id"])
+        entries.append(entry)
+    return web.json_response({
+        "entries": entries,
+        "total": int(count_rows[0]["count"] if count_rows else 0),
+        "limit": limit,
+        "offset": offset,
+    })
 
 
 # ── Guilds ────────────────────────────────────────────────────────────────────
@@ -3840,6 +3947,10 @@ async def upsert_reward_trigger(request):
         raise web.HTTPBadRequest(reason="trigger_type must be media or fx")
     if not reward_id:
         raise web.HTTPBadRequest(reason="reward_id is required")
+    existing_trigger = await db_fetch(
+        "SELECT 1 FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
+        (guild_id, reward_id),
+    )
     if not 0 <= volume <= 1:
         raise web.HTTPBadRequest(reason="volume must be between 0 and 1")
     if end_seconds is not None and end_seconds <= start_seconds:
@@ -3907,12 +4018,28 @@ async def upsert_reward_trigger(request):
          fx_device_id, fx_effect_id, fx_duration_ms, fx_intensity,
          json.dumps(fx_parameters, separators=(",", ":")), 1 if fx_queue else 0),
     )
+    request["audit_action"] = "Updated reward trigger" if existing_trigger else "Added reward trigger"
+    request["audit_detail"] = {
+        "reward_id": reward_id,
+        "reward_title": reward_title,
+        "trigger_type": trigger_type,
+    }
     return web.json_response({"ok": True})
 
 async def delete_reward_trigger(request):
     guild_id  = request.match_info["guild_id"]
     reward_id = request.match_info["reward_id"]
+    rows = await db_fetch(
+        "SELECT reward_title, trigger_type FROM reward_triggers WHERE guild_id = ? AND reward_id = ?",
+        (guild_id, reward_id),
+    )
     await db_execute("DELETE FROM reward_triggers WHERE guild_id = ? AND reward_id = ?", (guild_id, reward_id))
+    request["audit_action"] = "Deleted reward trigger"
+    request["audit_detail"] = {
+        "reward_id": reward_id,
+        "reward_title": rows[0].get("reward_title", "") if rows else "",
+        "trigger_type": rows[0].get("trigger_type", "") if rows else "",
+    }
     return web.json_response({"ok": True})
 
 async def create_reward(request):

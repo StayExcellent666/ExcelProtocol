@@ -119,6 +119,11 @@ class TestSchema:
             "(admin_id, admin_username, guild_id, method, endpoint) "
             "VALUES ('5', 'admin', '1', 'POST', '/test')"
         )
+        conn.execute(
+            "INSERT INTO dashboard_change_log "
+            "(actor_id, actor_username, actor_role, guild_id, method, endpoint, action) "
+            "VALUES ('5', 'admin', 'dashboard_admin', '1', 'POST', '/test', 'Changed test')"
+        )
         suggestion_id = conn.execute(
             "INSERT INTO dashboard_suggestions (user_id, username, guild_id, text) "
             "VALUES ('6', 'viewer', '1', 'idea')"
@@ -147,6 +152,7 @@ class TestSchema:
         for table in (
             "server_setup", "welcome_settings", "notification_log",
             "fortuna_overlay_settings", "fortuna_plugin_keys", "admin_audit_log",
+            "dashboard_change_log",
             "dashboard_suggestions", "suggestion_comments",
         ):
             assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
@@ -1697,6 +1703,17 @@ class TestExcelProtocolFxSchema:
             "trigger_type", "fx_device_id", "fx_effect_id", "fx_duration_ms",
             "fx_intensity", "fx_parameters_json", "fx_queue",
         } <= reward_columns
+        conn.close()
+
+
+    def test_change_log_tracks_actor_server_and_action_without_request_bodies(self, db):
+        conn = db.get_connection()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(dashboard_change_log)")}
+        assert {
+            "actor_id", "actor_username", "actor_role", "guild_id", "guild_name", "method",
+            "endpoint", "action", "detail", "created_at",
+        } <= columns
+        assert "request_body" not in columns
         conn.close()
 
     def test_fx_reward_trigger_round_trip(self, db):

@@ -970,6 +970,38 @@ class Database:
             )
         ''')
 
+        # Private, bot-wide history of successful dashboard changes.  This is
+        # deliberately metadata-only: request bodies can contain OAuth tokens,
+        # media URLs, or other values that do not belong in an audit trail.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS dashboard_change_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id        TEXT NOT NULL,
+                actor_username  TEXT NOT NULL,
+                actor_role      TEXT NOT NULL,
+                guild_id        TEXT NOT NULL,
+                guild_name      TEXT NOT NULL DEFAULT '',
+                method          TEXT NOT NULL,
+                endpoint        TEXT NOT NULL,
+                action          TEXT NOT NULL,
+                detail          TEXT,
+                created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_dashboard_change_log_guild_time
+            ON dashboard_change_log(guild_id, created_at DESC)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_dashboard_change_log_actor_time
+            ON dashboard_change_log(actor_id, created_at DESC)
+        ''')
+        try:
+            cursor.execute("ALTER TABLE dashboard_change_log ADD COLUMN guild_name TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
         # Fortuna giveaway history. These tables are intentionally isolated
         # from the existing Twitch/Discord feature tables so the giveaway
         # integration can be added without changing current bot behaviour.
@@ -3933,6 +3965,7 @@ class Database:
         cursor.execute('DELETE FROM fortuna_plugin_keys WHERE guild_id = ?', (guild_id,))
         cursor.execute('DELETE FROM fortuna_overlay_settings WHERE guild_id = ?', (str(guild_id),))
         cursor.execute('DELETE FROM admin_audit_log WHERE guild_id = ?', (str(guild_id),))
+        cursor.execute('DELETE FROM dashboard_change_log WHERE guild_id = ?', (str(guild_id),))
         cursor.execute('DELETE FROM fx_pairing_codes WHERE guild_id = ?', (str(guild_id),))
         cursor.execute('DELETE FROM fx_command_audit WHERE guild_id = ?', (str(guild_id),))
         cursor.execute('DELETE FROM fx_desired_settings WHERE guild_id = ?', (str(guild_id),))

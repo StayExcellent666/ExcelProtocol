@@ -124,6 +124,77 @@ def _sqlite_fetchone(path, query, params=()):
         connection.close()
 
 
+class _FakeAuditRequest(dict):
+    def __init__(self, *, session, guild_id="123", method="POST", path=None, query=None):
+        super().__init__({"session": session, "match_info": {"guild_id": guild_id}, "query": query or {}})
+        self.method = method
+        self.path = path or f"/api/guild/{guild_id}/settings"
+
+    @property
+    def match_info(self):
+        return self["match_info"]
+
+    @property
+    def rel_url(self):
+        return SimpleNamespace(query=self.get("query", {}))
+
+
+class TestDashboardChangeAudit:
+    @pytest.mark.asyncio
+    async def test_successful_server_manager_change_records_safe_metadata(self, db, monkeypatch):
+        monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
+        request = _FakeAuditRequest(
+            session={"user_id": "42", "username": "mod", "guilds": [{"id": "123"}]},
+            path="/api/guild/123/broadcaster/triggers",
+        )
+        request["audit_action"] = "Added reward trigger"
+        request["audit_detail"] = {"reward_id": "reward-1", "trigger_type": "fx"}
+
+        async def handler(_request):
+            return dashboard_server.web.json_response({"ok": True})
+
+        await dashboard_server.admin_audit_middleware(request, handler)
+        row = _sqlite_fetchone(
+            db.db_path,
+            "SELECT actor_id, actor_username, actor_role, guild_id, action, detail "
+            "FROM dashboard_change_log",
+        )
+        assert row[:5] == ("42", "mod", "server_manager", "123", "Added reward trigger")
+        assert json.loads(row[5]) == {"reward_id": "reward-1", "trigger_type": "fx"}
+
+    @pytest.mark.asyncio
+    async def test_private_log_filters_by_server_and_requires_admin(self, db, monkeypatch):
+        monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
+        monkeypatch.setattr(dashboard_server, "_bot_ref", None)
+        conn = sqlite3.connect(db.db_path)
+        conn.executemany(
+            """INSERT INTO dashboard_change_log
+               (actor_id, actor_username, actor_role, guild_id, method, endpoint, action)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                ("1", "owner", "bot_owner", "123", "POST", "/one", "Changed one"),
+                ("2", "admin", "dashboard_admin", "456", "DELETE", "/two", "Deleted two"),
+            ],
+        )
+        conn.commit(); conn.close()
+
+        request = _FakeAuditRequest(
+            session={"admin": True, "user_id": "2", "username": "admin"},
+            query={"guild_id": "456", "limit": "100", "offset": "0"},
+        )
+        response = await dashboard_server.admin_audit_log(request)
+        payload = json.loads(response.body)
+        assert payload["total"] == 1
+        assert payload["entries"][0]["guild_id"] == "456"
+
+        denied = _FakeAuditRequest(
+            session={"user_id": "3", "username": "manager"},
+            query={},
+        )
+        with pytest.raises(dashboard_server.web.HTTPForbidden):
+            await dashboard_server.admin_audit_log(denied)
+
+
 class TestFxPairingAndIsolation:
     @pytest.mark.asyncio
     async def test_pairing_code_is_one_time(self, db, monkeypatch):

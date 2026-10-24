@@ -6201,49 +6201,89 @@ function TwitchChatConsoleTab() {
   </div>;
 }
 
-function AdminAuditLogTab() {
-  const [entries, setEntries] = useState([]);
+function AdminAuditLogTab({ guilds=[] }) {
+  const PAGE_SIZE = 100;
+  const [data, setData] = useState({entries:[],total:0});
+  const [serverId, setServerId] = useState("");
+  const [method, setMethod] = useState("");
+  const [query, setQuery] = useState("");
+  const [appliedQuery, setAppliedQuery] = useState("");
+  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
-    apiFetch("/api/admin/audit-log")
-      .then(setEntries)
-      .catch(e => console.error(e))
-      .finally(() => setLoading(false));
-  }, []);
+    let active = true;
+    const params = new URLSearchParams({limit:String(PAGE_SIZE),offset:String(page*PAGE_SIZE)});
+    if (serverId) params.set("guild_id", serverId);
+    if (method) params.set("method", method);
+    if (appliedQuery) params.set("q", appliedQuery);
+    apiFetch(`/api/admin/audit-log?${params}`)
+      .then(result => { if (active) setData(result); })
+      .catch(e => { if (active) setError(e.message || "Could not load the change log"); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [serverId, method, appliedQuery, page, refreshKey]);
 
-  return (
-    <div>
-      <div style={{ marginBottom:16 }}>
-        <h2 style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:800, fontSize:22, color:"var(--text)", margin:0, textShadow:"0 0 20px rgba(0,245,212,0.4)" }}>Admin Audit Log</h2>
-        <div style={{ fontSize:12, color:"var(--text3)", marginTop:4 }}>Last 100 privileged dashboard actions. Owner-only.</div>
+  const prepareLoad = () => { setLoading(true); setError(""); };
+  const applySearch = e => { e.preventDefault(); prepareLoad(); setPage(0); setAppliedQuery(query.trim()); };
+  const roleName = role => ({bot_owner:"Bot owner",dashboard_admin:"Dashboard admin",server_manager:"Server manager"}[role] || role);
+  const sortedGuilds = [...guilds].sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+
+  return <div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,flexWrap:"wrap",marginBottom:16}}>
+      <div>
+        <h2 style={{fontFamily:"'Orbitron',sans-serif",fontWeight:800,fontSize:22,color:"var(--text)",margin:0,textShadow:"0 0 20px rgba(0,245,212,0.4)"}}>Dashboard Change Log</h2>
+        <div style={{fontSize:12,color:"var(--text3)",marginTop:4}}>Successful server changes · visible only to the bot owner and dashboard admins</div>
       </div>
-      {loading ? <Spinner /> : entries.length === 0 ? (
-        <div style={{ color:"var(--text3)", fontSize:13, padding:"40px 0", textAlign:"center" }}>No admin actions recorded yet.</div>
-      ) : (
-        <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-          {entries.map(e => (
-            <div key={e.id} style={{ ...C.card, padding:"10px 14px", display:"flex", alignItems:"flex-start", gap:12 }}>
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4, flexWrap:"wrap" }}>
-                  <span style={{ fontSize:11, fontFamily:"'JetBrains Mono',monospace", color:"var(--cyan)", fontWeight:600 }}>{e.admin_username}</span>
-                  <span style={{ fontSize:10, padding:"1px 6px", borderRadius:4, fontFamily:"'JetBrains Mono',monospace", fontWeight:700,
-                    background: e.method==="DELETE" ? "rgba(255,77,109,0.15)" : e.method==="POST" ? "rgba(0,245,212,0.1)" : "rgba(245,180,50,0.1)",
-                    color: e.method==="DELETE" ? "var(--red)" : e.method==="POST" ? "var(--cyan)" : "#f5b432"
-                  }}>{e.method}</span>
-                  <span style={{ fontSize:11, color:"var(--text2)", fontFamily:"'JetBrains Mono',monospace", wordBreak:"break-all" }}>{e.endpoint}</span>
-                </div>
-                <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"'JetBrains Mono',monospace" }}>
-                  Guild: {e.guild_id} · {new Date(e.timestamp).toLocaleString()}
-                </div>
-                {e.detail && <div style={{fontSize:10,color:"var(--text2)",fontFamily:"'JetBrains Mono',monospace",marginTop:5,whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{e.detail}</div>}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <button onClick={()=>{prepareLoad();setRefreshKey(k=>k+1)}} style={C.btnSecondary}>↻ Refresh</button>
     </div>
-  );
+
+    <div style={{...C.card,padding:14,marginBottom:14,display:"grid",gridTemplateColumns:"minmax(240px,1.4fr) minmax(140px,.6fr) minmax(220px,1fr) auto",gap:10,alignItems:"end"}}>
+      <Field label="Discord server">
+        <CyanSelect value={serverId} onChange={e=>{prepareLoad();setServerId(e.target.value);setPage(0)}}>
+          <option value="">All servers</option>
+          {sortedGuilds.map(g=><option key={g.id} value={g.id}>{g.name} · {g.id}</option>)}
+        </CyanSelect>
+      </Field>
+      <Field label="Action type">
+        <CyanSelect value={method} onChange={e=>{prepareLoad();setMethod(e.target.value);setPage(0)}}>
+          <option value="">All actions</option><option value="POST">Create / change</option><option value="PATCH">Update</option><option value="PUT">Replace</option><option value="DELETE">Delete</option>
+        </CyanSelect>
+      </Field>
+      <form onSubmit={applySearch} style={{display:"contents"}}>
+        <Field label="Search server, person, or action"><CyanInput value={query} onChange={e=>setQuery(e.target.value)} placeholder="Server name/ID, username, reward trigger…" /></Field>
+        <button type="submit" style={{...C.btnPrimary,height:39}}>Filter</button>
+      </form>
+    </div>
+
+    {error && <div style={{...C.card,color:"var(--red)",marginBottom:12}}>⚠ {error}</div>}
+    {loading ? <Spinner /> : data.entries.length === 0 ? (
+      <div style={{color:"var(--text3)",fontSize:13,padding:"40px 0",textAlign:"center"}}>No matching changes recorded yet.</div>
+    ) : <div style={{display:"flex",flexDirection:"column",gap:7}}>
+      {data.entries.map(e=><div key={e.id} style={{...C.card,padding:"12px 14px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,flexWrap:"wrap"}}>
+          <div style={{minWidth:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <span style={{fontSize:12,color:"var(--cyan)",fontWeight:700}}>{e.action}</span>
+              <span style={{fontSize:9,padding:"2px 6px",borderRadius:4,fontFamily:"'JetBrains Mono',monospace",fontWeight:800,background:e.method==="DELETE"?"rgba(255,77,109,.15)":e.method==="POST"?"rgba(0,245,212,.1)":"rgba(245,180,50,.1)",color:e.method==="DELETE"?"var(--red)":e.method==="POST"?"var(--cyan)":"#f5b432"}}>{e.method}</span>
+            </div>
+            <div style={{fontSize:10,color:"var(--text2)",marginTop:5}}><b>{e.actor_username}</b> <span style={{color:"var(--text3)"}}>({roleName(e.actor_role)} · {e.actor_id})</span></div>
+          </div>
+          <div style={{fontSize:10,color:"var(--text3)",textAlign:"right",fontFamily:"'JetBrains Mono',monospace"}}>{new Date(`${e.created_at}${String(e.created_at).includes("Z")?"":"Z"}`).toLocaleString()}</div>
+        </div>
+        <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace",marginTop:7}}>{e.guild_name} · {e.guild_id}</div>
+        <div style={{fontSize:10,color:"var(--text3)",fontFamily:"'JetBrains Mono',monospace",marginTop:3,wordBreak:"break-all"}}>{e.endpoint}</div>
+        {e.detail&&<div style={{fontSize:10,color:"var(--text2)",fontFamily:"'JetBrains Mono',monospace",marginTop:6,whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{e.detail}</div>}
+      </div>)}
+    </div>}
+
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginTop:14,color:"var(--text3)",fontSize:11}}>
+      <span>{data.total||0} matching changes · retaining the latest 50,000</span>
+      <div style={{display:"flex",gap:8}}><button disabled={page===0||loading} onClick={()=>{prepareLoad();setPage(p=>Math.max(0,p-1))}} style={{...C.btnSecondary,opacity:page===0 ? .4 : 1}}>← Newer</button><button disabled={(page+1)*PAGE_SIZE>=(data.total||0)||loading} onClick={()=>{prepareLoad();setPage(p=>p+1)}} style={{...C.btnSecondary,opacity:(page+1)*PAGE_SIZE>=(data.total||0) ? .4 : 1}}>Older →</button></div>
+    </div>
+  </div>;
 }
 
 function DashboardOverviewTab({ guildId, guild, onNavigate, established }) {
@@ -6429,6 +6469,7 @@ export default function App() {
   const operationsTabs = (effectivelyDev || effectivelyAdmin || isAdmin) ? [
     { id:"globalstats",    icon:"/app/icons/globe.png", label:"Global Stats"      },
     { id:"healthcheck",    icon:"/app/icons/shield.png", label:"Health Check"     },
+    { id:"auditlog",       icon:"/app/icons/log.png",   label:"Change Log"       },
   ] : [];
   const managementTabs = effectivelyDev ? [
     { id:"serverinfo",     icon:"/app/icons/gear.png", label:"Server Info"         },
@@ -6441,7 +6482,6 @@ export default function App() {
   ] : [];
   const advancedAdminTabs = effectivelyDev ? [
     { id:"dbtools",        icon:"/app/icons/tools.png", label:"DB Tools"          },
-    { id:"auditlog",       icon:"/app/icons/log.png",   label:"Admin Audit Log"   },
   ] : [];
   const hasAdminNav = operationsTabs.length + managementTabs.length + feedbackTabs.length + advancedAdminTabs.length > 0;
   const searchedGuilds = guilds.filter(g => !guildSearch.trim() || (g.name||"").toLowerCase().includes(guildSearch.trim().toLowerCase()) || String(g.id).includes(guildSearch.trim()));
@@ -6607,7 +6647,7 @@ export default function App() {
               {activeTab==="suggestioninbox" && (effectivelyDev || effectivelyAdmin || isAdmin) && <SuggestionInboxTab />}
               {activeTab==="fortuna"       && <FortunaTab guildId={activeGuild} />}
               {activeTab==="dbtools"       && effectivelyDev && <DbToolsTab />}
-              {activeTab==="auditlog"      && effectivelyDev && <AdminAuditLogTab />}
+              {activeTab==="auditlog"      && (effectivelyDev || effectivelyAdmin || isAdmin) && <AdminAuditLogTab guilds={guilds} />}
             </>
           )}
         </div>
