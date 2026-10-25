@@ -18,6 +18,7 @@ import time
 import uuid
 import aiosqlite
 import aiohttp as http_client
+import psutil
 from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
@@ -4638,6 +4639,119 @@ def _task_loop_health(bot, attr_name: str, label: str) -> dict:
     }
 
 
+def _cgroup_memory_usage() -> tuple[int | None, int | None]:
+    """Return (used, limit) bytes when the container exposes a finite cgroup limit."""
+    paths = (
+        ("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+        (
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+        ),
+    )
+    for used_path, limit_path in paths:
+        try:
+            with open(used_path, "r", encoding="utf-8") as handle:
+                used_raw = handle.read().strip()
+            with open(limit_path, "r", encoding="utf-8") as handle:
+                limit_raw = handle.read().strip()
+            if not used_raw or not limit_raw or limit_raw == "max":
+                continue
+            used = int(used_raw)
+            limit = int(limit_raw)
+            # cgroup v1 reports a huge sentinel when no limit is configured.
+            if used >= 0 and 0 < limit < (1 << 60):
+                return used, limit
+        except (OSError, TypeError, ValueError):
+            continue
+    return None, None
+
+
+def _memory_diagnostics(bot) -> dict:
+    """Build a cheap, read-only memory and in-process object-count snapshot."""
+    mib = 1024 * 1024
+    process_rss = 0
+    process_uss = None
+    thread_count = None
+    try:
+        process = psutil.Process(os.getpid())
+        process_rss = int(process.memory_info().rss)
+        thread_count = int(process.num_threads())
+        try:
+            process_uss = int(process.memory_full_info().uss)
+        except (AttributeError, OSError, psutil.Error):
+            process_uss = None
+    except (OSError, psutil.Error):
+        pass
+
+    instance_used, instance_limit = _cgroup_memory_usage()
+    source = "cgroup"
+    if instance_used is None or instance_limit is None:
+        source = "system"
+        try:
+            vm = psutil.virtual_memory()
+            instance_limit = int(vm.total)
+            instance_used = max(0, int(vm.total - vm.available))
+        except (OSError, psutil.Error):
+            instance_limit = 0
+            instance_used = process_rss
+    instance_available = max(0, instance_limit - instance_used) if instance_limit else 0
+
+    guilds = list(getattr(bot, "guilds", []) or [])
+    cached_members = sum(len(getattr(guild, "members", []) or []) for guild in guilds)
+    cached_channels = sum(len(getattr(guild, "channels", []) or []) for guild in guilds)
+    cached_roles = sum(len(getattr(guild, "roles", []) or []) for guild in guilds)
+    try:
+        cached_messages = len(getattr(bot, "cached_messages", []) or [])
+    except (AttributeError, TypeError):
+        cached_messages = 0
+
+    def connection_count(groups) -> int:
+        return sum(len(group or ()) for group in (groups or {}).values())
+
+    rate_limit_keys = 0
+    for limiter_name in ("_fx_pair_rate", "_fx_command_rate"):
+        limiter = globals().get(limiter_name)
+        rate_limit_keys += len(getattr(limiter, "_hits", {}) or {})
+
+    percent = round((instance_used / instance_limit) * 100, 1) if instance_limit else 0.0
+    rss_percent = round((process_rss / instance_limit) * 100, 1) if instance_limit else 0.0
+    return {
+        "process": {
+            "rss_mb": round(process_rss / mib, 1),
+            "uss_mb": round(process_uss / mib, 1) if process_uss is not None else None,
+            "percent_of_limit": rss_percent,
+            "threads": thread_count,
+        },
+        "instance": {
+            "used_mb": round(instance_used / mib, 1),
+            "available_mb": round(instance_available / mib, 1),
+            "limit_mb": round(instance_limit / mib, 1),
+            "percent": percent,
+            "source": source,
+        },
+        "discord": {
+            "guilds": len(guilds),
+            "cached_members": cached_members,
+            "cached_channels": cached_channels,
+            "cached_roles": cached_roles,
+            "cached_messages": cached_messages,
+        },
+        "caches": {
+            "discord_api": len(_discord_cache),
+            "twitch_profiles": len(_twitch_cache),
+            "dashboard_sessions": len(_sessions),
+            "eventsub_dedup": len(_eventsub_seen),
+            "fx_rate_limit_keys": rate_limit_keys,
+            "active_raid_sessions": len(_fx_raid_sessions),
+        },
+        "connections": {
+            "overlay_websockets": connection_count(_overlay_connections),
+            "fortuna_websockets": connection_count(_fortuna_connections),
+            "fx_plugin_devices": len(getattr(FX_REGISTRY, "connections", {}) or {}),
+        },
+    }
+
+
 async def get_operations_health(request):
     """Read-only operational health snapshot for owners and configured admins."""
     _require_dev_or_admin(request)
@@ -4829,6 +4943,7 @@ async def get_operations_health(request):
             "permission_issues": permission_count,
             "notification_failures_24h": notification_failure_count,
         },
+        "memory": _memory_diagnostics(bot),
         "tasks": tasks_health,
         "signals": signals,
     })

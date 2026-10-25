@@ -757,6 +757,37 @@ class TestGuildFortunaAccess:
 
 
 class TestDevDashboardRoutes:
+    def test_memory_diagnostics_reports_instance_and_cache_counts(self, monkeypatch):
+        class FakeGuild:
+            members = [object(), object(), object()]
+            channels = [object(), object()]
+            roles = [object()]
+
+        class FakeBot:
+            guilds = [FakeGuild()]
+            cached_messages = [object(), object(), object(), object()]
+
+        mib = 1024 * 1024
+        monkeypatch.setattr(
+            dashboard_server,
+            "_cgroup_memory_usage",
+            lambda: (128 * mib, 512 * mib),
+        )
+
+        payload = dashboard_server._memory_diagnostics(FakeBot())
+
+        assert payload["instance"] == {
+            "used_mb": 128.0,
+            "available_mb": 384.0,
+            "limit_mb": 512.0,
+            "percent": 25.0,
+            "source": "cgroup",
+        }
+        assert payload["discord"]["cached_members"] == 3
+        assert payload["discord"]["cached_channels"] == 2
+        assert payload["discord"]["cached_roles"] == 1
+        assert payload["discord"]["cached_messages"] == 4
+
     """The developer panels must have matching backend endpoints."""
 
     def test_blacklist_and_stream_event_routes_registered(self, monkeypatch):
@@ -1348,6 +1379,10 @@ class TestDevDashboardRoutes:
         payload = json.loads(response.text)
         assert payload["status"] == "healthy"
         assert payload["bot"]["ready"] is True
+        assert payload["memory"]["process"]["rss_mb"] >= 0
+        assert payload["memory"]["instance"]["limit_mb"] > 0
+        assert payload["memory"]["discord"]["guilds"] == 2
+        assert "overlay_websockets" in payload["memory"]["connections"]
         assert payload["eventsub"]["actual"] == 4
         assert payload["twitch_chat"]["connected"] is True
         assert payload["twitch_chat"]["joined_channels"] == 2

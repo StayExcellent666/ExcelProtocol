@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import EmojiPickerLib, { Theme as EmojiTheme, EmojiStyle, SuggestionMode } from "emoji-picker-react";
 import {
   DndContext, closestCenter, PointerSensor, KeyboardSensor,
@@ -5834,7 +5834,10 @@ function HealthCheckTab({ ownerView = false }) {
     const mins = Math.floor((s % 3600) / 60);
     return [days && `${days}d`, hours && `${hours}h`, `${mins}m`].filter(Boolean).join(" ");
   };
+  const mb = value => value == null ? "Unavailable" : `${Number(value).toFixed(1)} MiB`;
   const statusColor = data?.status === "healthy" ? "var(--green)" : data?.status === "warning" ? "var(--yellow)" : "var(--red)";
+  const memoryPercent = Math.max(0, Math.min(100, Number(data?.memory?.instance?.percent) || 0));
+  const memoryColor = memoryPercent >= 90 ? "var(--red)" : memoryPercent >= 75 ? "var(--yellow)" : "var(--green)";
   const metric = (label, value, accent="var(--cyan)") => (
     <div style={{ ...C.card, padding:"14px 16px", minWidth:0 }}>
       <div style={{ fontSize:10, color:"var(--text3)", textTransform:"uppercase", letterSpacing:1, fontFamily:"'JetBrains Mono',monospace" }}>{label}</div>
@@ -5868,8 +5871,37 @@ function HealthCheckTab({ ownerView = false }) {
           {metric("Uptime", duration(data.bot?.uptime_seconds), "var(--green)")}
           {metric("Discord latency", `${data.bot?.latency_ms ?? 0} ms`, data.bot?.ready ? "var(--green)" : "var(--red)")}
           {metric("Servers", data.bot?.guild_count ?? 0)}
+          {metric("Instance memory", `${memoryPercent.toFixed(1)}%`, memoryColor)}
           {metric("Active notif IDs", data.streaming?.active_notification_ids ?? 0)}
           {metric("Permission issues", data.database?.permission_issues ?? 0, data.database?.permission_issues ? "var(--yellow)" : "var(--green)")}
+        </div>
+
+        <div style={{ ...C.card, padding:16, marginBottom:14 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:12, flexWrap:"wrap", marginBottom:12 }}>
+            <div>
+              <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:14 }}>Memory Diagnostics</div>
+              <div style={{ color:"var(--text3)", fontSize:10, marginTop:4 }}>Live snapshot from this bot instance. Object totals are counts, not estimated megabytes.</div>
+            </div>
+            <span style={{ color:memoryColor, fontFamily:"'JetBrains Mono',monospace", fontSize:11 }}>{mb(data.memory?.instance?.used_mb)} / {mb(data.memory?.instance?.limit_mb)}</span>
+          </div>
+          <div style={{ height:8, borderRadius:999, background:"var(--bg)", border:"1px solid var(--border)", overflow:"hidden", marginBottom:13 }}>
+            <div style={{ width:`${memoryPercent}%`, height:"100%", background:memoryColor, boxShadow:`0 0 12px ${memoryColor}`, transition:"width .25s ease" }} />
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(135px,1fr))", gap:8, marginBottom:13 }}>
+            {[
+              ["Process RSS", mb(data.memory?.process?.rss_mb)],
+              ["Process unique", mb(data.memory?.process?.uss_mb)],
+              ["Instance available", mb(data.memory?.instance?.available_mb)],
+              ["Process threads", data.memory?.process?.threads ?? "Unavailable"],
+            ].map(([label,value]) => <div key={label} style={{ background:"var(--bg)", border:"1px solid var(--border)", borderRadius:8, padding:"10px 11px" }}><div style={{ color:"var(--text3)", fontSize:9, textTransform:"uppercase", letterSpacing:.8 }}>{label}</div><div style={{ color:"var(--text)", fontSize:15, fontWeight:700, marginTop:4, fontFamily:"'JetBrains Mono',monospace" }}>{value}</div></div>)}
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(250px,1fr))", gap:10 }}>
+            {[
+              ["Discord cache", [["Members",data.memory?.discord?.cached_members],["Channels",data.memory?.discord?.cached_channels],["Roles",data.memory?.discord?.cached_roles],["Messages",data.memory?.discord?.cached_messages]]],
+              ["Application caches", [["Discord API",data.memory?.caches?.discord_api],["Twitch profiles",data.memory?.caches?.twitch_profiles],["Dashboard sessions",data.memory?.caches?.dashboard_sessions],["EventSub dedup",data.memory?.caches?.eventsub_dedup],["FX limiter keys",data.memory?.caches?.fx_rate_limit_keys],["Raid sessions",data.memory?.caches?.active_raid_sessions]]],
+              ["Live connections", [["Overlay WebSockets",data.memory?.connections?.overlay_websockets],["Fortuna WebSockets",data.memory?.connections?.fortuna_websockets],["FX plugin devices",data.memory?.connections?.fx_plugin_devices]]],
+            ].map(([title,rows]) => <div key={title} style={{ background:"var(--bg)", border:"1px solid var(--border)", borderRadius:8, padding:"10px 12px" }}><div style={{ color:"var(--cyan)", fontSize:10, fontWeight:700, marginBottom:7, textTransform:"uppercase", letterSpacing:.8 }}>{title}</div><div style={{ display:"grid", gridTemplateColumns:"1fr auto", gap:"6px 10px", fontSize:11 }}>{rows.map(([label,value]) => <Fragment key={label}><span style={{ color:"var(--text3)" }}>{label}</span><span style={{ color:"var(--text2)", fontFamily:"'JetBrains Mono',monospace" }}>{value ?? 0}</span></Fragment>)}</div></div>)}
+          </div>
         </div>
 
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))", gap:12, marginBottom:14 }}>
