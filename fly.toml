@@ -1,6 +1,13 @@
 app = "excelprotocol"
 primary_region = "fra"
 
+# Keep enough memory headroom for Discord member caching, Twitch integrations,
+# dashboard sessions, and OBS/plugin WebSockets across future deploys.
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
 # Persistent volume — bot DB lives here
 [[mounts]]
   source = "twitch_bot_data"
