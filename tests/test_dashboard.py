@@ -163,6 +163,41 @@ class TestDashboardChangeAudit:
         assert json.loads(row[5]) == {"reward_id": "reward-1", "trigger_type": "fx"}
 
     @pytest.mark.asyncio
+    async def test_global_dashboard_change_is_recorded_without_a_guild_route(self, db, monkeypatch):
+        monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
+        request = _FakeAuditRequest(
+            session={"dev": True, "user_id": "1", "username": "owner"},
+            guild_id="",
+            path="/api/dev/bot-statuses",
+        )
+
+        async def handler(_request):
+            return dashboard_server.web.json_response({"ok": True})
+
+        await dashboard_server.admin_audit_middleware(request, handler)
+        row = _sqlite_fetchone(
+            db.db_path,
+            "SELECT actor_role, guild_id, guild_name, action FROM dashboard_change_log",
+        )
+        assert row == ("bot_owner", "global", "Global dashboard", "Changed bot statuses")
+
+    @pytest.mark.asyncio
+    async def test_unauthenticated_automatic_api_activity_is_not_recorded(self, db, monkeypatch):
+        monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
+        request = _FakeAuditRequest(
+            session={}, guild_id="", path="/api/eventsub/callback",
+        )
+        request.pop("session")
+
+        async def handler(_request):
+            return dashboard_server.web.Response(status=204)
+
+        await dashboard_server.admin_audit_middleware(request, handler)
+        assert _sqlite_fetchone(
+            db.db_path, "SELECT COUNT(*) FROM dashboard_change_log"
+        )[0] == 0
+
+    @pytest.mark.asyncio
     async def test_private_log_filters_by_server_and_requires_admin(self, db, monkeypatch):
         monkeypatch.setattr(dashboard_server, "DB_PATH", db.db_path)
         monkeypatch.setattr(dashboard_server, "_bot_ref", None)

@@ -654,6 +654,13 @@ async def add_security_headers(request: web.Request, response: web.StreamRespons
 
 _AUDITED_METHODS = {"POST", "PATCH", "DELETE", "PUT"}
 _DASHBOARD_CHANGE_LOG_LIMIT = 50_000
+_AUDIT_SAFE_BODY_FIELDS = {
+    "action", "broadcaster_id", "channel", "channel_id", "command_name", "device_id", "effect",
+    "enabled", "entry_mode", "is_enabled", "key_id", "label", "limit",
+    "notifications_paused", "permission_dm_muted", "reward_id",
+    "reward_title", "role_id", "sound_name", "streamer_name", "title",
+    "trigger_type", "twitch_login", "user_id", "username",
+}
 
 
 def _dashboard_audit_action(request: web.Request) -> str:
@@ -665,6 +672,9 @@ def _dashboard_audit_action(request: web.Request) -> str:
     parts = [part for part in request.path.split("/") if part]
     if guild_id in parts:
         parts = parts[parts.index(guild_id) + 1:]
+    else:
+        while parts and parts[0] in {"api", "admin", "dev"}:
+            parts.pop(0)
     resource = " / ".join(part.replace("-", " ") for part in parts) or "server settings"
     verb = {
         "POST": "Changed",
@@ -675,9 +685,93 @@ def _dashboard_audit_action(request: web.Request) -> str:
     return f"{verb} {resource}"[:160]
 
 
+async def _dashboard_audit_detail(request: web.Request):
+    """Collect identifiers useful for auditing without retaining arbitrary input."""
+    detail = request.get("audit_detail")
+    if detail is not None:
+        return detail
+    safe = {
+        str(key): str(value)[:160]
+        for key, value in request.match_info.items()
+        if key != "guild_id" and value not in (None, "")
+    }
+    content_type = str(getattr(request, "content_type", "") or "").lower()
+    content_length = getattr(request, "content_length", None)
+    if content_type == "application/json" and (content_length is None or content_length <= 65536):
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            for key in _AUDIT_SAFE_BODY_FIELDS:
+                value = body.get(key)
+                if isinstance(value, (str, int, float, bool)) and value not in (None, ""):
+                    safe[key] = value[:160] if isinstance(value, str) else value
+    return safe or None
+
+
+async def _write_dashboard_change(session: dict, *, guild_id: str = "global",
+                                  method: str, endpoint: str, action: str,
+                                  detail=None, guild_name: str = "") -> int:
+    """Persist one human dashboard action and enforce rolling retention."""
+    guild_id = str(guild_id or "global")
+    if guild_id == "global":
+        guild_name = guild_name or "Global dashboard"
+    else:
+        guild_name = guild_name or next(
+            (str(guild.get("name") or "") for guild in session.get("guilds", [])
+             if str(guild.get("id")) == guild_id),
+            "",
+        )
+        if _bot_ref:
+            try:
+                guild = _bot_ref.get_guild(int(guild_id))
+                if guild:
+                    guild_name = str(guild.name)
+            except (TypeError, ValueError):
+                pass
+    if session.get("dev"):
+        actor_role = "bot_owner"
+    elif session.get("admin"):
+        actor_role = "dashboard_admin"
+    else:
+        actor_role = "server_manager"
+    if isinstance(detail, (dict, list)):
+        detail = json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
+    elif detail is not None:
+        detail = str(detail)
+    audit_id = await db_insert(
+        """INSERT INTO dashboard_change_log
+           (actor_id, actor_username, actor_role, guild_id, guild_name, method,
+            endpoint, action, detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            str(session.get("user_id") or BOT_OWNER_ID or "internal"),
+            str(session.get("username") or "Bot owner"),
+            actor_role,
+            guild_id,
+            guild_name,
+            str(method)[:16],
+            str(endpoint)[:500],
+            str(action)[:160],
+            detail[:2000] if detail else None,
+        ),
+    )
+    if audit_id % 250 == 0:
+        await db_execute(
+            """DELETE FROM dashboard_change_log
+               WHERE id < (
+                   SELECT id FROM dashboard_change_log
+                   ORDER BY id DESC LIMIT 1 OFFSET ?
+               )""",
+            (_DASHBOARD_CHANGE_LOG_LIMIT - 1,),
+        )
+    return audit_id
+
+
 @web.middleware
 async def admin_audit_middleware(request: web.Request, handler):
-    """Record every successful authenticated, guild-scoped dashboard mutation.
+    """Record every successful authenticated dashboard mutation.
 
     Only metadata and handler-supplied safe details are stored.  Raw request
     bodies are intentionally never captured because they may contain tokens,
@@ -685,65 +779,22 @@ async def admin_audit_middleware(request: web.Request, handler):
     """
     response = await handler(request)
     try:
-        guild_id = str(request.match_info.get("guild_id") or "")
         session = request.get("session")
         if (
             request.method in _AUDITED_METHODS
             and session
-            and guild_id
+            and request.path.startswith("/api/")
             and response.status < 400
         ):
-            if session.get("dev"):
-                actor_role = "bot_owner"
-            elif session.get("admin"):
-                actor_role = "dashboard_admin"
-            else:
-                actor_role = "server_manager"
-            guild_name = next(
-                (str(guild.get("name") or "") for guild in session.get("guilds", [])
-                 if str(guild.get("id")) == guild_id),
-                "",
+            await _write_dashboard_change(
+                session,
+                guild_id=str(request.get("audit_guild_id") or request.match_info.get("guild_id") or "global"),
+                method=request.method,
+                endpoint=request.path,
+                action=_dashboard_audit_action(request),
+                detail=await _dashboard_audit_detail(request),
+                guild_name=str(request.get("audit_guild_name") or ""),
             )
-            if _bot_ref:
-                try:
-                    guild = _bot_ref.get_guild(int(guild_id))
-                    if guild:
-                        guild_name = str(guild.name)
-                except (TypeError, ValueError):
-                    pass
-            detail = request.get("audit_detail")
-            if isinstance(detail, (dict, list)):
-                detail = json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
-            elif detail is not None:
-                detail = str(detail)
-            audit_id = await db_insert(
-                """INSERT INTO dashboard_change_log
-                   (actor_id, actor_username, actor_role, guild_id, guild_name, method,
-                    endpoint, action, detail)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    str(session.get("user_id") or BOT_OWNER_ID or "internal"),
-                    str(session.get("username") or "Bot owner"),
-                    actor_role,
-                    guild_id,
-                    guild_name,
-                    request.method,
-                    request.path[:500],
-                    _dashboard_audit_action(request),
-                    detail[:2000] if detail else None,
-                ),
-            )
-            # A bounded rolling history prevents indefinite growth. Cleanup is
-            # amortized so a normal settings save only performs one small write.
-            if audit_id % 250 == 0:
-                await db_execute(
-                    """DELETE FROM dashboard_change_log
-                       WHERE id < (
-                           SELECT id FROM dashboard_change_log
-                           ORDER BY id DESC LIMIT 1 OFFSET ?
-                       )""",
-                    (_DASHBOARD_CHANGE_LOG_LIMIT - 1,),
-                )
     except Exception as e:
         # Auditing must never turn a successful settings change into a failure.
         logger.warning(f"Dashboard change audit failed: {e}")
@@ -1563,6 +1614,9 @@ async def post_suggestion(request):
         "INSERT INTO dashboard_suggestions (user_id, username, guild_id, text) VALUES (?, ?, ?, ?)",
         (str(sender_id) if sender_id else None, sender, guild_id, text),
     )
+    request["audit_guild_id"] = guild_id or "global"
+    request["audit_action"] = "Submitted dashboard suggestion"
+    request["audit_detail"] = {"suggestion_id": suggestion_id}
 
     dm_sent = False
     if BOT_OWNER_ID and DISCORD_TOKEN:
@@ -1677,7 +1731,10 @@ async def add_suggestion_comment(request):
     """Owner/admin: attach an internal comment to a suggestion."""
     _require_dev_or_admin(request)
     suggestion_id = int(request.match_info["suggestion_id"])
-    if not await db_fetch("SELECT 1 FROM dashboard_suggestions WHERE id = ?", (suggestion_id,)):
+    suggestions = await db_fetch(
+        "SELECT guild_id FROM dashboard_suggestions WHERE id = ?", (suggestion_id,)
+    )
+    if not suggestions:
         raise web.HTTPNotFound(reason="Suggestion not found")
     body = await request.json()
     text = str(body.get("text") or "").strip()
@@ -1688,6 +1745,9 @@ async def add_suggestion_comment(request):
         "INSERT INTO suggestion_comments (suggestion_id, author_id, author_username, text) VALUES (?, ?, ?, ?)",
         (suggestion_id, str(session.get("user_id") or "owner"), session.get("username") or "Owner", text),
     )
+    request["audit_guild_id"] = str(suggestions[0].get("guild_id") or "global")
+    request["audit_action"] = "Commented on dashboard suggestion"
+    request["audit_detail"] = {"suggestion_id": suggestion_id, "comment_id": comment_id}
     return web.json_response({"ok": True, "id": comment_id})
 
 
@@ -1695,8 +1755,16 @@ async def delete_suggestion(request):
     """Owner/admin: delete a suggestion and all of its comments."""
     _require_dev_or_admin(request)
     suggestion_id = int(request.match_info["suggestion_id"])
+    suggestions = await db_fetch(
+        "SELECT guild_id FROM dashboard_suggestions WHERE id = ?", (suggestion_id,)
+    )
     await db_execute("DELETE FROM suggestion_comments WHERE suggestion_id = ?", (suggestion_id,))
     await db_execute("DELETE FROM dashboard_suggestions WHERE id = ?", (suggestion_id,))
+    request["audit_guild_id"] = str(
+        suggestions[0].get("guild_id") if suggestions else "global"
+    ) or "global"
+    request["audit_action"] = "Deleted dashboard suggestion"
+    request["audit_detail"] = {"suggestion_id": suggestion_id}
     return web.json_response({"ok": True})
 
 # ── Support ──────────────────────────────────────────────────────────────────
@@ -1762,6 +1830,8 @@ async def post_support(request):
     if msg_resp.status not in (200, 201):
         raise web.HTTPInternalServerError(reason="Failed to send DM")
 
+    request["audit_guild_id"] = str(guild_id or "global")
+    request["audit_action"] = "Submitted support request"
     return web.json_response({"ok": True})
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -2933,7 +3003,7 @@ async def twitch_broadcaster_callback(request):
     if state_data.get("purpose") == "chat_bot":
         if not session.get("dev"):
             raise web.HTTPForbidden(reason="Bot owner access required")
-        return await _complete_twitch_bot_oauth(code)
+        return await _complete_twitch_bot_oauth(code, session)
 
     guild_id = state_data["guild_id"]
 
@@ -3013,10 +3083,22 @@ async def twitch_broadcaster_callback(request):
     # Register EventSub subscription for channel point redeems
     await _register_eventsub(user["id"])
 
+    try:
+        await _write_dashboard_change(
+            session,
+            guild_id=guild_id,
+            method="POST",
+            endpoint="/auth/twitch/callback",
+            action="Connected Twitch broadcaster",
+            detail={"twitch_user_id": str(user["id"]), "twitch_login": user["login"]},
+        )
+    except Exception as exc:
+        logger.warning("Twitch broadcaster connection audit failed: %s", exc)
+
     raise web.HTTPFound(f"/app/?twitch_connected=1")
 
 
-async def _complete_twitch_bot_oauth(code: str):
+async def _complete_twitch_bot_oauth(code: str, session: dict | None = None):
     """Exchange and persist an owner-authorized Twitch chat credential pair."""
     sess = get_http_session()
     async with sess.post("https://id.twitch.tv/oauth2/token", data={
@@ -3093,6 +3175,17 @@ async def _complete_twitch_bot_oauth(code: str):
     rows = await db_fetch("SELECT twitch_user_id FROM broadcaster_tokens")
     for row in rows:
         asyncio.create_task(_register_eventsub(str(row["twitch_user_id"])))
+    try:
+        await _write_dashboard_change(
+            session or {"dev": True},
+            guild_id="global",
+            method="POST",
+            endpoint="/auth/twitch/callback",
+            action="Connected Twitch chat bot account",
+            detail={"twitch_user_id": str(user["id"]), "twitch_login": actual_login},
+        )
+    except Exception as exc:
+        logger.warning("Twitch chat bot connection audit failed: %s", exc)
     raise web.HTTPFound("/app/?twitch_bot_connected=1")
 
 async def twitch_broadcaster_disconnect(request):
@@ -6184,7 +6277,7 @@ async def revoke_fortuna_plugin_key(request):
 
 async def _fortuna_admin_channel(broadcaster_id: str):
     rows = await db_fetch(
-        """SELECT twitch_broadcaster_id, twitch_broadcaster_login
+        """SELECT guild_id, twitch_broadcaster_id, twitch_broadcaster_login
            FROM fortuna_plugin_keys
            WHERE twitch_broadcaster_id = ? AND revoked_at IS NULL
            ORDER BY id DESC LIMIT 1""",
@@ -6316,6 +6409,12 @@ async def start_fortuna_control(request):
         )
     except ValueError as exc:
         raise web.HTTPConflict(reason=str(exc)) from exc
+    request["audit_guild_id"] = str(channel.get("guild_id") or "global")
+    request["audit_action"] = "Started Fortuna giveaway"
+    request["audit_detail"] = {
+        "twitch_login": channel["twitch_broadcaster_login"],
+        "giveaway_id": giveaway.get("id"),
+    }
     return web.json_response({"ok": True, "giveaway": giveaway}, status=201)
 
 
@@ -6323,7 +6422,8 @@ async def spin_fortuna_control(request):
     _require_dev_or_admin(request)
     body = await request.json()
     broadcaster_id = str(body.get("broadcaster_id") or "").strip()
-    if not await _fortuna_admin_channel(broadcaster_id):
+    channel = await _fortuna_admin_channel(broadcaster_id)
+    if not channel:
         raise web.HTTPNotFound(reason="Fortuna channel not found")
     giveaway = await _fortuna_open_giveaway(broadcaster_id)
     if not giveaway:
@@ -6337,6 +6437,12 @@ async def spin_fortuna_control(request):
         raise web.HTTPBadRequest(reason="No eligible entries yet")
     if not await _fortuna_finish_giveaway(int(giveaway["id"])):
         raise web.HTTPConflict(reason="Giveaway could not be drawn")
+    request["audit_guild_id"] = str(channel.get("guild_id") or "global")
+    request["audit_action"] = "Spun Fortuna giveaway"
+    request["audit_detail"] = {
+        "twitch_login": channel["twitch_broadcaster_login"],
+        "giveaway_id": giveaway.get("id"),
+    }
     return web.json_response({"ok": True, "status": "spinning"})
 
 
@@ -6350,6 +6456,9 @@ async def cancel_fortuna_control(request):
     if not await _fortuna_cancel_giveaway(
             broadcaster_id, channel["twitch_broadcaster_login"]):
         raise web.HTTPConflict(reason="No giveaway is open")
+    request["audit_guild_id"] = str(channel.get("guild_id") or "global")
+    request["audit_action"] = "Cancelled Fortuna giveaway"
+    request["audit_detail"] = {"twitch_login": channel["twitch_broadcaster_login"]}
     return web.json_response({"ok": True, "status": "cancelled"})
 
 

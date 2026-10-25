@@ -6235,7 +6235,7 @@ function AdminAuditLogTab({ guilds=[] }) {
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,flexWrap:"wrap",marginBottom:16}}>
       <div>
         <h2 style={{fontFamily:"'Orbitron',sans-serif",fontWeight:800,fontSize:22,color:"var(--text)",margin:0,textShadow:"0 0 20px rgba(0,245,212,0.4)"}}>Dashboard Change Log</h2>
-        <div style={{fontSize:12,color:"var(--text3)",marginTop:4}}>Successful server changes · visible only to the bot owner and dashboard admins</div>
+        <div style={{fontSize:12,color:"var(--text3)",marginTop:4}}>Successful human dashboard actions · automatic bot activity is excluded · owner/admin only</div>
       </div>
       <button onClick={()=>{prepareLoad();setRefreshKey(k=>k+1)}} style={C.btnSecondary}>↻ Refresh</button>
     </div>
@@ -6244,6 +6244,7 @@ function AdminAuditLogTab({ guilds=[] }) {
       <Field label="Discord server">
         <CyanSelect value={serverId} onChange={e=>{prepareLoad();setServerId(e.target.value);setPage(0)}}>
           <option value="">All servers</option>
+          <option value="global">Global dashboard</option>
           {sortedGuilds.map(g=><option key={g.id} value={g.id}>{g.name} · {g.id}</option>)}
         </CyanSelect>
       </Field>
