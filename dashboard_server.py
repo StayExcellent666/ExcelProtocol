@@ -1403,6 +1403,25 @@ async def get_roles_list(request):
         return web.json_response([])
 
 # ── Create Reaction Role Panel ────────────────────────────────────────────────
+_REACTION_ROLE_TYPES = frozenset({"buttons", "dropdown", "modal"})
+
+
+def _validate_reaction_role_config(rr_type: str, roles: list, max_roles):
+    if rr_type not in _REACTION_ROLE_TYPES:
+        raise web.HTTPBadRequest(reason="type must be buttons, dropdown, or modal")
+    if len(roles) > 25:
+        raise web.HTTPBadRequest(reason="Reaction role panels support at most 25 role options")
+    if max_roles is None or max_roles == "":
+        return None
+    try:
+        value = int(max_roles)
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="max_roles must be a number")
+    if value < 1 or value > 25:
+        raise web.HTTPBadRequest(reason="max_roles must be between 1 and 25")
+    return value
+
+
 async def _resolve_role_id(guild_id: str, role_id: str, new_role_name: str = None, new_role_color: int = None) -> str:
     """If role_id is __create__, create the role in Discord and return the real ID."""
     if role_id != "__create__":
@@ -1443,6 +1462,7 @@ async def create_reaction_role(request):
 
     if not title or not channel_id or not roles:
         raise web.HTTPBadRequest(reason="title, channel_id and roles are required")
+    max_roles = _validate_reaction_role_config(rr_type, roles, max_roles)
 
     # Resolve any __create__ role IDs first
     for r in roles:
@@ -1562,6 +1582,10 @@ async def edit_reaction_role(request):
         for r in body["roles"]:
             r["role_id"] = await _resolve_role_id(guild_id, str(r.get("role_id", "")), r.get("new_role_name"))
         entry["roles"] = [{**r, "role_id": int(r["role_id"])} for r in body["roles"]]
+
+    entry["max_roles"] = _validate_reaction_role_config(
+        entry["type"], entry["roles"], entry.get("max_roles")
+    )
 
     # Save updated entry to DB
     _bot_ref.db.rr_save(

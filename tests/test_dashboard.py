@@ -87,6 +87,26 @@ class TestTwitchRewardManagement:
         assert "1 minute" in exc.value.reason
 
 
+class TestReactionRoleConfig:
+    def test_modal_is_a_supported_panel_type(self):
+        assert dashboard_server._validate_reaction_role_config(
+            "modal", [{"role_id": "1"}], None
+        ) is None
+
+    def test_unknown_panel_type_is_rejected(self):
+        with pytest.raises(dashboard_server.web.HTTPBadRequest):
+            dashboard_server._validate_reaction_role_config(
+                "popup", [{"role_id": "1"}], None
+            )
+
+    def test_discord_option_limit_is_enforced(self):
+        with pytest.raises(dashboard_server.web.HTTPBadRequest) as exc:
+            dashboard_server._validate_reaction_role_config(
+                "modal", [{"role_id": str(i)} for i in range(26)], None
+            )
+        assert "25" in exc.value.reason
+
+
 class _FakeDashboardRequest(dict):
     @property
     def match_info(self):

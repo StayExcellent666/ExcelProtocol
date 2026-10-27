@@ -757,7 +757,11 @@ function ReactionRolePanelModal({ guildId, panel, onClose, onSaved }) {
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const addRole = () => setRoles(r => [...r, { label:"", emoji:"", role_id:"", _uiId: newId() }]);
+  const addRole = () => {
+    if (roles.length >= 25) { setError("Discord allows at most 25 role options per panel."); return; }
+    setError("");
+    setRoles(r => [...r, { label:"", emoji:"", role_id:"", _uiId: newId() }]);
+  };
   const updateRole = (uiId, val) => setRoles(r => r.map(x => x._uiId === uiId ? { ...val, _uiId: uiId } : x));
   const removeRole = (uiId) => setRoles(r => r.filter(x => x._uiId !== uiId));
 
@@ -820,17 +824,20 @@ function ReactionRolePanelModal({ guildId, panel, onClose, onSaved }) {
       </Field>
       {!isEdit && <Field label="Channel"><ChannelSelect guildId={guildId} value={channelId} onChange={setChannelId} /></Field>}
       <div style={{ display:"flex", gap:10 }}>
-        <div style={{ flex:1 }}><Field label="Type"><CyanSelect value={type} onChange={e=>setType(e.target.value)}><option value="dropdown">Dropdown</option><option value="buttons">Buttons</option></CyanSelect></Field></div>
+        <div style={{ flex:1 }}><Field label="Type"><CyanSelect value={type} onChange={e=>setType(e.target.value)}><option value="buttons">Buttons</option><option value="dropdown">Dropdown</option><option value="modal">Modal</option></CyanSelect></Field></div>
         <div style={{ flex:1 }}><Field label="Max Roles"><CyanInput value={maxRoles} onChange={e=>setMaxRoles(e.target.value)} type="number" min="1" placeholder="No limit" /></Field></div>
       </div>
+      {type==="modal" && <div style={{ padding:"10px 12px", borderRadius:8, border:"1px solid rgba(0,245,212,0.24)", background:"rgba(0,245,212,0.06)", color:"var(--text2)", fontSize:12, lineHeight:1.5, fontFamily:"'Outfit',sans-serif" }}>
+        Posts a <strong style={{ color:"var(--cyan)" }}>Choose Your Roles</strong> button. Each member gets a private native popup with their current roles already selected.
+      </div>}
       <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:13, color:"var(--text2)", fontFamily:"'Orbitron',sans-serif" }}>
         <input type="checkbox" checked={onlyAdd} onChange={e=>setOnlyAdd(e.target.checked)} style={{ width:14, height:14, accentColor:"var(--cyan)" }} />
         Only allow adding roles (not removing)
       </label>
       <div>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
-          <label style={C.label}>Role Buttons ({roles.length})</label>
-          <button onClick={addRole} style={{ ...C.btnPrimary, padding:"5px 12px", fontSize:11 }}>+ Add Role</button>
+          <label style={C.label}>Role Options ({roles.length})</label>
+          <button onClick={addRole} disabled={roles.length>=25} style={{ ...C.btnPrimary, padding:"5px 12px", fontSize:11, opacity:roles.length>=25?0.45:1 }}>+ Add Role</button>
         </div>
         <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>

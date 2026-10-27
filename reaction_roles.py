@@ -398,7 +398,127 @@ def _build_view(rr_entry: dict, bot) -> discord.ui.View:
             button.callback = btn_callback
             view.add_item(button)
 
+    elif rr_type == "modal":
+        button = discord.ui.Button(
+            label="Choose Your Roles",
+            style=_get_button_style(guild_id),
+            emoji="🎭",
+            custom_id=f"rr_modal_{rr_entry['message_id']}"
+        )
+
+        async def modal_callback(interaction: discord.Interaction):
+            member = interaction.user
+            if not isinstance(member, discord.Member):
+                try:
+                    member = await interaction.guild.fetch_member(interaction.user.id)
+                except Exception:
+                    await interaction.response.send_message(
+                        "❌ I couldn't load your current server roles.",
+                        ephemeral=True,
+                    )
+                    return
+
+            await interaction.response.send_modal(
+                ReactionRolePickerModal(rr_entry, member)
+            )
+
+        button.callback = modal_callback
+        view.add_item(button)
+
     return view
+
+
+class ReactionRolePickerModal(discord.ui.Modal):
+    """Private, member-specific role picker opened from a public panel button."""
+
+    def __init__(self, rr_entry: dict, member: discord.Member):
+        panel_title = str(rr_entry.get("title") or "Choose Your Roles")
+        super().__init__(
+            title=panel_title[:45],
+            custom_id=f"rr_modal_form_{rr_entry['message_id']}_{member.id}",
+        )
+        self.rr_entry = rr_entry
+        self.member_id = member.id
+
+        roles_data = rr_entry.get("roles", [])
+        current_role_ids = {role.id for role in member.roles}
+        selected_count = sum(
+            1 for role_data in roles_data
+            if role_data["role_id"] in current_role_ids
+        )
+
+        configured_max = rr_entry.get("max_roles")
+        if configured_max:
+            # If an admin lowered the limit after a member already held more
+            # roles, still show every current selection instead of silently
+            # dropping roles when the modal opens.
+            effective_max = max(int(configured_max), selected_count)
+        else:
+            effective_max = len(roles_data)
+        effective_max = max(1, min(effective_max, len(roles_data)))
+        self.validation_max = effective_max if configured_max else None
+
+        options = [
+            discord.SelectOption(
+                label=role_data["label"],
+                value=str(role_data["role_id"]),
+                emoji=role_data.get("emoji") or None,
+                default=role_data["role_id"] in current_role_ids,
+            )
+            for role_data in roles_data
+        ]
+        self.role_select = discord.ui.Select(
+            custom_id=f"rr_modal_select_{rr_entry['message_id']}",
+            placeholder="Select your roles",
+            min_values=0,
+            max_values=effective_max,
+            options=options,
+            required=False,
+        )
+
+        if rr_entry.get("only_add", False):
+            description = "Current roles are selected. This panel only adds roles."
+        elif configured_max:
+            description = f"Current roles are selected. Choose up to {configured_max}."
+        else:
+            description = "Current roles are selected. Uncheck a role to remove it."
+
+        self.add_item(discord.ui.Label(
+            text="Roles",
+            description=description,
+            component=self.role_select,
+        ))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.member_id:
+            return True
+        await interaction.response.send_message(
+            "❌ This role picker belongs to another member.",
+            ephemeral=True,
+        )
+        return False
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _handle_select(
+            interaction,
+            self.role_select.values,
+            self.rr_entry.get("roles", []),
+            self.rr_entry.get("only_add", False),
+            self.validation_max,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error("Reaction role modal failed", exc_info=error)
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "❌ Something went wrong while saving your roles.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ Something went wrong while saving your roles.",
+                ephemeral=True,
+            )
 
 
 async def _handle_select(interaction: discord.Interaction, selected_values: list, roles_data: list, only_add: bool, max_roles):
