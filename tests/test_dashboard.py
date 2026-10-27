@@ -1565,6 +1565,19 @@ class TestDevDashboardRoutes:
         assert "queue.unshift({{ ...currentItem, start_seconds: resumeAt }});" in source
         assert "priorityQueue.length ? priorityQueue.shift() : queue.shift()" in source
 
+    def test_video_overlay_recovers_stale_socket_after_process_restart(self):
+        import inspect
+
+        page_source = inspect.getsource(dashboard_server.overlay_page)
+        socket_source = inspect.getsource(dashboard_server.overlay_ws)
+
+        assert 'payload.get("type") == "ping"' in socket_source
+        assert '"type": "pong"' in socket_source
+        assert 'SOCKET_STALE_AFTER_MS = 30000' in page_source
+        assert 'replaceStaleSocket("Overlay socket heartbeat timed out; reconnecting")' in page_source
+        assert 'socket.send(JSON.stringify({{ type: "ping"' in page_source
+        assert '"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"' in page_source
+
     def test_overlay_chat_sound_is_independent_of_video_queue(self):
         import inspect
         from pathlib import Path
@@ -2048,6 +2061,25 @@ class TestDevDashboardRoutes:
             "stayexcellent666", "!enter", "message-1",
             "viewer-1", "viewer", "Viewer", FakeMessage.channel,
         )]
+
+    def test_chat_sound_ignores_messages_sent_by_the_bot(self):
+        from twitch_bot import _is_own_chat_message
+
+        assert _is_own_chat_message(
+            SimpleNamespace(id="bot-42", name="ExcelTwitch"),
+            "bot-42", "ExcelTwitch",
+        ) is True
+        # Login matching remains a fallback if Twitch omits the user id.
+        assert _is_own_chat_message(
+            SimpleNamespace(id="", name="ExcelTwitch"),
+            "bot-42", "ExcelTwitch",
+        ) is True
+        assert _is_own_chat_message(
+            SimpleNamespace(id="viewer-1", name="Viewer"),
+            "bot-42", "ExcelTwitch",
+        ) is False
+        event_source = inspect.getsource(__import__("twitch_bot").TwitchChatBot.event_message)
+        assert "and not is_bot_message" in event_source
 
     @pytest.mark.asyncio
     async def test_fortuna_test_spin_drives_wheel_and_labels_chat_message(self, monkeypatch):

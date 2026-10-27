@@ -3407,7 +3407,22 @@ async def overlay_ws(request):
         pass
     try:
         async for msg in ws:
-            pass  # overlay only receives, doesn't need to send back
+            # Browser WebSocket state can occasionally remain OPEN after the
+            # Fly process behind it has restarted.  Echo an application-level
+            # heartbeat so the OBS page can detect that half-open connection
+            # and create a fresh socket without a manual cache refresh.
+            if msg.type == http_client.WSMsgType.TEXT:
+                try:
+                    payload = json.loads(msg.data)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if payload.get("type") == "ping":
+                    await ws.send_str(json.dumps({
+                        "type": "pong",
+                        "ts": payload.get("ts"),
+                    }))
+            elif msg.type == http_client.WSMsgType.ERROR:
+                break
     except _asyncio.CancelledError:
         pass
     except Exception as e:
@@ -3741,13 +3756,73 @@ let ws = null;
 let reconnectTimer = null;
 let reconnectDelay = 1000;
 let versionReloadStarted = false;
+let socketHealthTimer = null;
+let lastSocketActivity = 0;
+const SOCKET_PING_INTERVAL_MS = 10000;
+const SOCKET_STALE_AFTER_MS = 30000;
+
+function stopSocketHealthChecks() {{
+  if (socketHealthTimer) clearInterval(socketHealthTimer);
+  socketHealthTimer = null;
+}}
+
+function scheduleOverlayReconnect(delay = reconnectDelay) {{
+  if (reconnectTimer || versionReloadStarted) return;
+  reconnectTimer = setTimeout(() => {{
+    reconnectTimer = null;
+    connectOverlaySocket();
+  }}, delay);
+}}
+
+function replaceStaleSocket(reason) {{
+  console.warn(reason);
+  const staleSocket = ws;
+  ws = null;
+  stopSocketHealthChecks();
+  if (staleSocket) {{
+    // Do not let a late close event from the abandoned socket interfere with
+    // the replacement connection.
+    staleSocket.onopen = null;
+    staleSocket.onmessage = null;
+    staleSocket.onerror = null;
+    staleSocket.onclose = null;
+    try {{ staleSocket.close(); }} catch {{}}
+  }}
+  reconnectDelay = 1000;
+  scheduleOverlayReconnect(100);
+}}
+
+function startSocketHealthChecks(socket) {{
+  stopSocketHealthChecks();
+  lastSocketActivity = Date.now();
+  socketHealthTimer = setInterval(() => {{
+    if (ws !== socket) return;
+    if (socket.readyState !== WebSocket.OPEN) {{
+      replaceStaleSocket("Overlay socket is no longer open; reconnecting");
+      return;
+    }}
+    const now = Date.now();
+    if (now - lastSocketActivity >= SOCKET_STALE_AFTER_MS) {{
+      replaceStaleSocket("Overlay socket heartbeat timed out; reconnecting");
+      return;
+    }}
+    try {{
+      socket.send(JSON.stringify({{ type: "ping", ts: now }}));
+    }} catch {{
+      replaceStaleSocket("Overlay socket heartbeat failed; reconnecting");
+    }}
+  }}, SOCKET_PING_INTERVAL_MS);
+}}
 
 function handleSocketMessage(e) {{
+  lastSocketActivity = Date.now();
   const msg = JSON.parse(e.data);
   console.log("Overlay received:", msg);
+  if (msg.type === "pong") return;
   if (msg.type === "hello") {{
     if (msg.overlay_version && msg.overlay_version !== overlayBuild && !versionReloadStarted) {{
       versionReloadStarted = true;
+      stopSocketHealthChecks();
       const freshUrl = new URL(location.href);
       freshUrl.searchParams.set("overlay_v", msg.overlay_version);
       freshUrl.searchParams.set("reload", String(Date.now()));
@@ -3805,22 +3880,23 @@ function handleSocketMessage(e) {{
 
 function connectOverlaySocket() {{
   if (versionReloadStarted || (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) return;
-  ws = new WebSocket(wsProto + "//" + location.host + "/overlay/" + guildId + "/ws");
-  ws.onopen = () => {{
+  const socket = new WebSocket(wsProto + "//" + location.host + "/overlay/" + guildId + "/ws");
+  ws = socket;
+  socket.onopen = () => {{
+    if (ws !== socket) return;
     console.log("Overlay connected");
     reconnectDelay = 1000;
+    startSocketHealthChecks(socket);
     startChatAudioKeepAlive();
     chatSoundNames.forEach(loadChatSound);
   }};
-  ws.onmessage = handleSocketMessage;
-  ws.onerror = () => {{ try {{ ws.close(); }} catch {{}} }};
-  ws.onclose = () => {{
+  socket.onmessage = handleSocketMessage;
+  socket.onerror = () => {{ try {{ socket.close(); }} catch {{}} }};
+  socket.onclose = () => {{
+    if (ws !== socket) return;
     ws = null;
-    if (reconnectTimer || versionReloadStarted) return;
-    reconnectTimer = setTimeout(() => {{
-      reconnectTimer = null;
-      connectOverlaySocket();
-    }}, reconnectDelay);
+    stopSocketHealthChecks();
+    scheduleOverlayReconnect();
     reconnectDelay = Math.min(10000, reconnectDelay * 1.7);
   }};
 }}

@@ -23,6 +23,18 @@ MASS_SHOUTOUT_EXCLUDED_LOGINS = {
 }
 
 
+def _is_own_chat_message(author, bot_id: str, bot_login: str) -> bool:
+    """Return whether an inbound IRC message was authored by this bot."""
+    author_id = str(getattr(author, "id", "") or "")
+    author_login = str(getattr(author, "name", "") or "").lower()
+    bot_id = str(bot_id or "")
+    bot_login = str(bot_login or "").lower()
+    return bool(
+        (bot_id and author_id == bot_id)
+        or (bot_login and author_login == bot_login)
+    )
+
+
 class TwitchChatBot(commands.Bot):
     def __init__(self, token: str, initial_channels: list, db: Database,
                  twitch_api: TwitchAPI, bot_id: str = None,
@@ -345,11 +357,16 @@ class TwitchChatBot(commands.Bot):
 
         channel_name = str(getattr(message.channel, "name", "") or "").lower()
         author_login = str(getattr(message.author, "name", "") or "").lower()
+        is_bot_message = _is_own_chat_message(
+            message.author,
+            getattr(self, "bot_id", ""),
+            getattr(self, "nick", ""),
+        )
         # Chat activity sounds are intentionally fire-and-forget: an OBS client
         # or database hiccup must never delay normal chat-command handling.
-        # Broadcaster messages are excluded so the streamer does not trigger
-        # their own notification while replying to chat.
-        if channel_name and author_login != channel_name:
+        # Broadcaster and ExcelTwitch messages are excluded so replies, timed
+        # messages, announcements, and other automated output remain silent.
+        if channel_name and author_login != channel_name and not is_bot_message:
             asyncio.create_task(self._notify_chat_activity(channel_name))
 
         if not message.content or not message.content.startswith("!"):
