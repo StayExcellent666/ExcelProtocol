@@ -11,7 +11,7 @@ def _entry(**overrides):
         "guild_id": 987654321,
         "channel_id": 111,
         "title": "Choose the games you play",
-        "type": "modal",
+        "type": "dropdown",
         "only_add": False,
         "max_roles": None,
         "roles": [
@@ -22,16 +22,6 @@ def _entry(**overrides):
     }
     entry.update(overrides)
     return entry
-
-
-def test_modal_panel_builds_one_persistent_launch_button():
-    view = reaction_roles._build_view(_entry(), bot=SimpleNamespace())
-
-    assert len(view.children) == 1
-    button = view.children[0]
-    assert isinstance(button, discord.ui.Button)
-    assert button.label == "Choose Your Roles"
-    assert button.custom_id == "rr_modal_123456789"
 
 
 def test_existing_dropdown_panel_still_builds_its_select_menu():
@@ -56,46 +46,25 @@ def test_existing_button_panel_still_builds_one_button_per_role():
     ]
 
 
-def test_modal_prefills_options_from_members_real_roles():
-    member = SimpleNamespace(
-        id=42,
-        roles=[SimpleNamespace(id=10), SimpleNamespace(id=30)],
-    )
+def test_retired_modal_panel_is_converted_to_dropdown():
+    legacy_entry = _entry(type="modal")
 
-    modal = reaction_roles.ReactionRolePickerModal(_entry(), member)
+    class FakeDB:
+        def __init__(self):
+            self.saved = None
 
-    assert isinstance(modal.role_input, discord.ui.CheckboxGroup)
-    assert modal.role_input.max_values == 3
-    assert [option.default for option in modal.role_input.options] == [True, False, True]
-    assert modal.role_input.required is False
-    assert modal.role_input.min_values == 0
-    assert modal.title == "Choose Your Roles"
-    assert isinstance(modal.children[0], discord.ui.TextDisplay)
-    assert "Choose the games you play" in modal.children[0].content
+        def rr_get_all(self):
+            return [legacy_entry]
 
+        def rr_save(self, **kwargs):
+            self.saved = kwargs
 
-def test_modal_does_not_hide_existing_roles_above_new_limit():
-    member = SimpleNamespace(
-        id=42,
-        roles=[SimpleNamespace(id=10), SimpleNamespace(id=20)],
-    )
+    bot = SimpleNamespace(db=FakeDB())
 
-    modal = reaction_roles.ReactionRolePickerModal(_entry(max_roles=1), member)
+    converted = reaction_roles._retire_modal_panel(bot, legacy_entry)
+    view = reaction_roles._build_view(legacy_entry, bot)
 
-    assert modal.role_input.max_values == 2
-    assert modal.validation_max == 2
-    assert [option.default for option in modal.role_input.options] == [True, True, False]
-
-
-def test_large_modal_panel_uses_dropdown_fallback():
-    roles = [
-        {"label": f"Role {i}", "role_id": i, "emoji": None}
-        for i in range(1, 12)
-    ]
-    member = SimpleNamespace(id=42, roles=[SimpleNamespace(id=1)])
-
-    modal = reaction_roles.ReactionRolePickerModal(_entry(roles=roles), member)
-
-    assert isinstance(modal.role_input, discord.ui.Select)
-    assert modal.role_input.placeholder == "1 selected • Tap to review"
-    assert len(modal.role_input.options) == 11
+    assert converted is True
+    assert legacy_entry["type"] == "dropdown"
+    assert bot.db.saved["rr_type"] == "dropdown"
+    assert isinstance(view.children[0], discord.ui.Select)

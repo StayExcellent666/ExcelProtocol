@@ -1403,12 +1403,12 @@ async def get_roles_list(request):
         return web.json_response([])
 
 # ── Create Reaction Role Panel ────────────────────────────────────────────────
-_REACTION_ROLE_TYPES = frozenset({"buttons", "dropdown", "modal"})
+_REACTION_ROLE_TYPES = frozenset({"buttons", "dropdown"})
 
 
 def _validate_reaction_role_config(rr_type: str, roles: list, max_roles):
     if rr_type not in _REACTION_ROLE_TYPES:
-        raise web.HTTPBadRequest(reason="type must be buttons, dropdown, or modal")
+        raise web.HTTPBadRequest(reason="type must be buttons or dropdown")
     if len(roles) > 25:
         raise web.HTTPBadRequest(reason="Reaction role panels support at most 25 role options")
     if max_roles is None or max_roles == "":

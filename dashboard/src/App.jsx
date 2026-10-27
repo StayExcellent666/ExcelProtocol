@@ -824,12 +824,9 @@ function ReactionRolePanelModal({ guildId, panel, onClose, onSaved }) {
       </Field>
       {!isEdit && <Field label="Channel"><ChannelSelect guildId={guildId} value={channelId} onChange={setChannelId} /></Field>}
       <div style={{ display:"flex", gap:10 }}>
-        <div style={{ flex:1 }}><Field label="Type"><CyanSelect value={type} onChange={e=>setType(e.target.value)}><option value="buttons">Buttons</option><option value="dropdown">Dropdown</option><option value="modal">Modal</option></CyanSelect></Field></div>
+        <div style={{ flex:1 }}><Field label="Type"><CyanSelect value={type} onChange={e=>setType(e.target.value)}><option value="dropdown">Dropdown</option><option value="buttons">Buttons</option></CyanSelect></Field></div>
         <div style={{ flex:1 }}><Field label="Max Roles"><CyanInput value={maxRoles} onChange={e=>setMaxRoles(e.target.value)} type="number" min="1" placeholder="No limit" /></Field></div>
       </div>
-      {type==="modal" && <div style={{ padding:"10px 12px", borderRadius:8, border:"1px solid rgba(0,245,212,0.24)", background:"rgba(0,245,212,0.06)", color:"var(--text2)", fontSize:12, lineHeight:1.5, fontFamily:"'Outfit',sans-serif" }}>
-        Posts a <strong style={{ color:"var(--cyan)" }}>Choose Your Roles</strong> button. Each member gets a private native popup with their current roles already selected.
-      </div>}
       <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:13, color:"var(--text2)", fontFamily:"'Orbitron',sans-serif" }}>
         <input type="checkbox" checked={onlyAdd} onChange={e=>setOnlyAdd(e.target.checked)} style={{ width:14, height:14, accentColor:"var(--cyan)" }} />
         Only allow adding roles (not removing)
