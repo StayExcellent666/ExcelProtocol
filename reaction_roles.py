@@ -434,7 +434,7 @@ class ReactionRolePickerModal(discord.ui.Modal):
     def __init__(self, rr_entry: dict, member: discord.Member):
         panel_title = str(rr_entry.get("title") or "Choose Your Roles")
         super().__init__(
-            title=panel_title[:45],
+            title="Choose Your Roles",
             custom_id=f"rr_modal_form_{rr_entry['message_id']}_{member.id}",
         )
         self.rr_entry = rr_entry
@@ -458,35 +458,74 @@ class ReactionRolePickerModal(discord.ui.Modal):
         effective_max = max(1, min(effective_max, len(roles_data)))
         self.validation_max = effective_max if configured_max else None
 
-        options = [
-            discord.SelectOption(
-                label=role_data["label"],
-                value=str(role_data["role_id"]),
-                emoji=role_data.get("emoji") or None,
-                default=role_data["role_id"] in current_role_ids,
-            )
-            for role_data in roles_data
-        ]
-        self.role_select = discord.ui.Select(
-            custom_id=f"rr_modal_select_{rr_entry['message_id']}",
-            placeholder="Select your roles",
-            min_values=0,
-            max_values=effective_max,
-            options=options,
-            required=False,
-        )
+        body_text = (rr_entry.get("body_text") or "").strip()
+        intro = f"### {panel_title}"
+        if body_text:
+            intro += f"\n{body_text}"
+        intro += "\nYour current roles are already selected."
+        self.add_item(discord.ui.TextDisplay(intro[:4000]))
 
         if rr_entry.get("only_add", False):
-            description = "Current roles are selected. This panel only adds roles."
+            description = f"{selected_count} selected • Existing roles cannot be removed here."
         elif configured_max:
-            description = f"Current roles are selected. Choose up to {configured_max}."
+            description = f"{selected_count} selected • Choose up to {configured_max}."
         else:
-            description = "Current roles are selected. Uncheck a role to remove it."
+            description = f"{selected_count} selected • Uncheck a role to remove it."
+
+        if len(roles_data) <= 10:
+            checkbox_options = []
+            for role_data in roles_data:
+                emoji = role_data.get("emoji") or ""
+                # Unicode emoji render cleanly in checkbox labels. Discord's
+                # custom <:name:id> markup is not supported in this field.
+                label = role_data["label"]
+                if emoji and not emoji.startswith("<"):
+                    label = f"{emoji}  {label}"
+                checkbox_options.append(discord.CheckboxGroupOption(
+                    label=label[:100],
+                    value=str(role_data["role_id"]),
+                    description=(
+                        "Currently assigned"
+                        if role_data["role_id"] in current_role_ids
+                        else None
+                    ),
+                    default=role_data["role_id"] in current_role_ids,
+                ))
+            self.role_input = discord.ui.CheckboxGroup(
+                custom_id=f"rr_modal_checkboxes_{rr_entry['message_id']}",
+                min_values=0,
+                max_values=effective_max,
+                options=checkbox_options,
+                required=False,
+            )
+        else:
+            select_options = [
+                discord.SelectOption(
+                    label=role_data["label"],
+                    value=str(role_data["role_id"]),
+                    emoji=role_data.get("emoji") or None,
+                    description=(
+                        "Currently assigned"
+                        if role_data["role_id"] in current_role_ids
+                        else None
+                    ),
+                    default=role_data["role_id"] in current_role_ids,
+                )
+                for role_data in roles_data
+            ]
+            self.role_input = discord.ui.Select(
+                custom_id=f"rr_modal_select_{rr_entry['message_id']}",
+                placeholder=f"{selected_count} selected • Tap to review",
+                min_values=0,
+                max_values=effective_max,
+                options=select_options,
+                required=False,
+            )
 
         self.add_item(discord.ui.Label(
-            text="Roles",
+            text="Available Roles",
             description=description,
-            component=self.role_select,
+            component=self.role_input,
         ))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -501,7 +540,7 @@ class ReactionRolePickerModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         await _handle_select(
             interaction,
-            self.role_select.values,
+            self.role_input.values,
             self.rr_entry.get("roles", []),
             self.rr_entry.get("only_add", False),
             self.validation_max,

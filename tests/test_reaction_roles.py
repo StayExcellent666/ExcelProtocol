@@ -64,10 +64,14 @@ def test_modal_prefills_options_from_members_real_roles():
 
     modal = reaction_roles.ReactionRolePickerModal(_entry(), member)
 
-    assert modal.role_select.max_values == 3
-    assert [option.default for option in modal.role_select.options] == [True, False, True]
-    assert modal.role_select.required is False
-    assert modal.role_select.min_values == 0
+    assert isinstance(modal.role_input, discord.ui.CheckboxGroup)
+    assert modal.role_input.max_values == 3
+    assert [option.default for option in modal.role_input.options] == [True, False, True]
+    assert modal.role_input.required is False
+    assert modal.role_input.min_values == 0
+    assert modal.title == "Choose Your Roles"
+    assert isinstance(modal.children[0], discord.ui.TextDisplay)
+    assert "Choose the games you play" in modal.children[0].content
 
 
 def test_modal_does_not_hide_existing_roles_above_new_limit():
@@ -78,6 +82,20 @@ def test_modal_does_not_hide_existing_roles_above_new_limit():
 
     modal = reaction_roles.ReactionRolePickerModal(_entry(max_roles=1), member)
 
-    assert modal.role_select.max_values == 2
+    assert modal.role_input.max_values == 2
     assert modal.validation_max == 2
-    assert [option.default for option in modal.role_select.options] == [True, True, False]
+    assert [option.default for option in modal.role_input.options] == [True, True, False]
+
+
+def test_large_modal_panel_uses_dropdown_fallback():
+    roles = [
+        {"label": f"Role {i}", "role_id": i, "emoji": None}
+        for i in range(1, 12)
+    ]
+    member = SimpleNamespace(id=42, roles=[SimpleNamespace(id=1)])
+
+    modal = reaction_roles.ReactionRolePickerModal(_entry(roles=roles), member)
+
+    assert isinstance(modal.role_input, discord.ui.Select)
+    assert modal.role_input.placeholder == "1 selected • Tap to review"
+    assert len(modal.role_input.options) == 11
