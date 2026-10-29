@@ -2115,6 +2115,14 @@ class TwitchNotifierBot(discord.Client):
                 return
 
             if add:
+                from reaction_roles import role_assignment_block_reason
+                blocked = role_assignment_block_reason(guild, role)
+                if blocked:
+                    logger.warning(
+                        "Blocked unsafe live role %s in guild %s: %s",
+                        live_role_id, guild_id, blocked,
+                    )
+                    return
                 await member.add_roles(role, reason="Stream went live")
                 logger.info(f"Assigned live role to {member} in guild {guild_id}")
             else:
@@ -2307,7 +2315,8 @@ class TwitchNotifierBot(discord.Client):
                     for server_data in pending_servers:
                         guild_id = server_data['guild_id']
                         channel_id = server_data.get('custom_channel_id') or server_data['channel_id']
-                        channel = self.get_channel(channel_id)
+                        guild = self.get_guild(guild_id)
+                        channel = guild.get_channel(channel_id) if guild else None
                         if not channel:
                             continue
                         try:
@@ -2563,7 +2572,7 @@ class TwitchNotifierBot(discord.Client):
             # Bug 3 fix: honour custom_channel_id so the stored channel_id matches
             # where the message is actually sent (mirrors repostlive behaviour).
             effective_channel_id = server_data.get('custom_channel_id') or server_data['channel_id']
-            channel = self.get_channel(effective_channel_id)
+            channel = guild.get_channel(effective_channel_id) if guild else None
 
             if not channel:
                 logger.warning(f"Channel {effective_channel_id} not found")
@@ -2738,6 +2747,7 @@ class TwitchNotifierBot(discord.Client):
             
             for server_data in monitoring_servers:
                 guild_id = server_data['guild_id']
+                guild = self.get_guild(guild_id)
 
                 # The rows in notification_messages are live-state tracking,
                 # not permanent history.  When auto-delete is disabled the
@@ -2750,7 +2760,7 @@ class TwitchNotifierBot(discord.Client):
 
                     for msg_data in messages:
                         try:
-                            channel = self.get_channel(msg_data['channel_id'])
+                            channel = guild.get_channel(msg_data['channel_id']) if guild else None
                             if channel:
                                 message = await channel.fetch_message(msg_data['message_id'])
                                 await message.delete()
@@ -3137,7 +3147,7 @@ class TwitchNotifierBot(discord.Client):
                 channel_ids.add(s.get('custom_channel_id') or s['channel_id'])
 
             for channel_id in channel_ids:
-                channel = self.get_channel(channel_id)
+                channel = guild.get_channel(channel_id)
                 if not channel:
                     continue
                 perms = channel.permissions_for(guild.me)
@@ -3203,10 +3213,10 @@ class TwitchNotifierBot(discord.Client):
     async def cleanup_channel(self, guild_id: int, channel_id: int, interval_hours: int, keep_pinned: bool) -> int:
         """Clean up old messages in a channel"""
         try:
-            channel = self.get_channel(channel_id)
+            guild = self.get_guild(guild_id)
+            channel = guild.get_channel(channel_id) if guild else None
             
             if not channel:
-                guild = self.get_guild(guild_id)
                 guild_name = guild.name if guild else str(guild_id)
                 logger.warning(f"Channel {channel_id} not found for cleanup in guild {guild_name} ({guild_id})")
                 await self.log_to_channel(
@@ -3826,7 +3836,7 @@ async def test_notification(interaction: discord.Interaction):
     if not channel_id:
         channel_id = interaction.channel_id
     
-    channel = bot.get_channel(channel_id)
+    channel = interaction.guild.get_channel(channel_id)
     
     if not channel:
         await interaction.response.send_message(
@@ -4286,7 +4296,7 @@ async def cleanup_list(interaction: discord.Interaction):
     )
     
     for config in configs:
-        channel_obj = bot.get_channel(config['channel_id'])
+        channel_obj = interaction.guild.get_channel(config['channel_id'])
         channel_name = channel_obj.mention if channel_obj else f"Unknown Channel ({config['channel_id']})"
         hours = config['interval_hours']
         days = hours // 24
@@ -4676,7 +4686,7 @@ async def server_details(interaction: discord.Interaction, server_id: str = None
     
     # Notification channel
     notif_channel_id = bot.db.get_notification_channel(guild_id)
-    notif_channel = bot.get_channel(notif_channel_id) if notif_channel_id else None
+    notif_channel = guild.get_channel(notif_channel_id) if notif_channel_id else None
     
     embed.add_field(
         name="🔔 Notification Channel",
@@ -4706,7 +4716,7 @@ async def server_details(interaction: discord.Interaction, server_id: str = None
     if cleanup_configs:
         cleanup_list = []
         for config in cleanup_configs[:5]:
-            channel = bot.get_channel(config['channel_id'])
+            channel = guild.get_channel(config['channel_id'])
             channel_name = channel.mention if channel else f"Unknown ({config['channel_id']})"
             cleanup_list.append(f"• {channel_name}: {config['interval_hours']}h")
         
@@ -4782,7 +4792,7 @@ async def manual_notif(
     if not channel:
         channel_id = bot.db.get_notification_channel(interaction.guild_id)
         if channel_id:
-            channel = bot.get_channel(channel_id)
+            channel = interaction.guild.get_channel(channel_id)
     
     if not channel:
         await interaction.followup.send(
@@ -4947,7 +4957,7 @@ async def notif_log(interaction: discord.Interaction, streamer: str, limit: int 
     else:
         lines_out = []
         for entry in logs:
-            channel = bot.get_channel(entry['channel_id'])
+            channel = interaction.guild.get_channel(entry['channel_id'])
             channel_str = f"<#{entry['channel_id']}>" if channel else f"`#{entry['channel_id']}`"
             status_emoji = "✅" if entry['status'] == 'sent' else "❌"
             lines_out.append(f"{status_emoji} `{entry['sent_at']}` → {channel_str}")

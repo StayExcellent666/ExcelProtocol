@@ -7,6 +7,50 @@ import time
 
 logger = logging.getLogger(__name__)
 
+
+# Roles carrying any of these permissions must never be exposed through a
+# self-service reaction-role panel.  Even when Discord's hierarchy would let
+# the bot assign one, doing so would turn the bot into a privilege-escalation
+# proxy for ordinary members.
+_PRIVILEGED_ROLE_PERMISSIONS = (
+    "administrator",
+    "manage_guild",
+    "manage_roles",
+    "manage_channels",
+    "manage_webhooks",
+    "manage_messages",
+    "manage_threads",
+    "manage_events",
+    "manage_expressions",
+    "view_audit_log",
+    "view_guild_insights",
+    "kick_members",
+    "ban_members",
+    "moderate_members",
+    "mute_members",
+    "deafen_members",
+    "move_members",
+    "mention_everyone",
+)
+
+
+def role_assignment_block_reason(guild, role) -> str | None:
+    """Return why a role cannot safely be delegated, or ``None`` if safe."""
+    if role is None or guild is None:
+        return "Role does not belong to this server"
+    if int(getattr(role, "id", 0) or 0) == int(getattr(guild, "id", -1)):
+        return "The @everyone role cannot be self-assigned"
+    if getattr(role, "managed", False):
+        return "Discord-managed roles cannot be self-assigned"
+    bot_member = getattr(guild, "me", None)
+    bot_top_role = getattr(bot_member, "top_role", None)
+    if bot_top_role is None or role.position >= bot_top_role.position:
+        return "That role is at or above the bot's highest role"
+    permissions = getattr(role, "permissions", None)
+    if any(getattr(permissions, name, False) for name in _PRIVILEGED_ROLE_PERMISSIONS):
+        return "Privileged moderator or administrator roles cannot be self-assigned"
+    return None
+
 RR_DATA_PATH = "/data/reaction_roles.json"
 DEFAULT_COLOR = 0x00FFFF
 
@@ -422,6 +466,13 @@ async def _handle_select(interaction: discord.Interaction, selected_values: list
             role = guild.get_role(role_id)
             if not role:
                 continue
+            blocked = role_assignment_block_reason(guild, role)
+            if blocked:
+                logger.warning(
+                    "Blocked unsafe reaction role %s in guild %s: %s",
+                    role_id, getattr(guild, "id", "unknown"), blocked,
+                )
+                continue
             if role_id in selected_ids:
                 if role not in member.roles:
                     roles_to_add.append(role)
@@ -458,6 +509,18 @@ async def _handle_button(interaction: discord.Interaction, role_id: int, only_ad
 
     if not role:
         await interaction.response.send_message("❌ That role no longer exists.", ephemeral=True)
+        return
+
+    blocked = role_assignment_block_reason(guild, role)
+    if blocked:
+        logger.warning(
+            "Blocked unsafe reaction role %s in guild %s: %s",
+            role_id, getattr(guild, "id", "unknown"), blocked,
+        )
+        await interaction.response.send_message(
+            "❌ This role is not safe for self-assignment. Ask a server administrator to update this panel.",
+            ephemeral=True,
+        )
         return
 
     try:
@@ -515,7 +578,8 @@ async def restore_views(bot):
             legacy_modal = _retire_modal_panel(bot, entry)
             view = _build_view(entry, bot)
             if legacy_modal:
-                channel = bot.get_channel(entry["channel_id"])
+                guild = bot.get_guild(entry["guild_id"])
+                channel = guild.get_channel(entry["channel_id"]) if guild else None
                 if channel:
                     message = await channel.fetch_message(entry["message_id"])
                     await message.edit(view=view)
@@ -659,7 +723,8 @@ async def setup(bot):
             view = _build_view(entry, bot)
 
             try:
-                channel = bot.get_channel(session["channel_id"])
+                guild = bot.get_guild(session["guild_id"])
+                channel = guild.get_channel(session["channel_id"]) if guild else None
                 if not channel:
                     await interaction.followup.send("❌ Could not find the original channel.", ephemeral=True)
                     return
@@ -753,7 +818,7 @@ async def setup(bot):
         view = _build_view(entry, bot)
 
         try:
-            channel = bot.get_channel(entry["channel_id"])
+            channel = interaction.guild.get_channel(entry["channel_id"])
             msg = await channel.fetch_message(int(message_id))
             await msg.edit(embed=embed, view=view)
             bot.add_view(view, message_id=int(message_id))
@@ -783,7 +848,7 @@ async def setup(bot):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            channel = bot.get_channel(entry["channel_id"])
+            channel = interaction.guild.get_channel(entry["channel_id"])
             if channel:
                 msg = await channel.fetch_message(int(message_id))
                 await msg.delete()
@@ -811,7 +876,7 @@ async def setup(bot):
         embed = discord.Embed(title="📋 Reaction Role Messages", color=_get_embed_color(interaction.guild_id))
 
         for entry in panels:
-            channel = bot.get_channel(entry["channel_id"])
+            channel = interaction.guild.get_channel(entry["channel_id"])
             channel_mention = f"<#{entry['channel_id']}>" if channel else "unknown channel"
             role_names = ", ".join(r["label"] for r in entry["roles"])
             embed.add_field(

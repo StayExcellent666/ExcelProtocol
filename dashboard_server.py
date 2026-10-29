@@ -614,6 +614,116 @@ def _session_can_manage_guild(session: dict, guild_id: str) -> bool:
         for guild in session.get("guilds", [])
     )
 
+
+async def _session_has_live_guild_permission(
+    session: dict, guild_id: str, permission: str = "manage_guild"
+) -> bool:
+    """Revalidate a dashboard user's Discord permission against live bot state.
+
+    OAuth guild permissions are captured at login and can otherwise remain stale
+    for the seven-day dashboard session.  Owner/admin dashboard sessions are
+    intentionally global; ordinary server managers must still hold the requested
+    Discord permission when each guild-scoped request is made.
+    """
+    if session.get("dev") or session.get("admin"):
+        return True
+    if _bot_ref is None or not session.get("user_id"):
+        return False
+    try:
+        guild = _bot_ref.get_guild(int(guild_id))
+        if guild is None:
+            return False
+        user_id = int(session["user_id"])
+        if int(getattr(guild, "owner_id", 0) or 0) == user_id:
+            return True
+        member = guild.get_member(user_id)
+        if member is None:
+            member = await guild.fetch_member(user_id)
+        permissions = member.guild_permissions
+        return bool(
+            getattr(permissions, "administrator", False)
+            or getattr(permissions, permission, False)
+        )
+    except Exception as exc:
+        logger.warning(
+            "Live Discord authorization failed for user %s in guild %s: %s",
+            session.get("user_id"), guild_id, exc,
+        )
+        return False
+
+
+async def _require_live_guild_permission(
+    request: web.Request, permission: str = "manage_guild"
+) -> None:
+    guild_id = str(request.match_info.get("guild_id") or "")
+    if not guild_id or not await _session_has_live_guild_permission(
+        request["session"], guild_id, permission
+    ):
+        raise web.HTTPForbidden(
+            reason=f"Your current Discord account no longer has {permission.replace('_', ' ')} permission in this server"
+        )
+
+
+def _require_guild_channel(guild_id: str, channel_id):
+    """Resolve a Discord channel only inside the guild named by the route."""
+    if _bot_ref is None:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    try:
+        guild = _bot_ref.get_guild(int(guild_id))
+        channel = guild.get_channel(int(channel_id)) if guild else None
+    except (TypeError, ValueError):
+        channel = None
+    if channel is None:
+        raise web.HTTPBadRequest(reason="Channel does not belong to this server")
+    return channel
+
+
+async def _require_guild_role(guild_id: str, role_id):
+    """Resolve a Discord role only inside the guild named by the route."""
+    if _bot_ref is None:
+        raise web.HTTPServiceUnavailable(reason="Bot is not ready")
+    try:
+        guild = _bot_ref.get_guild(int(guild_id))
+        role = guild.get_role(int(role_id)) if guild else None
+        if guild and role is None:
+            role = next(
+                (candidate for candidate in await guild.fetch_roles()
+                 if candidate.id == int(role_id)),
+                None,
+            )
+    except (TypeError, ValueError):
+        guild = role = None
+    if guild is None or role is None:
+        raise web.HTTPBadRequest(reason="Role does not belong to this server")
+    return guild, role
+
+
+async def _require_safe_assignable_role(request: web.Request, role_id):
+    """Require a role the actor and bot may safely delegate to members."""
+    guild_id = str(request.match_info["guild_id"])
+    guild, role = await _require_guild_role(guild_id, role_id)
+    import reaction_roles as rr_module
+
+    blocked = rr_module.role_assignment_block_reason(guild, role)
+    if blocked:
+        raise web.HTTPBadRequest(reason=blocked)
+
+    session = request["session"]
+    if not (session.get("dev") or session.get("admin")):
+        user_id = int(session["user_id"])
+        if int(getattr(guild, "owner_id", 0) or 0) != user_id:
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except Exception:
+                    member = None
+            if member is None or role.position >= member.top_role.position:
+                raise web.HTTPForbidden(
+                    reason="You cannot delegate a role at or above your highest Discord role"
+                )
+    return role
+
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     public = ("/health", "/", "/terms", "/privacy", "/auth/login", "/auth/callback", "/auth/logout", "/auth/twitch/callback", "/api/eventsub/callback")
@@ -630,6 +740,18 @@ async def auth_middleware(request: web.Request, handler):
         raise web.HTTPForbidden(reason="You do not have access to this guild")
 
     request["session"] = session
+    if guild_id and not await _session_has_live_guild_permission(
+        session, guild_id, "manage_guild"
+    ):
+        # Remove revoked access from the in-memory session immediately so the
+        # stale OAuth snapshot cannot authorize later requests.
+        session["guilds"] = [
+            guild for guild in session.get("guilds", [])
+            if str(guild.get("id")) != str(guild_id)
+        ]
+        raise web.HTTPForbidden(
+            reason="Your Discord Manage Server permission has been removed"
+        )
     return await handler(request)
 
 
@@ -1219,6 +1341,7 @@ async def add_streamer(request):
 
     if not twitch_username or not channel_id:
         raise web.HTTPBadRequest(reason="twitch_username and channel_id are required")
+    _require_guild_channel(guild_id, channel_id)
 
     # Verify the Twitch account actually exists
     if _bot_ref:
@@ -1463,6 +1586,7 @@ async def create_reaction_role(request):
     if not title or not channel_id or not roles:
         raise web.HTTPBadRequest(reason="title, channel_id and roles are required")
     max_roles = _validate_reaction_role_config(rr_type, roles, max_roles)
+    await _require_live_guild_permission(request, "manage_roles")
 
     # Resolve any __create__ role IDs first
     for r in roles:
@@ -1477,6 +1601,7 @@ async def create_reaction_role(request):
     # Convert role_id strings to ints as reaction_roles.py expects
     for r in roles:
         r["role_id"] = int(r["role_id"])
+        await _require_safe_assignable_role(request, r["role_id"])
 
     # Post a placeholder message first to get the message_id, then build the proper view
     guild = _bot_ref.get_guild(int(guild_id))
@@ -1546,6 +1671,7 @@ async def edit_streamer(request):
     channel_id = body.get("channel_id")
     if not channel_id:
         raise web.HTTPBadRequest(reason="channel_id is required")
+    _require_guild_channel(guild_id, channel_id)
     await db_execute(
         "UPDATE monitored_streamers SET custom_channel_id = ? WHERE guild_id = ? AND streamer_name = ?",
         (channel_id, guild_id, username.lower()),
@@ -1562,6 +1688,8 @@ async def edit_reaction_role(request):
 
     if _bot_ref is None:
         raise web.HTTPInternalServerError(reason="Bot not available")
+
+    await _require_live_guild_permission(request, "manage_roles")
 
     import reaction_roles as rr_module
     import discord
@@ -1582,6 +1710,11 @@ async def edit_reaction_role(request):
         for r in body["roles"]:
             r["role_id"] = await _resolve_role_id(guild_id, str(r.get("role_id", "")), r.get("new_role_name"))
         entry["roles"] = [{**r, "role_id": int(r["role_id"])} for r in body["roles"]]
+
+    # Validate the complete resulting panel, including roles retained during a
+    # title-only edit.  Existing unsafe panels are also blocked at click time.
+    for role_entry in entry.get("roles", []):
+        await _require_safe_assignable_role(request, role_entry.get("role_id"))
 
     entry["max_roles"] = _validate_reaction_role_config(
         entry["type"], entry["roles"], entry.get("max_roles")
@@ -1958,6 +2091,10 @@ async def get_welcome_settings(request):
 async def save_welcome_settings(request):
     guild_id = request.match_info["guild_id"]
     body     = await request.json()
+    if body.get("welcome_channel_id"):
+        _require_guild_channel(guild_id, body["welcome_channel_id"])
+    if body.get("goodbye_channel_id"):
+        _require_guild_channel(guild_id, body["goodbye_channel_id"])
     await db_execute(
         """INSERT INTO welcome_settings
            (guild_id, welcome_enabled, goodbye_enabled, welcome_channel_id, goodbye_channel_id, welcome_message, goodbye_message)
@@ -2239,6 +2376,7 @@ async def patch_server_settings(request):
 
     if "notification_channel_id" in body:
         cid = int(body["notification_channel_id"])
+        _require_guild_channel(guild_id, cid)
         await db_execute(
             "INSERT INTO server_settings (guild_id, notification_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET notification_channel_id = ?",
             (guild_id, cid, cid)
@@ -2274,6 +2412,7 @@ async def patch_server_settings(request):
 
     if "birthday_channel_id" in body:
         cid = int(body["birthday_channel_id"])
+        _require_guild_channel(guild_id, cid)
         await db_execute(
             "INSERT INTO birthday_channels (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id = ?",
             (guild_id, cid, cid)
@@ -2287,6 +2426,7 @@ async def patch_server_settings(request):
                 (guild_id,)
             )
         else:
+            await _require_live_guild_permission(request, "manage_roles")
             resolved = await _resolve_role_id(
                 guild_id,
                 str(raw),
@@ -2294,6 +2434,7 @@ async def patch_server_settings(request):
                 body.get("new_role_color"),
             )
             rid = int(resolved)
+            await _require_safe_assignable_role(request, rid)
             await db_execute(
                 "INSERT INTO server_settings (guild_id, notification_channel_id, live_role_id) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET live_role_id = ?",
                 (guild_id, rid, rid)
@@ -2308,6 +2449,7 @@ async def patch_server_settings(request):
                 (guild_id,)
             )
         else:
+            await _require_live_guild_permission(request, "manage_roles")
             # May be "__create__" with accompanying new_role_name / new_role_color
             resolved = await _resolve_role_id(
                 guild_id,
@@ -2316,6 +2458,7 @@ async def patch_server_settings(request):
                 body.get("new_role_color"),
             )
             rid = int(resolved)
+            await _require_guild_role(guild_id, rid)
             await db_execute(
                 "INSERT INTO server_settings (guild_id, notification_channel_id, ping_role_id) VALUES (?, 0, ?) ON CONFLICT(guild_id) DO UPDATE SET ping_role_id = ?",
                 (guild_id, rid, rid)
@@ -2324,6 +2467,16 @@ async def patch_server_settings(request):
     return web.json_response({"ok": True})
 
 # ── Cleanup Configs ───────────────────────────────────────────────────────────
+def _validate_cleanup_interval(value) -> int:
+    try:
+        interval_hours = int(value)
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(reason="interval_hours must be a number")
+    if not 1 <= interval_hours <= 8760:
+        raise web.HTTPBadRequest(reason="interval_hours must be between 1 and 8760")
+    return interval_hours
+
+
 async def get_cleanup_configs(request):
     guild_id = request.match_info["guild_id"]
     rows = await db_fetch(
@@ -2349,24 +2502,32 @@ async def add_cleanup_config(request):
     keep_pinned = body.get("keep_pinned", True)
     if not channel_id or not interval_hours:
         raise web.HTTPBadRequest(reason="channel_id and interval_hours are required")
+    _require_guild_channel(guild_id, channel_id)
+    interval_hours = _validate_cleanup_interval(interval_hours)
+    if type(keep_pinned) is not bool:
+        raise web.HTTPBadRequest(reason="keep_pinned must be a boolean")
     await db_execute(
         "INSERT INTO cleanup_configs (guild_id, channel_id, interval_hours, keep_pinned) VALUES (?, ?, ?, ?) ON CONFLICT(guild_id, channel_id) DO UPDATE SET interval_hours = ?, keep_pinned = ?",
-        (guild_id, int(channel_id), int(interval_hours), 1 if keep_pinned else 0, int(interval_hours), 1 if keep_pinned else 0)
+        (guild_id, int(channel_id), interval_hours, 1 if keep_pinned else 0, interval_hours, 1 if keep_pinned else 0)
     )
     return web.json_response({"ok": True})
 
 async def edit_cleanup_config(request):
     guild_id = request.match_info["guild_id"]
     channel_id = request.match_info["channel_id"]
+    _require_guild_channel(guild_id, channel_id)
     body = await request.json()
     interval_hours = body.get("interval_hours")
     keep_pinned = body.get("keep_pinned")
     if interval_hours is not None:
+        interval_hours = _validate_cleanup_interval(interval_hours)
         await db_execute(
             "UPDATE cleanup_configs SET interval_hours = ? WHERE guild_id = ? AND channel_id = ?",
-            (int(interval_hours), guild_id, int(channel_id))
+            (interval_hours, guild_id, int(channel_id))
         )
     if keep_pinned is not None:
+        if type(keep_pinned) is not bool:
+            raise web.HTTPBadRequest(reason="keep_pinned must be a boolean")
         await db_execute(
             "UPDATE cleanup_configs SET keep_pinned = ? WHERE guild_id = ? AND channel_id = ?",
             (1 if keep_pinned else 0, guild_id, int(channel_id))
@@ -2948,6 +3109,8 @@ async def twitch_broadcaster_login(request):
         raise web.HTTPFound(f"/auth/login")
     if not _session_can_manage_guild(session, guild_id):
         raise web.HTTPForbidden(reason="Manage Server permission is required")
+    if not await _session_has_live_guild_permission(session, guild_id, "manage_guild"):
+        raise web.HTTPForbidden(reason="Your Discord Manage Server permission has been removed")
 
     # Generate a random state and store guild_id + session cookie so callback can verify both
     state = secrets.token_hex(16)
@@ -3035,6 +3198,8 @@ async def twitch_broadcaster_callback(request):
     # Verify the session still has access to this guild
     if not _session_can_access_guild(session, guild_id):
         raise web.HTTPForbidden(reason="You no longer have access to this guild")
+    if not await _session_has_live_guild_permission(session, guild_id, "manage_guild"):
+        raise web.HTTPForbidden(reason="Your Discord Manage Server permission has been removed")
 
     sess = get_http_session()
     # Exchange code for tokens
@@ -4521,6 +4686,7 @@ async def set_vc_settings(request):
     name_template      = body.get("name_template", "{username}'s VC").strip() or "{username}'s VC"
     if not trigger_channel_id:
         raise web.HTTPBadRequest(reason="trigger_channel_id is required")
+    _require_guild_channel(guild_id, trigger_channel_id)
     import asyncio as _asyncio
     if _bot_ref:
         await _asyncio.get_event_loop().run_in_executor(None, lambda: _bot_ref.db.set_vc_settings(
@@ -4587,6 +4753,7 @@ async def set_stat_channel(request):
     fmt = body.get("format", "Members: {count}").strip()
     if not channel_id:
         raise web.HTTPBadRequest(reason="channel_id is required")
+    _require_guild_channel(guild_id, channel_id)
     if "{count}" not in fmt:
         raise web.HTTPBadRequest(reason="format must contain {count}")
     await db_execute(
