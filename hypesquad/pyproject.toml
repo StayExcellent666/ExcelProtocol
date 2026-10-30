@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excelprotocol-hypesquad"
+version = "0.1.0"
+description = "Standalone cross-server Hyperaid coordination service for ExcelProtocol"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.11,<4",
+  "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+excelprotocol-hypesquad = "excelprotocol_hypesquad.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
