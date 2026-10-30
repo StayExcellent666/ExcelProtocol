@@ -1,9 +1,0 @@
-.env
-*.db
-*.db-shm
-*.db-wal
-.pytest_cache/
-.test-tmp/
-__pycache__/
-*.egg-info/
-
